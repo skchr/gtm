@@ -1,0 +1,7 @@
+nimcache/
+nimblecache/
+bin/
+*.exe
+*.o
+*.so
+*.dynlib
