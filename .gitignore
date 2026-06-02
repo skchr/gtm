@@ -5,3 +5,5 @@ bin/
 *.o
 *.so
 *.dynlib
+*.mp3
+song.mp3

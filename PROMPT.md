@@ -1,0 +1,14 @@
+- Currently, no audio playback is being produced even when I open a file.
+- The project is referring to hardcoded paths for loading the needed dependencies. Make sure that all paths are cross machine compatible
+- There's a bar on the right side of the page below. What does it do ?
+- When the user is adjusting the volume, show a visual cue (make it unobtrusive in the UI)
+- There's incomplete features, such as the playlist creation and management logic. Properly plan them and refer to other approaches from other players if possible.
+- The tabs are not displaying really nicely. When a tab is active, change the background color and properly surround the tab number by '[]'.
+- On the song details section, hide the fields that are 'Unknown' e.g 'Unknown Artist'
+- During playback, show [elapsed time]/[remaining time]
+- Ensure that navigation works as expected on all tabs
+- Add more commands to the command palette. Ensure that the commands make sense. Also the navigation is not working on the command palette. Trigger the search for the commands using '/'.
+- Make sure that the visual cues for actions are properly shown e.g if when mute or pause update the related icon accordingly/
+- Look at adding support for crossfade/gapless and other common music player features like shuffle and repeat and sleep (shutdown after playing for x minutes)
+- Add support for cover art preview and use a default ASCII based default for songs with no album art cover
+- Ensure that the player supports sending commands to its daemon using socat (or similar) such that a user can control the music player from any terminal app like Neovim.

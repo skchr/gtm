@@ -1,0 +1,68 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "gtm Configuration",
+  "description": "Configuration schema for gtm — a TUI music player",
+  "type": "object",
+  "properties": {
+    "theme": {
+      "description": "Theme seed for procedural color generation. Any string is valid; common presets: mocha, macchiato, frappe, latte, gruvbox-dark, gruvbox-light, dracula, tokyo-night, tokyo-night-storm, ayu-dark, ayu-light, random",
+      "type": "string",
+      "default": "mocha"
+    },
+    "refresh_theme": {
+      "description": "Generate new colors on each launch from a fresh random seed (ignored unless theme='random' or true)",
+      "type": "boolean",
+      "default": false
+    },
+    "volume": {
+      "description": "Initial volume level (0-100)",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100,
+      "default": 80
+    },
+    "idle_timeout": {
+      "description": "Seconds of idle playback before daemon auto-exits",
+      "type": "integer",
+      "minimum": 30,
+      "maximum": 3600,
+      "default": 300
+    },
+    "last_tab": {
+      "description": "Last active tab on quit",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4,
+      "default": 1
+    },
+    "visualizer": {
+      "type": "object",
+      "description": "Visualizer settings",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "bar_count": {
+          "type": "integer",
+          "minimum": 4,
+          "maximum": 64,
+          "default": 32
+        }
+      },
+      "additionalProperties": false
+    },
+    "keybindings": {
+      "type": "object",
+      "description": "Custom keybinding overrides",
+      "patternProperties": {
+        "^[A-Za-z0-9_]+$": {
+          "type": "string",
+          "description": "Command ID to bind"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
