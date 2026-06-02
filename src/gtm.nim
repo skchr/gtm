@@ -330,6 +330,19 @@ proc dispatchCommand(state: var AppState, cmdId: string) =
         state.playlistInputActive = true
         state.playlistInputPrompt = "Rename Playlist:"
         state.playlistInputBuffer = state.libraryPlaylists[idx].name
+  of "import_m3u":
+    state.playlistInputActive = true
+    state.playlistInputPrompt = "Import M3U path:"
+    state.playlistInputBuffer = ""
+  of "export_m3u":
+    state.saveCurrentQueue()
+  of "rescan_library":
+    state.libraryTracks = @[]
+    state.loadLibrary()
+    state.rebuildDisplayItems()
+  of "show_now_playing":
+    state.tab = tabNowPlaying
+    state.rebuildDisplayItems()
   else: discard
 
 proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
@@ -397,6 +410,18 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
             if state.player of DaemonClient:
               discard DaemonClient(state.player).renamePlaylist(plId, state.playlistInputBuffer)
             state.libraryPlaylists[idx].name = state.playlistInputBuffer
+            state.rebuildDisplayItems()
+        elif state.playlistInputPrompt.contains("Import M3U"):
+          let p = state.playlistInputBuffer
+          if fileExists(p):
+            let paths = parseM3u(p)
+            for path in paths:
+              let (_, name, _) = splitFile(path)
+              let title = name.replace(".", " ")
+              state.libraryTracks.add(Track(
+                path: path, title: title, artist: "", album: "",
+                duration: 0.0, id: int64(state.libraryTracks.len + 1)
+              ))
             state.rebuildDisplayItems()
         else:
           if state.player of DaemonClient:

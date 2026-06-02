@@ -110,3 +110,17 @@ proc buildDefaultCommands*(state: var AppState) =
     "Open theme picker with live preview", "\U0001F3A8", @["T"])
   state.registerCommand("save_playlist", "Save Playlist",
     "Save current queue as a playlist file", "\U0001F4BE", @["CtrlS"])
+  state.registerCommand("create_playlist", "Create Playlist",
+    "Create a new playlist", "\U0001F4CB", @["a"])
+  state.registerCommand("delete_playlist", "Delete Playlist",
+    "Delete the selected playlist", "\u274C", @["d"])
+  state.registerCommand("rename_playlist", "Rename Playlist",
+    "Rename the selected playlist", "\U0001F4DD", @["r"])
+  state.registerCommand("import_m3u", "Import M3U",
+    "Import a playlist from .m3u file", "\U0001F4C2", @["CtrlO"])
+  state.registerCommand("export_m3u", "Export M3U",
+    "Export playlist to .m3u file", "\U0001F4E4", @["CtrlS"])
+  state.registerCommand("rescan_library", "Rescan Library",
+    "Rescan music directories for new files", "\U0001F504", @[""])
+  state.registerCommand("show_now_playing", "Show Now Playing",
+    "Jump to Now Playing view", "\U0001F3B5", @[""])

@@ -384,13 +384,13 @@ method render*(node: CommandPaletteOverlay, ctx: var nw.Context[AppState]) =
   if w < 20 or h < 8: return
   let theme = ctx.data.theme
   let boxW = min(50, w - 8)
-  let boxH = min(20, h - 4)
+  let boxH = min(24, h - 4)
   let boxX = (w - boxW) div 2
   let boxY = (h - boxH) div 2
   fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.surface0)
   writeStr(ctx.tb, boxX + 1, boxY, "\u2328 Commands", theme.mauve)
   writeStr(ctx.tb, boxX + 1, boxY + 1, "\u2500".repeat(boxW - 2), theme.surface2)
-  let displayResults = min(10, ctx.data.paletteResults.len)
+  let displayResults = min(20, ctx.data.paletteResults.len)
   for i in 0..<displayResults:
     let idx = ctx.data.paletteResults[i]
     if idx < 0 or idx >= ctx.data.commands.len: continue
