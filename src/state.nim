@@ -117,6 +117,11 @@ type
     volumeCueTimer*: int
     volumeCueVolume*: int
     prevVolume*: int
+    playlistContentsIdx*: int
+    playlistContentsTracks*: seq[int64]
+    playlistInputActive*: bool
+    playlistInputPrompt*: string
+    playlistInputBuffer*: string
 
 const
   GTM_VERSION* = "0.2.0"

@@ -192,14 +192,43 @@ method render*(node: PlaylistsView, ctx: var nw.Context[AppState]) =
   if w < 4 or h < 2: return
   let state = ctx.data
   let theme = state.theme
+  let plIc = currentIcons()
   fillBg(ctx.tb, 0, 0, w - 1, h - 1, theme.base)
   fillBg(ctx.tb, 0, 0, w - 1, 0, theme.mantle)
+  if state.playlistContentsIdx >= 0:
+    writeStr(ctx.tb, 1, 0, plIc.arrowLeft & " " & plIc.playlist & " Playlist Contents", theme.peach)
+    let plIdx = state.playlistContentsIdx
+    if plIdx >= 0 and plIdx < state.libraryPlaylists.len:
+      let pl = state.libraryPlaylists[plIdx]
+      writeStr(ctx.tb, 1, 1, pl.name, theme.blue)
+      writeStr(ctx.tb, 3 + pl.name.runeLen, 1, $pl.trackIds.len & " tracks", theme.subtext0)
+      if pl.trackIds.len == 0:
+        writeStr(ctx.tb, 1, 3, "No tracks in this playlist.", theme.subtext0)
+        return
+      var line = 3
+      let count = state.filteredCount()
+      let startIdx = max(0, state.selectIndex - (h - 4) div 2)
+      let endIdx = min(count, startIdx + h - 2)
+      for i in startIdx..<endIdx:
+        let realIdx = state.filteredIndex(i)
+        let isSelected = (i == state.selectIndex)
+        if isSelected:
+          fillBg(ctx.tb, 0, line, w - 1, line, theme.surface2)
+        if realIdx >= 0 and realIdx < pl.trackIds.len:
+          let tid = pl.trackIds[realIdx]
+          var trackLabel = $tid
+          for t in state.libraryTracks:
+            if t.id == tid:
+              trackLabel = t.displayName()
+              break
+          writeStr(ctx.tb, 2, line, trackLabel, if isSelected: theme.blue else: theme.text)
+        line.inc
+    return
   writeStr(ctx.tb, 1, 0, "Playlists", theme.peach)
   let pls = state.libraryPlaylists
   if pls.len == 0:
     writeStr(ctx.tb, 1, 1, "No playlists yet. Use 'a' to create one.", theme.subtext0)
     return
-  let plIc = currentIcons()
   var line = 1
   for i, pl in pls:
     let isSelected = (i == state.selectIndex)
@@ -496,6 +525,21 @@ method render*(node: ThemePickerOverlay, ctx: var nw.Context[AppState]) =
   else:
     writeStr(ctx.tb, boxX + 1, boxY + boxH - 1, "> Type to search...", theme.subtext0)
 
+type PlaylistInputOverlay* = ref object of nw.Node
+method render*(node: PlaylistInputOverlay, ctx: var nw.Context[AppState]) =
+  let w = iw.width(ctx.tb)
+  let h = iw.height(ctx.tb)
+  if w < 20 or h < 8: return
+  let theme = ctx.data.theme
+  let boxW = min(50, w - 8)
+  let boxH = 5
+  let boxX = (w - boxW) div 2
+  let boxY = (h - boxH) div 2
+  fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.surface0)
+  writeStr(ctx.tb, boxX + 1, boxY, ctx.data.playlistInputPrompt, theme.mauve)
+  writeStrBg(ctx.tb, boxX + 1, boxY + 2, "> " & ctx.data.playlistInputBuffer, theme.text, theme.surface1)
+  writeStr(ctx.tb, boxX + 1, boxY + 4, "Enter: confirm  Esc: cancel", theme.subtext0)
+
 proc renderApp*(ctx: var nw.Context[AppState]) =
   let w = iw.width(ctx.tb)
   let h = iw.height(ctx.tb)
@@ -541,6 +585,8 @@ proc renderApp*(ctx: var nw.Context[AppState]) =
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(LeaderMenuOverlay(), sliceCtx)
   if ctx.data.showThemePicker:
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(ThemePickerOverlay(), sliceCtx)
+  if ctx.data.playlistInputActive:
+    sliceCtx = nw.slice(ctx, 0, 0, w, h); render(PlaylistInputOverlay(), sliceCtx)
 
 proc initApp*(state: var AppState) =
   state.theme = getTheme("mocha")
@@ -577,6 +623,11 @@ proc initApp*(state: var AppState) =
   state.volumeCueTimer = 0
   state.volumeCueVolume = 80
   state.prevVolume = 80
+  state.playlistContentsIdx = -1
+  state.playlistContentsTracks = @[]
+  state.playlistInputActive = false
+  state.playlistInputPrompt = ""
+  state.playlistInputBuffer = ""
   state.commands = @[]
   state.cmdRegistry = initTable[string, int]()
   state.keybindings = initTable[string, string]()

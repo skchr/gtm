@@ -137,6 +137,36 @@ method shutdown*(cli: DaemonClient) =
 proc sendQuitDaemon*(cli: DaemonClient) =
   discard daemonSimpleCmd(cli, "quit")
 
+proc createPlaylist*(cli: DaemonClient, name: string): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "create_playlist", "name": name})
+
+proc deletePlaylist*(cli: DaemonClient, playlistId: int64): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "delete_playlist", "playlist_id": playlistId})
+
+proc renamePlaylist*(cli: DaemonClient, playlistId: int64, name: string): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "rename_playlist", "playlist_id": playlistId, "name": name})
+
+proc addToPlaylist*(cli: DaemonClient, playlistId, trackId: int64, position: int = 0): JsonNode =
+  cli.ensureDaemon()
+  let data = %*{"playlist_id": playlistId, "track_id": trackId, "position": position}
+  sendDaemonCmd(cli, %*{"cmd": "add_to_playlist", "data": data})
+
+proc removeFromPlaylist*(cli: DaemonClient, playlistId, trackId: int64): JsonNode =
+  cli.ensureDaemon()
+  let data = %*{"playlist_id": playlistId, "track_id": trackId}
+  sendDaemonCmd(cli, %*{"cmd": "remove_from_playlist", "data": data})
+
+proc listPlaylists*(cli: DaemonClient): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "list_playlists"})
+
+proc getPlaylistTracks*(cli: DaemonClient, playlistId: int64): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "get_playlist_tracks", "playlist_id": playlistId})
+
 proc newDaemonClient*(): DaemonClient =
   DaemonClient(
     volume: 80, state: 0, running: false,

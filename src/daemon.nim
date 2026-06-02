@@ -6,7 +6,10 @@ type
   DaemonCmdKind* = enum
     dckPlay, dckPause, dckStop, dckSeek, dckNext, dckPrev,
     dckSetVolume, dckGetVolume, dckLoadFile, dckTogglePause,
-    dckQuit, dckStatus, dckScan, dckNowPlaying
+    dckQuit, dckStatus, dckScan, dckNowPlaying,
+    dckCreatePlaylist, dckDeletePlaylist, dckRenamePlaylist,
+    dckAddToPlaylist, dckRemoveFromPlaylist,
+    dckListPlaylists, dckGetPlaylistTracks
 
   DaemonCmd* = object
     kind*: DaemonCmdKind
@@ -61,6 +64,19 @@ proc parseDaemonCommand(line: string): DaemonCmd =
     of "quit": result.kind = dckQuit
     of "status": result.kind = dckStatus
     of "now_playing": result.kind = dckNowPlaying
+    of "create_playlist":
+      result.kind = dckCreatePlaylist; result.strArg = j{"name"}.getStr("")
+    of "delete_playlist":
+      result.kind = dckDeletePlaylist; result.intArg = j{"playlist_id"}.getInt(0)
+    of "rename_playlist":
+      result.kind = dckRenamePlaylist; result.intArg = j{"playlist_id"}.getInt(0); result.strArg = j{"name"}.getStr("")
+    of "add_to_playlist":
+      result.kind = dckAddToPlaylist; result.strArg = $j["data"]
+    of "remove_from_playlist":
+      result.kind = dckRemoveFromPlaylist; result.strArg = $j["data"]
+    of "list_playlists": result.kind = dckListPlaylists
+    of "get_playlist_tracks":
+      result.kind = dckGetPlaylistTracks; result.intArg = j{"playlist_id"}.getInt(0)
     else: result.kind = dckStatus
   except:
     result.kind = dckStatus
@@ -129,6 +145,47 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     result["time_pos"] = %d.player.timePos
     result["duration"] = %d.player.duration
     result["track"] = %d.currentTrackPath
+  of dckCreatePlaylist:
+    if d.lib != nil and cmd.strArg.len > 0:
+      let id = d.lib.createPlaylist(cmd.strArg)
+      result["playlist_id"] = %id
+  of dckDeletePlaylist:
+    if d.lib != nil and cmd.intArg > 0:
+      d.lib.deletePlaylist(int64(cmd.intArg))
+  of dckRenamePlaylist:
+    if d.lib != nil and cmd.intArg > 0 and cmd.strArg.len > 0:
+      d.lib.renamePlaylist(int64(cmd.intArg), cmd.strArg)
+  of dckAddToPlaylist, dckRemoveFromPlaylist:
+    if d.lib != nil and cmd.strArg.len > 0:
+      try:
+        let data = parseJson(cmd.strArg)
+        let plId = int64(data{"playlist_id"}.getInt(0))
+        let trackId = int64(data{"track_id"}.getInt(0))
+        if plId > 0 and trackId > 0:
+          if cmd.kind == dckAddToPlaylist:
+            let pos = data{"position"}.getInt(0)
+            d.lib.addTrackToPlaylist(plId, trackId, pos)
+          else:
+            d.lib.removeTrackFromPlaylist(plId, trackId)
+      except: discard
+  of dckListPlaylists:
+    if d.lib != nil:
+      let pls = d.lib.loadPlaylists()
+      var arr = newJArray()
+      for pl in pls:
+        arr.add(%*{"id": pl.id, "name": pl.name, "track_count": pl.trackIds.len})
+      result["playlists"] = arr
+  of dckGetPlaylistTracks:
+    if d.lib != nil and cmd.intArg > 0:
+      let pls = d.lib.loadPlaylists()
+      for pl in pls:
+        if pl.id == int64(cmd.intArg):
+          var arr = newJArray()
+          for tid in pl.trackIds:
+            arr.add(%tid)
+          result["track_ids"] = arr
+          break
+      result["playlist_id"] = %cmd.intArg
   of dckScan:
     if cmd.strArg.len > 0 and dirExists(cmd.strArg):
       let paths = scanDirectoryRecursive(cmd.strArg)

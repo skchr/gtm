@@ -294,7 +294,13 @@ when defined(useSqlite):
 
   proc createPlaylist*(lib: LibraryDb, name: string): int64 =
     if name.len == 0: return 0
-    discard execRaw(lib.db, "INSERT INTO playlists (name) VALUES ('" & name.replace("'", "''") & "')")
+    let stmt = prepare(lib.db, "INSERT INTO playlists (name) VALUES (?)")
+    if stmt == nil: return 0
+    bindText(stmt, 1.cint, name)
+    if sqlite3_step(stmt) != SQLITE_OK:
+      finalize(stmt)
+      return 0
+    finalize(stmt)
     result = sqlite3_last_insert_rowid(lib.db)
 
   proc addTrackToPlaylist*(lib: LibraryDb, playlistId, trackId: int64, position: int) =
@@ -320,7 +326,20 @@ when defined(useSqlite):
       bindInt64(stmt1, 1.cint, playlistId)
       discard sqlite3_step(stmt1)
       finalize(stmt1)
-    discard execRaw(lib.db, "DELETE FROM playlists WHERE id = " & $playlistId)
+    let stmt2 = prepare(lib.db, "DELETE FROM playlists WHERE id = ?")
+    if stmt2 != nil:
+      bindInt64(stmt2, 1.cint, playlistId)
+      discard sqlite3_step(stmt2)
+      finalize(stmt2)
+
+  proc renamePlaylist*(lib: LibraryDb, playlistId: int64, name: string) =
+    if name.len == 0: return
+    let stmt = prepare(lib.db, "UPDATE playlists SET name = ? WHERE id = ?")
+    if stmt == nil: return
+    bindText(stmt, 1.cint, name)
+    bindInt64(stmt, 2.cint, playlistId)
+    discard sqlite3_step(stmt)
+    finalize(stmt)
 
   proc getPlaybackState*(lib: LibraryDb, key: string): string =
     let stmt = prepare(lib.db, "SELECT value FROM playback_state WHERE key = ?")
@@ -365,6 +384,7 @@ else:
   proc addTrackToPlaylist*(lib: LibraryDb, playlistId, trackId: int64, position: int) = discard
   proc removeTrackFromPlaylist*(lib: LibraryDb, playlistId, trackId: int64) = discard
   proc deletePlaylist*(lib: LibraryDb, playlistId: int64) = discard
+  proc renamePlaylist*(lib: LibraryDb, playlistId: int64, name: string) = discard
   proc getPlaybackState*(lib: LibraryDb, key: string): string = ""
   proc setPlaybackState*(lib: LibraryDb, key, value: string) = discard
   proc updatePlayCount*(lib: LibraryDb, trackId: int64) = discard
@@ -482,12 +502,29 @@ proc rebuildDisplayItems*(state: var AppState) =
           id: track.id
         ))
   of tabPlaylists:
-    for pl in state.libraryPlaylists:
-      state.displayItems.add(LibraryItem(
-        kind: likPlaylist, label: pl.name,
-        sublabel: $pl.trackIds.len & " tracks",
-        id: pl.id
-      ))
+    if state.playlistContentsIdx >= 0:
+      let plIdx = state.playlistContentsIdx
+      if plIdx >= 0 and plIdx < state.libraryPlaylists.len:
+        let pl = state.libraryPlaylists[plIdx]
+        for j, tid in pl.trackIds:
+          var label = "Track #" & $tid
+          for t in state.libraryTracks:
+            if t.id == tid:
+              label = t.displayName()
+              break
+          state.displayItems.add(LibraryItem(
+            kind: likTrack, trackIdx: j,
+            label: label,
+            sublabel: "",
+            id: tid
+          ))
+    else:
+      for pl in state.libraryPlaylists:
+        state.displayItems.add(LibraryItem(
+          kind: likPlaylist, label: pl.name,
+          sublabel: $pl.trackIds.len & " tracks",
+          id: pl.id
+        ))
   of tabSettings:
     state.displayItems.add(LibraryItem(kind: likTrack, label: "Theme: " & themeName(state.config.theme), sublabel: "Enter to change", id: 0))
     state.displayItems.add(LibraryItem(kind: likTrack, label: "Volume: " & $state.volume & "%", sublabel: "Shift+J/K or +/-", id: 1))

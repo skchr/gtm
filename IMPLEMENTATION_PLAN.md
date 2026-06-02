@@ -21,13 +21,14 @@
 
 ## P1 — High Priority
 
-- **[found] Playlist Management — Incomplete (spec: PLAYLIST_MGMT.md)**
-  - Keybindings for create/delete/rename playlist from UI: missing entirely (`gtm.nim`).
-  - Enter on playlist (`ui.nim:173-194`) does nothing useful — playlist items are `likPlaylist` but `playSelected()` looks for `likTrack`.
-  - No playlist contents sub-view.
-  - No rename/reorder/export/import (except `parseM3u` exists).
-  - Daemon has zero playlist commands — all ops are in-memory only in state, not routed through daemon DB.
-  - `addSelectionToPlaylist` (`gtm.nim:193-209`) uses in-memory playlists only, not library DB.
+- ~~**[found] Playlist Management — Incomplete (spec: PLAYLIST_MGMT.md)**~~ ✅ implemented
+  - Daemon commands: `create_playlist`, `delete_playlist`, `rename_playlist`, `add_to_playlist`, `remove_from_playlist`, `list_playlists`, `get_playlist_tracks`
+  - Client methods: `createPlaylist`, `deletePlaylist`, `renamePlaylist`, `addToPlaylist`, `removeFromPlaylist`, `listPlaylists`, `getPlaylistTracks`
+  - Playlist contents sub-view: Enter on playlist opens track list, Escape goes back
+  - Keybindings: `a` create, `d` delete (with confirmation), `r` rename (with prompt)
+  - `addSelectionToPlaylist` creates playlist if none exist, routes through daemon for persistence
+  - Library: added `renamePlaylist`, fixed SQL injection in `createPlaylist` and `deletePlaylist`
+  - State: added `playlistContentsIdx`, `playlistInputActive`, `playlistInputPrompt`, `playlistInputBuffer`
 
 - ~~**[found] Visualizer overlaps NowPlaying at 60-119 cols (spec: UI_COMPONENTS.md)**~~ ✅ fixed in code (ui.nim:510 uses `splitW = w - 20`)
   `ui.nim:480-481`: Both NowPlayingView and VisualizerView rendered at same position `(0, y, w, mainH)`. Visualizer should be a narrow right sidebar (e.g. 20 cols).
@@ -82,8 +83,8 @@
 - **[spec] Daemon IPC — persistent event streaming (DAEMON_IPC.md)**
   Currently request-response poll (16ms interval). Persistent event subscription would reduce latency/overhead.
 
-- **[found] sqlite3 SQL injection in library.nim**
-  `library.nim:173`, `library.nim:297`, `library.nim:323`: Uses string concatenation for SQL queries with user-provided values instead of parameterized bindings. Replace with prepared statements.
+- ~~**[found] sqlite3 SQL injection in library.nim**~~ ✅ fixed
+  `library.nim:173` (getArtistId — was using execRaw with string concat for INSERT), `library.nim:297` (createPlaylist), `library.nim:323` (deletePlaylist): Replaced string concatenation with parameterized prepared statements.
 
 - **[found] Quit functions call `quit(0)` directly**
   `gtm.nim:155-170`: `quitBackground` and `quitDaemon` call `quit(0)` which doesn't unwind the main loop properly. Should set a flag and let main loop exit cleanly.

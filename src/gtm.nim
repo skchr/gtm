@@ -207,23 +207,43 @@ proc saveCurrentQueue*(state: AppState) =
     f.writeLine(track.path)
   f.close()
 
+proc loadPlaylistsFromDaemon(state: var AppState) =
+  if state.player of DaemonClient:
+    let cli = DaemonClient(state.player)
+    let resp = cli.listPlaylists()
+    if resp.hasKey("playlists"):
+      state.libraryPlaylists = @[]
+      for plJson in resp["playlists"]:
+        var trackIds: seq[int64] = @[]
+        let tracksResp = cli.getPlaylistTracks(plJson["id"].getInt(0).int64)
+        if tracksResp.hasKey("track_ids"):
+          for tid in tracksResp["track_ids"]:
+            trackIds.add(tid.getInt(0).int64)
+        state.libraryPlaylists.add(UserPlaylist(
+          id: plJson["id"].getInt(0).int64,
+          name: plJson["name"].getStr(""),
+          trackIds: trackIds
+        ))
+      state.rebuildDisplayItems()
+
 proc addSelectionToPlaylist(state: var AppState) =
   if state.selectedIndices.len == 0: return
-  let pl = state.libraryPlaylists
-  if pl.len == 0:
-    let newId = int64(state.libraryPlaylists.len + 1)
-    state.libraryPlaylists.add(UserPlaylist(id: newId, name: "Playlist " & $newId, trackIds: @[]))
-  let idx = state.selectIndex mod max(pl.len, 1)
-  let targetPl = if pl.len > 0: addr state.libraryPlaylists[idx] else: nil
-  if targetPl != nil:
-    for selIdx in state.selectedIndices:
-      let realIdx = state.filteredIndex(selIdx)
-      if realIdx >= 0 and realIdx < state.libraryTracks.len:
-        let track = state.libraryTracks[realIdx]
-        if track.id notin targetPl.trackIds:
-          targetPl.trackIds.add(track.id)
-    state.selectedIndices = initHashSet[int]()
-    state.rebuildDisplayItems()
+  if state.libraryPlaylists.len == 0:
+    state.playlistInputActive = true
+    state.playlistInputPrompt = "New Playlist Name:"
+    state.playlistInputBuffer = ""
+    return
+  let idx = state.selectIndex mod state.libraryPlaylists.len
+  for selIdx in state.selectedIndices:
+    let realIdx = state.filteredIndex(selIdx)
+    if realIdx >= 0 and realIdx < state.libraryTracks.len:
+      let track = state.libraryTracks[realIdx]
+      if track.id notin state.libraryPlaylists[idx].trackIds:
+        state.libraryPlaylists[idx].trackIds.add(track.id)
+        if state.player of DaemonClient:
+          discard DaemonClient(state.player).addToPlaylist(state.libraryPlaylists[idx].id, track.id, state.libraryPlaylists[idx].trackIds.len - 1)
+  state.selectedIndices = initHashSet[int]()
+  state.rebuildDisplayItems()
 
 proc handleQuitSignal() {.noconv.} =
   iw.deinit()
@@ -290,6 +310,26 @@ proc dispatchCommand(state: var AppState, cmdId: string) =
     state.themePickerSelect = 0
   of "save_playlist":
     state.saveCurrentQueue()
+  of "create_playlist":
+    state.playlistInputActive = true
+    state.playlistInputPrompt = "New Playlist Name:"
+    state.playlistInputBuffer = ""
+  of "delete_playlist":
+    let item = state.selectedItem()
+    if item.kind == likPlaylist and state.libraryPlaylists.len > 0:
+      let idx = state.selectIndex
+      if idx >= 0 and idx < state.libraryPlaylists.len:
+        state.playlistInputActive = true
+        state.playlistInputPrompt = "Delete playlist '" & state.libraryPlaylists[idx].name & "'? (y/N)"
+        state.playlistInputBuffer = ""
+  of "rename_playlist":
+    let item = state.selectedItem()
+    if item.kind == likPlaylist and state.libraryPlaylists.len > 0:
+      let idx = state.selectIndex
+      if idx >= 0 and idx < state.libraryPlaylists.len:
+        state.playlistInputActive = true
+        state.playlistInputPrompt = "Rename Playlist:"
+        state.playlistInputBuffer = state.libraryPlaylists[idx].name
   else: discard
 
 proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
@@ -332,6 +372,47 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
       state.themePickerSelect = 0
     if state.themePickerResults.len > 0:
       state.themePickerSelect = min(state.themePickerSelect, state.themePickerResults.len - 1)
+    return
+  if state.playlistInputActive:
+    case key
+    of iw.Key.Escape:
+      state.playlistInputActive = false
+      state.playlistInputBuffer = ""
+      state.playlistInputPrompt = ""
+    of iw.Key.Enter:
+      if state.playlistInputBuffer.len > 0:
+        if state.playlistInputPrompt.contains("Delete playlist"):
+          if state.playlistInputBuffer.toLowerAscii() == "y":
+            let idx = state.selectIndex
+            if idx >= 0 and idx < state.libraryPlaylists.len:
+              let plId = state.libraryPlaylists[idx].id
+              if state.player of DaemonClient:
+                discard DaemonClient(state.player).deletePlaylist(plId)
+              state.libraryPlaylists.delete(idx)
+              state.rebuildDisplayItems()
+        elif state.playlistInputPrompt.contains("Rename"):
+          let idx = state.selectIndex
+          if idx >= 0 and idx < state.libraryPlaylists.len:
+            let plId = state.libraryPlaylists[idx].id
+            if state.player of DaemonClient:
+              discard DaemonClient(state.player).renamePlaylist(plId, state.playlistInputBuffer)
+            state.libraryPlaylists[idx].name = state.playlistInputBuffer
+            state.rebuildDisplayItems()
+        else:
+          if state.player of DaemonClient:
+            discard DaemonClient(state.player).createPlaylist(state.playlistInputBuffer)
+            state.loadPlaylistsFromDaemon()
+      state.playlistInputActive = false
+      state.playlistInputBuffer = ""
+      state.playlistInputPrompt = ""
+    of iw.Key.Backspace:
+      if state.playlistInputBuffer.len > 0:
+        state.playlistInputBuffer = state.playlistInputBuffer[0..^2]
+    else:
+      for ch in chars:
+        let code = ch.int
+        if code >= 32 and code < 127:
+          state.playlistInputBuffer &= $ch
     return
   case state.mode
   of imCommandPalette:
@@ -471,7 +552,16 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
   of iw.Key.J: state.moveSelection(1)
   of iw.Key.K: state.moveSelection(-1)
   of iw.Key.Enter:
-    if state.tab == tabSettings:
+    if state.tab == tabPlaylists:
+      if state.playlistContentsIdx >= 0:
+        state.playSelected()
+      else:
+        let item = state.selectedItem()
+        if item.kind == likPlaylist:
+          state.playlistContentsIdx = state.selectIndex
+          state.selectIndex = 0
+          state.rebuildDisplayItems()
+    elif state.tab == tabSettings:
       let idx = state.selectedItem().id
       case idx
       of 0:
@@ -512,6 +602,15 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     state.goToLast()
     state.ggPressed = false
     state.playSelected()
+  of iw.Key.A:
+    if state.tab == tabPlaylists and state.playlistContentsIdx < 0:
+      dispatchCommand(state, "create_playlist")
+  of iw.Key.D:
+    if state.tab == tabPlaylists and state.playlistContentsIdx < 0:
+      dispatchCommand(state, "delete_playlist")
+  of iw.Key.R:
+    if state.tab == tabPlaylists and state.playlistContentsIdx < 0:
+      dispatchCommand(state, "rename_playlist")
   of iw.Key.Slash:
     state.mode = imFilter
     state.filterText = ""
@@ -539,7 +638,11 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     if state.viz != nil: state.viz.stopCapture()
     state.saveConfig()
     quit(0)
-  of iw.Key.Escape: discard
+  of iw.Key.Escape:
+    if state.playlistContentsIdx >= 0:
+      state.playlistContentsIdx = -1
+      state.selectIndex = 0
+      state.rebuildDisplayItems()
   else: discard
 
 proc processEvents(state: var AppState) =
@@ -568,6 +671,7 @@ proc runTui(args: seq[string]) =
   var ctx = nw.initContext[AppState]()
   ctx.data.player = dClient
   ctx.data.daemonConnected = dClient.connected
+  ctx.data.loadPlaylistsFromDaemon()
   ctx.data.audioAvailable = dClient.connected
   initApp(ctx.data)
   ctx.data.loadConfig()
