@@ -170,8 +170,14 @@ when defined(useSqlite):
     if sqlite3_step(stmt) == SQLITE_ROW:
       result = colInt64(stmt, 0.cint)
     else:
-      discard execRaw(lib.db, "INSERT INTO artists (name) VALUES ('" & adjusted.replace("'", "''") & "')")
+      finalize(stmt)
+      let ins = prepare(lib.db, "INSERT INTO artists (name) VALUES (?)")
+      if ins != nil:
+        bindText(ins, 1.cint, adjusted)
+        discard sqlite3_step(ins)
+        finalize(ins)
       result = sqlite3_last_insert_rowid(lib.db)
+      return
     finalize(stmt)
 
   proc getAlbumId*(lib: LibraryDb, title: string, artistId: int64, year: int, genre: string): int64 =
@@ -450,7 +456,7 @@ proc parseM3u*(path: string): seq[string] =
       if trimmed.len == 0 or trimmed.startsWith("#"): continue
       let fullPath = if trimmed.startsWith("/"): trimmed else: baseDir / trimmed
       if fileExists(fullPath): result.add(fullPath)
-  except: discard
+  except: stderr.writeLine("[gtm] parseM3u error: " & getCurrentExceptionMsg())
 
 proc loadFromArgs*(args: seq[string]): seq[string] =
   result = @[]
@@ -469,7 +475,7 @@ proc loadFromArgs*(args: seq[string]): seq[string] =
           if isAudioFile(p):
             result.add(p)
       except:
-        discard
+        stderr.writeLine("[gtm] loadFromArgs error: " & getCurrentExceptionMsg())
 
 proc rebuildDisplayItems*(state: var AppState) =
   state.displayItems = @[]

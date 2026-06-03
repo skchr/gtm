@@ -46,6 +46,7 @@ type
     volume*: int
     lastTab*: AppTab
     refreshTheme*: bool
+    idleTimeout*: int
 
   LibraryItemKind* = enum
     likTrack, likArtist, likAlbum, likPlaylist
@@ -103,6 +104,7 @@ type
     paletteQuery*: string
     paletteResults*: seq[int]
     paletteSelect*: int
+    paletteSearchMode*: bool
     showThemePicker*: bool
     themePickerQuery*: string
     themePickerResults*: seq[string]
@@ -117,11 +119,19 @@ type
     volumeCueTimer*: int
     volumeCueVolume*: int
     prevVolume*: int
+    shuffleEnabled*: bool
+    shuffleOrder*: seq[int]
+    shuffleIndex*: int
+    repeatMode*: int
+    sleepTimerRemaining*: int
+    sleepTimerFrames*: int
     playlistContentsIdx*: int
     playlistContentsTracks*: seq[int64]
     playlistInputActive*: bool
     playlistInputPrompt*: string
     playlistInputBuffer*: string
+    addingToPlaylistId*: int64
+    addingToPlaylistName*: string
 
 const
   GTM_VERSION* = "0.2.0"

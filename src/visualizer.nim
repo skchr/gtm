@@ -85,7 +85,7 @@ proc destroyShm*(shm: var PcmRingBuffer) =
     let totalSize = sizeof(float32) * PCM_RING_SIZE + sizeof(int32) * 2 + sizeof(int32)
     discard munmap(shm.data, totalSize)
     discard close(shm.fd)
-    discard shm_open(shm.shmName.cstring, O_RDONLY, 0)
+    discard shm_unlink(shm.shmName.cstring)
 
 proc shmPath*(): string = "/gtm-pcm"
 

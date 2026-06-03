@@ -1,7 +1,7 @@
-import os, math, posix, tables
+import os, math, posix, tables, json, strutils, osproc
 
 type
-  AudioBackendType* = enum abtNone, abtMiniAudio, abtDaemon
+  AudioBackendType* = enum abtNone, abtMiniAudio, abtDaemon, abtProcess
 
   AudioEventKind* = enum
     aekNone, aekPlaybackStarted, aekPlaybackPaused, aekPlaybackStopped,
@@ -29,6 +29,7 @@ type
     state*: int
     metadata*: TrackMetadata
     backendType*: AudioBackendType
+    working*: bool
 
 method loadFile*(b: AudioBackend, path: string) {.base.} = discard
 method play*(b: AudioBackend) {.base.} = discard
@@ -41,6 +42,76 @@ method togglePause*(b: AudioBackend) {.base.} = discard
 method pollEvents*(b: AudioBackend): seq[AudioEvent] {.base.} = @[]
 method shutdown*(b: AudioBackend) {.base.} = discard
 method getMetadata*(b: AudioBackend, path: string): TrackMetadata {.base.} = TrackMetadata()
+
+type
+  ProcessBackend* = ref object of AudioBackend
+    procHandle: Process
+    lastPath: string
+    paused: bool
+
+method loadFile*(b: ProcessBackend, path: string) =
+  b.stop()
+  b.timePos = 0.0
+  b.duration = 0.0
+  b.lastPath = path
+  b.state = 0
+
+method play*(b: ProcessBackend) =
+  if b.lastPath.len == 0: return
+  b.stop()
+  let vol = max(0, min(100, b.volume))
+  if fileExists(findExe("mpv")):
+    b.procHandle = startProcess("mpv", args = @["--no-video", "--volume=" & $vol, b.lastPath],
+      options = {poUsePath, poParentStreams})
+    b.state = 1; b.running = true; b.paused = false
+  elif fileExists(findExe("ffplay")):
+    b.procHandle = startProcess("ffplay", args = @["-nodisp", "-autoexit", "-volume=" & $vol, b.lastPath],
+      options = {poUsePath, poParentStreams})
+    b.state = 1; b.running = true; b.paused = false
+  else:
+    stderr.writeLine("[gtm] no external player found (mpv or ffplay)")
+
+method pause*(b: ProcessBackend) =
+  if b.procHandle != nil:
+    discard posix.kill(b.procHandle.processID.cint, posix.SIGSTOP)
+    b.paused = true
+    if b.state == 1: b.state = 2
+
+method stop*(b: ProcessBackend) =
+  if b.procHandle != nil:
+    b.procHandle.kill()
+    b.procHandle.close()
+    b.procHandle = nil
+  b.state = 0; b.timePos = 0.0; b.running = false; b.paused = false
+
+method seek*(b: ProcessBackend, seconds: float) = discard
+
+method setVolume*(b: ProcessBackend, vol: int) =
+  b.volume = max(0, min(100, vol))
+
+method togglePause*(b: ProcessBackend) =
+  if b.paused:
+    if b.procHandle != nil:
+      discard posix.kill(b.procHandle.processID.cint, posix.SIGCONT)
+    b.paused = false; b.state = 1
+  else:
+    b.pause()
+
+method pollEvents*(b: ProcessBackend): seq[AudioEvent] =
+  result = @[]
+  if b.running and b.procHandle != nil:
+    let status = b.procHandle.peekExitCode()
+    if status != -1:
+      result.add(AudioEvent(kind: aekTrackEnded))
+      b.running = false; b.state = 0
+
+method shutdown*(b: ProcessBackend) = b.stop()
+
+proc newProcessBackend*(): ProcessBackend =
+  result = ProcessBackend(
+    volume: 80, state: 0, running: false,
+    backendType: abtProcess, working: true
+  )
 
 when defined(useMiniAudio):
   {.compile: "vendor/miniaudio/miniaudio_impl.c".}
@@ -82,7 +153,7 @@ when defined(useMiniAudio):
       stderr.writeLine("[gtm] gtm_audio_load returned 0 for: " & path)
       b.state = 0
       return
-    b.metadata.title = path.splitPath().tail
+    b.metadata = b.getMetadata(path)
     b.duration = gtm_audio_get_duration(b.ctx)
     stderr.writeLine("[gtm] loaded: " & path & ", duration: " & $b.duration)
     b.state = 0
@@ -143,24 +214,36 @@ when defined(useMiniAudio):
       gtm_audio_uninit(b.ctx)
       b.ctx = nil
 
+  method getMetadata*(b: MiniAudioBackend, path: string): TrackMetadata =
+    result = TrackMetadata(title: path.splitPath().tail)
+    let output = execProcess("ffprobe", args = @["-v", "quiet", "-print_format", "json", "-show_format", path],
+                             options = {poUsePath})
+    if output.len == 0: return
+    try:
+      let j = parseJson(output)
+      let fmt = j{"format"}
+      if fmt.isNil: return
+      if fmt.hasKey("duration"):
+        result.duration = fmt["duration"].getFloat(0.0)
+      if fmt.hasKey("bit_rate"):
+        result.bitrate = fmt["bit_rate"].getInt(0)
+      let tags = fmt{"tags"}
+      if not tags.isNil:
+        if tags.hasKey("title"): result.title = tags["title"].getStr(result.title)
+        if tags.hasKey("artist"): result.artist = tags["artist"].getStr("")
+        if tags.hasKey("album"): result.album = tags["album"].getStr("")
+    except:
+      discard
+
   proc newMiniAudioBackend*(): MiniAudioBackend =
     result = MiniAudioBackend(
       volume: 80, state: 0, running: false,
-      backendType: abtMiniAudio
+      backendType: abtMiniAudio, working: false
     )
     result.ctx = gtm_audio_init()
-    if result.ctx == nil:
+    result.working = result.ctx != nil
+    if not result.working:
       stderr.writeLine("[gtm] miniaudio init failed: no audio device available")
-
-else:
-  type
-    MiniAudioBackend* = ref object of AudioBackend
-      dummy: bool
-
-  proc newMiniAudioBackend*(): MiniAudioBackend =
-    MiniAudioBackend(
-      volume: 80, state: 0, running: false, backendType: abtMiniAudio
-    )
 
 proc newAudioBackend*(backendType: AudioBackendType): AudioBackend =
   case backendType

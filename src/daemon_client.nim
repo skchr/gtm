@@ -14,7 +14,7 @@ proc daemonIsRunning*(): bool =
     try:
       let pid = readFile(p).strip().parseInt()
       if pid > 0:
-        result = execCmd("kill -0 " & $pid & " 2>/dev/null") == 0
+        result = posix.kill(pid.cint, 0) == 0
     except:
       result = false
 
@@ -25,7 +25,7 @@ proc startDaemonProcess*() =
 
 proc connectToDaemon*(cli: DaemonClient): bool =
   if cli.connected and cli.sock != nil:
-    try: cli.sock.close() except: discard
+    try: cli.sock.close() except: stderr.writeLine("[gtm] connectToDaemon close: " & getCurrentExceptionMsg())
   cli.connected = false
   let s = sockPath()
   if not symlinkExists(s) and not fileExists(s):
@@ -128,11 +128,20 @@ method pollEvents*(cli: DaemonClient): seq[AudioEvent] =
   if resp.hasKey("state"):
     let s = resp["state"].getStr()
     cli.state = (if s == "playing": 1 elif s == "paused": 2 else: 0)
+  if resp.hasKey("audio_working"):
+    cli.working = resp["audio_working"].getBool(true)
+
+method getVolume*(cli: DaemonClient): int =
+  cli.ensureDaemon()
+  let resp = daemonSimpleCmd(cli, "get_volume")
+  if resp.hasKey("volume"):
+    return resp["volume"].getInt(80)
+  return 80
 
 method shutdown*(cli: DaemonClient) =
   discard daemonSimpleCmd(cli, "quit")
   if cli.sock != nil:
-    try: cli.sock.close() except: discard
+    try: cli.sock.close() except: stderr.writeLine("[gtm] shutdown close: " & getCurrentExceptionMsg())
 
 proc sendQuitDaemon*(cli: DaemonClient) =
   discard daemonSimpleCmd(cli, "quit")
@@ -170,5 +179,6 @@ proc getPlaylistTracks*(cli: DaemonClient, playlistId: int64): JsonNode =
 proc newDaemonClient*(): DaemonClient =
   DaemonClient(
     volume: 80, state: 0, running: false,
-    connected: false, buf: "", backendType: abtDaemon
+    connected: false, buf: "", backendType: abtDaemon,
+    working: true
   )

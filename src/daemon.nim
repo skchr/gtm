@@ -34,7 +34,7 @@ proc writePidFile() =
   writeFile(pidPath(), $getpid())
 
 proc removePidFile() =
-  try: removeFile(pidPath()) except: discard
+  try: removeFile(pidPath()) except: stderr.writeLine("[gtm] removePidFile: " & getCurrentExceptionMsg())
 
 proc setupSignalHandlers() =
   proc handler(sig: cint) {.noconv.} =
@@ -77,6 +77,8 @@ proc parseDaemonCommand(line: string): DaemonCmd =
     of "list_playlists": result.kind = dckListPlaylists
     of "get_playlist_tracks":
       result.kind = dckGetPlaylistTracks; result.intArg = j{"playlist_id"}.getInt(0)
+    of "scan":
+      result.kind = dckScan; result.strArg = j{"path"}.getStr("")
     else: result.kind = dckStatus
   except:
     result.kind = dckStatus
@@ -145,6 +147,7 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     result["time_pos"] = %d.player.timePos
     result["duration"] = %d.player.duration
     result["track"] = %d.currentTrackPath
+    result["audio_working"] = %d.player.working
   of dckCreatePlaylist:
     if d.lib != nil and cmd.strArg.len > 0:
       let id = d.lib.createPlaylist(cmd.strArg)
@@ -167,7 +170,7 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
             d.lib.addTrackToPlaylist(plId, trackId, pos)
           else:
             d.lib.removeTrackFromPlaylist(plId, trackId)
-      except: discard
+      except: stderr.writeLine("[gtm] addToPlaylist error: " & getCurrentExceptionMsg())
   of dckListPlaylists:
     if d.lib != nil:
       let pls = d.lib.loadPlaylists()
@@ -199,8 +202,12 @@ proc runDaemon*() =
   if not dirExists(dir): createDir(dir)
   writePidFile()
   setupSignalHandlers()
+  var player: AudioBackend = newMiniAudioBackend()
+  if not player.working:
+    stderr.writeLine("[gtm] miniaudio unavailable, trying process backend (mpv/ffplay)")
+    player = newProcessBackend()
   var daemon = Daemon(
-    player: newMiniAudioBackend(),
+    player: player,
     viz: newVisualizer(),
     running: true,
     idleTimeout: 300
@@ -262,7 +269,11 @@ proc runDaemon*() =
             if line.len > 0:
               stderr.writeLine("[gtm] daemon recv: " & line)
               let cmd = parseDaemonCommand(line)
-              let resp = executeCommand(daemon, cmd)
+              let resp = try:
+                executeCommand(daemon, cmd)
+              except Exception as ex:
+                stderr.writeLine("[gtm] command error: " & ex.msg)
+                %*{"ok": false, "error": ex.msg}
               let events = daemon.player.pollEvents()
               if events.len > 0:
                 resp["events"] = serializeEvents(events)

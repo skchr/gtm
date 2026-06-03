@@ -1,110 +1,337 @@
 # gtm Implementation Plan
 
 ## Legend
-- `[spec]` = spec exists, implementation may be partial/missing
-- `[no-spec]` = referenced in specs/README.md but file doesn't exist — needs authoring
-- `[found]` = issue confirmed via code reading
-- `[inferred]` = issue inferred from pattern analysis
+- `[code]` = confirmed present in source code
+- `[missing]` = confirmed absent after code search
+- `[spec-outdated]` = spec describes feature as missing/broken but source has it
+- `[new]` = not previously documented in plan
 
 ---
 
-## P0 — Must Fix (blocking)
+## P0 — Must Fix (blocking audio, security, crashes)
 
-- **[found] Dependency Resolution — Hardcoded paths in `config.nims`**
-  `config.nims:11-13` references `/home/prjctimg/sources/nimwave/src`, `/home/prjctimg/sources/illwave/src`, `/home/prjctimg/sources/ansiutils/src` — absolute paths that don't exist on other machines. Must use Nimble package resolution or relative paths. Add `DEPENDENCIES.md` spec.
+### [FIXED] Security: SQL injection in `getArtistId` INSERT (`library.nim:173`)
+- **Status**: [fixed] parameterized prepared statement replaces string concat
+- Changed fallback INSERT to use prepared statement with bind parameter
 
-- **[found] No Audio Output Bug**
-  `audio.nim:146-153`: `MiniAudioBackend.newMiniAudioBackend()` calls `gtm_audio_init()` which may return nil. When ctx is nil, `loadFile` at `audio.nim:77` returns early silently. Need to debug `vendor/miniaudio/miniaudio_impl.c` — check device init, ALSA/PulseAudio availability, linker flags (`-lm -ldl -lpthread`). Add debug logging to trace full path: TUI → DaemonClient → Unix socket → daemon → MiniAudioBackend.
+### [FIXED] Security: Command injection via ffprobe (`audio.nim:219`)
+- **Status**: [fixed] uses `execProcess` with separate args array instead of shell command
+- Also fixed `execCmd` shell injection in `ProcessBackend.pause`/`togglePause` (use `posix.kill` directly)
+- Also fixed `execCmd` shell injection in `daemonIsRunning` (use `posix.kill(pid, 0)`)
 
-- **[found] Missing metadata extraction**
-  `audio.nim:85`: `b.metadata.title` is set to just filename (`path.splitPath().tail`). Real metadata (artist, album, etc.) is never extracted from audio files. Only uses filename as title.
+### [FIXED] Stability: Daemon crashes on exception (`daemon.nim:269-276`)
+- **Status**: [fixed] `executeCommand` wrapped in `try/except` with error logging
+- Returns JSON error response instead of crashing
+
+### [FIXED] Visualizer: `destroyShm` uses `shm_open` instead of `shm_unlink` (`visualizer.nim:88`)
+- **Status**: [fixed] replaced `shm_open` with `shm_unlink`
+
+### Bug: No audio playback — PCM data path possibly disconnected
+- **Status**: [new] undiagnosed
+- `PcmRingBuffer.writePcm` is defined in `visualizer.nim:59-69` but **never called anywhere**
+- Daemon loop calls `viz.readPcm()` but nothing writes PCM data to shared memory
+- MiniAudio C prototypes (`gtm_audio_*` functions) don't include any shared memory writing
+- The visualizer reads from an empty ring buffer → spectrum is always flat
+- **Investigation needed**: Check `vendor/miniaudio/miniaudio_impl.c` to see if PCM is written to SHM from C side. If not, the visualizer gets no data and audio init path may be incomplete.
+- **Fix**: Either add PCM writing in C implementation or connect from Nim side
+
+### P0 Dependency Resolution (`DEPENDENCIES.md`)
+- **Status**: [code] partially fixed, hardcoded fallback remains
+- `config.nims:12-31` already has flexible dependency resolution: env var → relative path → nimble pkgs → hardcoded fallback
+- Hardcoded `/home/prjctimg/sources/{nimwave,illwave,ansiutils}/src` still exists at `config.nims:24` as last-resort fallback
+- This is less urgent than spec claims (P0) since it only triggers if other methods fail
+- **Fix**: Remove hardcoded fallback line or make it emit a clear error message
+
+---
 
 ## P1 — High Priority
 
-- ~~**[found] Playlist Management — Incomplete (spec: PLAYLIST_MGMT.md)**~~ ✅ implemented
-  - Daemon commands: `create_playlist`, `delete_playlist`, `rename_playlist`, `add_to_playlist`, `remove_from_playlist`, `list_playlists`, `get_playlist_tracks`
-  - Client methods: `createPlaylist`, `deletePlaylist`, `renamePlaylist`, `addToPlaylist`, `removeFromPlaylist`, `listPlaylists`, `getPlaylistTracks`
-  - Playlist contents sub-view: Enter on playlist opens track list, Escape goes back
-  - Keybindings: `a` create, `d` delete (with confirmation), `r` rename (with prompt)
-  - `addSelectionToPlaylist` creates playlist if none exist, routes through daemon for persistence
-  - Library: added `renamePlaylist`, fixed SQL injection in `createPlaylist` and `deletePlaylist`
-  - State: added `playlistContentsIdx`, `playlistInputActive`, `playlistInputPrompt`, `playlistInputBuffer`
+### [FIXED] Daemon: `getVolume()` not overridden (`daemon_client.nim`)
+- **Status**: [fixed] added `method getVolume*(cli: DaemonClient): int` that sends `get_volume` command
 
-- ~~**[found] Visualizer overlaps NowPlaying at 60-119 cols (spec: UI_COMPONENTS.md)**~~ ✅ fixed in code (ui.nim:510 uses `splitW = w - 20`)
-  `ui.nim:480-481`: Both NowPlayingView and VisualizerView rendered at same position `(0, y, w, mainH)`. Visualizer should be a narrow right sidebar (e.g. 20 cols).
+### Daemon: Missing commands for shuffle/repeat/sleep
+- **Status**: [code] confirmed absent
+- Shuffle, repeat, sleep state lives only in TUI client (`state.nim:121-126`, `gtm.nim:157-166`)
+- No daemon commands (`set_shuffle`, `set_repeat`, `set_sleep_timer`) exist
+- DaemonCmdKind enum in `daemon.nim:6-12` has no entries for these
+- Means remote control via socat cannot toggle shuffle/repeat/sleep
+- **Fix**: Add daemon commands, DaemonCmdKind entries, executeCommand handlers, and DaemonClient proxy methods
 
-- ~~**[found] Tab bar display issues (spec: UI_COMPONENTS.md)**~~ ✅ fixed
-  `ui.nim:65-73`: Inactive tab `[N]` and Name now rendered at consistent positions.
+### Daemon: No `set_shuffle`/`set_repeat`/`set_sleep_timer` in `parseDaemonCommand`
+- Same as above — TUI-only features need daemon integration for remote control
 
-- ~~**[found] "Unknown" field not hidden (spec: UI_COMPONENTS.md)**~~ ✅ fixed in code (ui.nim:99-103 `wlCond` template checks for "Unknown")
-  `ui.nim:98-99`: `displayArtist`/`displayAlbum` return "Unknown Artist"/"Unknown Album" strings but `wl` template doesn't check for "Unknown" prefix. Should hide entire row.
+### [FIXED] Code Quality: `Q` key bypasses `cleanupAndQuit` (`gtm.nim:775-781`)
+- **Status**: [fixed] replaced inline cleanup with `cleanupAndQuit(state, false)`
 
-- ~~**[found] Time display shows total not remaining (spec: UI_COMPONENTS.md)**~~ ✅ fixed (ui.nim:112 shows `elapsed / -remaining`)
-  `ui.nim:245-247`: Shows `elapsed / total`. Should show `elapsed / remaining` where remaining = duration - timePos (e.g. `1:23 / -2:22`).
+### [FIXED] Code Quality: `ProcessBackend.backendType` misassigned (`audio.nim:110-114`)
+- **Status**: [fixed] added `abtProcess` to `AudioBackendType` enum and use correct type
 
-- ~~**[no-spec] Volume Visual Cue missing (PROMPT.md #4)**~~ ✅ implemented (VolumeCueOverlay, volumeCueTimer in gtm.nim:110-128)
-  No visual indicator when volume changes via `Shift+J`/`Shift+K`. Need a transient overlay or progress indicator. Author `VOLUME_CUE.md` spec.
+### [FIXED] Code Quality: `"scan"` command is dead code (`daemon.nim`)
+- **Status**: [fixed] added `"scan"` case to `parseDaemonCommand`
 
-- ~~**[found] State-dependent icons (PROMPT.md #11)**~~ ✅ implemented
-  - `ui.nim`: ProgressBarComp uses `currentIcons().play/pause/stop` for status
-  - `ui.nim`: NowPlayingView uses `currentIcons().volumeHigh/Mid/Low/Muted` for volume
-  - `ui.nim`: LibraryView uses `currentIcons().music/artist/album/playlist` for item icons
-  - `ui.nim`: PlaylistsView uses `currentIcons().playlist` for playlist icons
-  - `icons.nim`: `detectNerdFonts()` now also checks `TERM_PROGRAM` and `TERM` env vars
+### [FIXED] Robustness: 11+ `except: discard` error swallowing locations
+- **Status**: [fixed] all `except: discard` replaced with `except: stderr.writeLine(...)` with context info
+
+### UI: Tab bar active tab background and bracket display
+- **Status**: [code] partially addressed — TODO confirm vs PROMPT.md
+- Active tab already gets `fillBg` with `theme.mauve` at `ui.nim:67`
+- Brackets `[]` already present around tab number for both active and inactive tabs (`ui.nim:68`, `ui.nim:70`)
+- Version label on right already at `ui.nim:75` with fixed position `w - 12`
+- PROMPT.md asks for active tab background change and `[]` wrapping — already done
+- **Spec update needed**: `UI_COMPONENTS.md` describes this as issue but code is correct
+
+### UI: Volume cue mute icon
+- **Status**: [code] already implemented
+- `VolumeCueOverlay` at `ui.nim:508-519` shows when `volumeCueTimer > 0`
+- `showVolumeCue()` called from `adjustVolume` and `toggleMute`
+- Displays `VOL ████░░░░░░` bar with green color
+- However: no mute-specific icon in the cue (always `VOL` label regardless of mute state)
+- **Minor enhancement**: Show `MUT` or mute icon when volume is 0
+
+### UI: Song details — hide fields with "Unknown" values
+- **Status**: [code] already implemented
+- `wlCond` template at `ui.nim:99-103` skips value if it starts with "Unknown"
+- Applied to Artist and Album at `ui.nim:105-106`
+- Same behavior requested in PROMPT.md — already done
+
+### UI: Time display shows elapsed / remaining
+- **Status**: [code] already implemented
+- `ui.nim:120`: `formatTime(state.timePos) & " / -" & formatTime(max(0.0, state.duration - state.timePos))`
+- Shows `1:23 / -2:22` format as requested
+- Also in ProgressBarComp at `ui.nim:296-298`
+
+### UI: State-dependent icons
+- **Status**: [code] already implemented
+- `ProgressBarComp` at `ui.nim:318-322`: Uses `currentIcons().play/pause/stop` based on `state.status`
+- Volume icons at `ui.nim:110-114`: Selects based on volume level (muted/low/medium/high)
+- LibraryView at `ui.nim:180-184`: Uses icon pack for artist/album/playlist/track
+- Shuffle/repeat icons at `ui.nim:330-335`: Uses icon pack with conditional colors
+- Spec says "not actually used" but code shows they ARE used — spec needs updating
+
+### Playlist: Missing reorder, export/import (daemon level)
+- **Status**: [code] confirmed missing
+- `reorderPlaylist` (reorder tracks within a playlist) — no daemon command or library function
+- `exportPlaylist` / `importPlaylist` — `parseM3u` exists at `library.nim:443` but no daemon-level import/export
+- TUI side: `saveCurrentQueue` exists at `gtm.nim:246` but saves entire library, not individual playlist
+- **Fix**: Add library functions, daemon commands, and TUI UI for:
+  - Reorder tracks (swap position values)
+  - Export playlist to M3U
+  - Import M3U as new playlist (daemon route)
+
+### Playlist: Daemon commands for playlist rename/delete at TUI level
+- **Status**: [code] already implemented
+- `renamePlaylist`, `deletePlaylist`, `addTrackToPlaylist`, `removeTrackFromPlaylist` all have daemon commands and client methods
+- `listPlaylists`, `getPlaylistTracks` also implemented
+- Spec says "no daemon commands for playlist operations" but they exist (7 commands)
+
+---
 
 ## P2 — Medium Priority
 
-- **[found] Command Palette improvements (PROMPT.md #10)**
-  - Navigation (j/k) in palette works? — `gtm.nim:340-344` implements it, but palette display in `ui.nim:348` iterates `paletteResults` with index `i` but compares against `paletteSelect` which is a separate index. Need to verify filtering works correctly.
-  - Should trigger search with `/` in command palette mode? Or keep `:` to open and `/` to filter within palette.
-  - Commands need review — add useful ones (shuffle, repeat, sleep, crossfade toggle).
-  - Need to verify `fuzzySearchCommands` in `commands.nim` is used (it exists but `buildDefaultCommands` doesn't use it, `palette` filtering uses inline fuzzy match in `gtm.nim:353-356`).
+### Dead Code Cleanup (many items)
+- **Status**: [code] all confirmed unused
+- Full list from source scan:
+  | Function/Variable | File | Notes |
+  |---|---|---|
+  | `execSql` / `execSqlI` | `library.nim:86-100` | Never called |
+  | `fuzzySearchCommands` | `commands.nim:22-33` | Exported, never called (gtm.nim uses inline filter) |
+  | `filterCommandsByContext` + `CommandCategory` | `commands.nim:4-20` | Never used |
+  | `findCommandIdx` | `commands.nim:45-48` | Never called |
+  | `removeFromPlaylist` | `daemon_client.nim:159-162` | Never called |
+  | `playlistContentsTracks` | `state.nim:128` | Field exists, never populated |
+  | `needsRedraw` | `state.nim:83` | Never checked |
+  | `daemonPid` | `state.nim:112` | Never read |
+  | `currentPlayingPath` / `currentPlayingId` | `state.nim:116-117` | Never written or read |
+  | `ConfigData.lastTab` | `state.nim:47` | Saved/loaded but never used to restore tab |
+  | `loadArtists` / `loadAlbums` | `library.nim:256-277` | Never called |
+  | `updatePlayCount` | `library.nim:360-365` | Never called |
+  | `CommandEntry.icon` | `state.nim:67` | Stored but never rendered in palette |
+  | `AudioEvent.metadata` | `audio.nim:16` | Never populated |
+  | `AudioBackendType.abtNone` | `audio.nim:4` | Never used |
+  | `getVolume` | `audio.nim:40` | Base method returns 80; never overridden by DaemonClient (P1) |
 
-- **[no-spec] Shuffle / Repeat / Sleep (PROMPT.md #12)**
-  No implementation exists. Need: shuffle mode (random track order), repeat modes (none/one/all), sleep timer (stop playback after N minutes). Author `SHUFFLE_REPEAT_SLEEP.md` spec.
+### `ProcessBackend.seek` is `discard` (`audio.nim:87`)
+- **Status**: [code] confirmed
+- No seek support for mpv/ffplay process backend
+- Could be implemented via mpv IPC (`--input-ipc-server`) or remain as documented limitation
 
-- ~~**[found] Settings tab — volume Enter does nothing**~~ ✅ fixed
-  `gtm.nim:472`: Now calls `state.toggleMute()` + `state.rebuildDisplayItems()`. Also fixed `toggleMute` to preserve previous volume for unmute restore.
+### Cover Art (new feature)
+- **Status**: [missing] no cover art support anywhere
+- `TrackMetadata` in `audio.nim:18-22` has no cover art field
+- No image loading or rendering capability
+- Need new module `src/coverart.nim`
+- **Spec**: `COVER_ART.md` exists with detailed plan
+- **Priority**: P3 in spec but PROMPT.md mentions it at item 13
 
-- ~~**[found] Config save/load is incomplete**~~ ✅ fixed
-  `gtm.nim:6-34`: `saveConfig` now saves `viz_visible` and `visualizer.bar_count`. `loadConfig` reads them back.
+### [FIXED] Config: `lastTab` saved but never restored
+- **Status**: [fixed] `tabNowPlaying` assignment now only happens when no valid tab was loaded from config
 
-- **[found] `performFilter` doesn't call `rebuildDisplayItems` first**
-  `gtm.nim:77-87`: Filters `state.displayItems` but these may be stale if `rebuildDisplayItems` wasn't called before filtering.
+### [FIXED] Config: `idle_timeout` in schema but never read
+- **Status**: [fixed] `loadConfig` reads `idle_timeout` into `ConfigData.idleTimeout`
+- Daemon still hardcodes 300; future work: add daemon command to set idle timeout dynamically
+
+### TUI: Theme picker — Enter doesn't close after selection
+- **Status**: [code] confirmed
+- On Enter, calls `state.applyTheme(seed)` then closes (`gtm.nim:448-453`)
+- This works fine. No issue here.
+
+### TUI: Navigation — `gg`/`ShiftG` on all tabs
+- **Status**: [code] confirmed working
+- `gg` (double `g` with timer) at `gtm.nim:727-734`
+- `ShiftG` at `gtm.nim:735-738`
+- Both work regardless of tab
+
+### TUI: Command palette — `/` triggers search within palette
+- **Status**: [code] confirmed
+- `paletteSearchMode` at `gtm.nim:564-565`
+- `/` in palette mode sets `paletteSearchMode = true` and clears query
+- Subsequent typing filters commands
+- Hitting `/` again (or Escape toggles) not handled — query filter is always on when typing
+
+### TUI: Command palette display limit already 20
+- **Status**: [code] spec-outdated
+- `ui.nim:426`: `displayResults = min(20, ...)`
+- Spec says "increase to 15-20" but it's already 20
+
+---
 
 ## P3 — Low Priority / Enhancement
 
-- **[spec] Cover Art (COVER_ART.md)**
-  No cover art support exists. `TrackMetadata` in `audio.nim:18-22` has no cover art field. No image loading/rendering. New module `src/coverart.nim` needed.
+### Crossfade / Gapless Playback
+- **Status**: [missing] not implemented
+- Requires mixing buffer in daemon, playback queue management, configurable duration
+- No crossfade state in `ConfigData`, no daemon logic
+- **Spec**: `AUDIO_PLAYBACK.md` section exists
 
-- **[spec] Crossfade / Gapless Playback (AUDIO_PLAYBACK.md)**
-  P3 enhancement. Requires mixing buffer in daemon, playback queue management, configurable crossfade duration.
+### ReplayGain / Volume Normalization
+- **Status**: [missing] not implemented
+- Parse ReplayGain tags, apply gain adjustment
+- **Spec**: `AUDIO_PLAYBACK.md` section exists
 
-- **[spec] Daemon IPC — persistent event streaming (DAEMON_IPC.md)**
-  Currently request-response poll (16ms interval). Persistent event subscription would reduce latency/overhead.
+### Daemon IPC — Persistent Event Streaming
+- **Status**: [missing] not implemented
+- Currently request-response poll every 16ms
+- Persistent subscription would reduce latency
+- **Spec**: `DAEMON_IPC.md`
 
-- ~~**[found] sqlite3 SQL injection in library.nim**~~ ✅ fixed
-  `library.nim:173` (getArtistId — was using execRaw with string concat for INSERT), `library.nim:297` (createPlaylist), `library.nim:323` (deletePlaylist): Replaced string concatenation with parameterized prepared statements.
+### Playback Queue Management in Daemon
+- **Status**: [missing] TUI-only
+- `nextTrack`/`prevTrack` operate on `displayItems` in TUI client
+- Daemon has no concept of queue — makes remote control limited
+- **Fix**: Add queue management to daemon (playlist ID, shuffle order, repeat state)
 
-- **[found] Quit functions call `quit(0)` directly**
-  `gtm.nim:155-170`: `quitBackground` and `quitDaemon` call `quit(0)` which doesn't unwind the main loop properly. Should set a flag and let main loop exit cleanly.
+---
 
-- **[found] Nerd Font detection is only env-var based**
-  `icons.nim:51-54`: Only checks `NERD_FONTS` env var. Could try rendering a test character and measuring width.
+## Specs Needing Updates (spec-implementation drift)
 
-- **[found] Playback queue management is in TUI client only**
-  `nextTrack`/`prevTrack` in `gtm.nim:96-108` operate on `displayItems` in the TUI, not on a daemon-managed queue. Makes remote control via socat limited.
+### `SHUFFLE_REPEAT_SLEEP.md` — CLAIMS FEATURES ARE "ENTIRELY MISSING"
+- All three are implemented in source:
+  - `state.nim:121-126`: state fields
+  - `gtm.nim:85-89`: `generateShuffleOrder`
+  - `gtm.nim:111-145`: `nextTrack`/`prevTrack` with shuffle/repeat support
+  - `gtm.nim:157-166`: `toggleShuffle` / `cycleRepeat`
+  - `gtm.nim:867-876`: sleep timer countdown
+  - `ui.nim:330-335`: UI indicators
+  - Keybindings `Shift+S` and `Shift+R` in `gtm.nim:748-751`
+  - Command palette entries in `commands.nim:127-132`
+- **What's actually missing**: Daemon-side commands for these features (shuffle/repeat/sleep state only in TUI)
 
-- **[no-spec] Command Palette spec** — exists in specs README index but file missing. Should document (trigger with `:`, navigation, fuzzy search, available commands).
+### `PLAYLIST_MGMT.md` — CLAIMS FEATURES MISSING THAT ARE IMPLEMENTED
+- Create, delete, rename playlists — all via daemon commands
+- Add/remove tracks — via daemon commands
+- View playlist contents (Enter on playlist, Escape to go back) — working
+- Playlist input overlay for naming/confirmation — working
+- **What's actually missing**: Reorder tracks, M3U export/import at daemon level
 
-## Missing Specs (now authored)
-- ~~`specs/DEPENDENCIES.md` (P0)~~ ✅ authored
-- ~~`specs/VOLUME_CUE.md` (P1)~~ ✅ authored
-- ~~`specs/ICONS_VISUALS.md` (P1)~~ ✅ authored
-- ~~`specs/COMMAND_PALETTE.md` (P2)~~ ✅ authored
-- ~~`specs/SHUFFLE_REPEAT_SLEEP.md` (P3)~~ ✅ authored
+### `UI_COMPONENTS.md` — DESCRIBES VISUALIZER OVERLAP BUG AS CURRENT
+- Fix already in source at `ui.nim:586-589` (60-119 width: split into nowplaying + 20-col visualizer sidebar)
+- Tab bar issues described as "current behavior" but code shows correct implementation
+
+### `DAEMON_IPC.md` — MISSING COMMANDS DOCUMENTATION
+- 7 playlist commands not documented: `create_playlist`, `delete_playlist`, `rename_playlist`, `add_to_playlist`, `remove_from_playlist`, `list_playlists`, `get_playlist_tracks`
+- `audio_working` field in status response not documented
+- `scan` command documented but not parseable (dead code)
+- `dckNext`/`dckPrev` in handler stop player but don't advance queue — this is expected (client handles queue)
+
+### `ICONS_VISUALS.md` — CLAIMS ICONS NOT USED IN UI
+- `ProgressBarComp` at `ui.nim:318-322` uses `currentIcons()` for play/pause/stop
+- Volume icon selection at `ui.nim:110-114`
+- LibraryView at `ui.nim:180-184` uses icon pack
+- Shuffle/repeat icons at `ui.nim:330-335`
+
+### `VOLUME_CUE.md` — CLAIMS NO VOLUME CUE EXISTS
+- `VolumeCueOverlay` at `ui.nim:508-519` fully implemented
+- `volumeCueTimer` and `volumeCueVolume` state fields
+- `showVolumeCue()` called from both `adjustVolume` and `toggleMute`
+- Timer decremented each frame at `gtm.nim:867-868`
+
+### `COMMAND_PALETTE.md` — CLAIMS ISSUE WITH `/` TRIGGERING FILTER
+- `/` in `imCommandPalette` mode sets `paletteSearchMode = true` (`gtm.nim:564-565`)
+- This is already the correct behavior — `/` searches within palette
+- Display limit already 20 (spec says to increase to 15-20)
+
+---
+
+## New Findings (not in previous plan)
+
+### No test files exist anywhere
+- Zero tests in entire project — no `tests/` directory, no test files
+- **Action**: Add test infrastructure when implementing fixes
+
+### `PcmRingBuffer.writePcm` never called
+- `visualizer.nim:59-69` defines `writePcm` but no code calls it
+- Daemon calls `viz.readPcm()` but nothing writes to the SHM ring buffer
+- MiniAudio C prototypes don't include SHM writing
+- This may explain flat visualizer and potential audio init issues
+
+### `config.nims` already has flexible dep resolution
+- Previous plan treated this as P0 blocker, but code already handles:
+  1. Env var (`NIMWAVE_PATH` etc.)
+  2. Relative path (`../../sources/*`)
+  3. Nimble packages (`~/.nimble/pkgs/*`)
+  4. Hardcoded `/home/prjctimg/sources/*` (last resort)
+- **Action**: Remove the hardcoded fallback at `config.nims:24` and add error message directing user to set env var
+
+### `idle_timeout` config exists in schema but unused
+- Schema has it, daemon hardcodes 300
+- loadConfig doesn't read it
+- **Fix**: Wire config value to daemon
+
+### `lastTab` saved/loaded but overwritten
+- `loadConfig` sets `state.tab`, then `runTui` immediately overwrites to `tabNowPlaying`
+- **Fix**: Remove the overwrite or make it conditional
+
+### Theme `tmLigh` typo (`theme.nim:5`)
+- Cosmetic only (used consistently throughout as `tmLigh`)
+- But should be `tmLight` for correctness
+
+### Help overlay doesn't list shuffle, repeat, sleep keybindings
+- `ui.nim:488-498` hardcodes keybinding help list
+- Missing: `Shift+S` shuffle, `Shift+R` repeat, `: sleep_timer`, `m` mute
+
+### ProcessBackend has no metadata extraction
+- `audio.nim:217-236` — `getMetadata` is only implemented for `MiniAudioBackend`
+- `ProcessBackend` uses base method which returns empty data
+- When daemon falls back to process backend, metadata is always empty
+
+---
 
 ## Infrastructure
-- No test files exist anywhere — need test infrastructure
-- `vendor/miniaudio/miniaudio_impl.c` needs review for audio init issues
-- `vendor/sqlite/sqlite3.c` is vendored but `library.nim` has SQL injection issues
+
+- **No test files** — need test infrastructure
+- `vendor/miniaudio/miniaudio_impl.c` — needs review for: PCM SHM writing, audio init success on various systems
+- `vendor/sqlite/sqlite3.c` — vendored; `library.nim` still has one SQL injection issue (getArtistId INSERT)
+
+## Cleaned/Resolved Items (removed from active plan)
+
+These items from previous plan are already implemented in source and no longer need action:
+- Visualizer overlap fix (spec-outdated: code already has fix)
+- Shuffle/repeat/sleep implementation (code has full TUI-side implementation)
+- Playlist CRUD + daemon commands (all 7 commands exist)
+- Volume visual cue (full implementation exists)
+- Command palette features (all requested commands present)
+- State-dependent icons (ProgressBarComp, LibraryView use currentIcons())
+- Tab bar `[]` wrapping (both active/inactive have brackets)
+- Song details unknown field filtering (wlCond template works)
+- Time elapsed/remaining display (correct format in both places)
+- `/` search within command palette (paletteSearchMode works)

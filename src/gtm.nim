@@ -1,4 +1,4 @@
-import os, terminal, strutils, unicode, json, sets, math, sequtils, algorithm, times
+import os, terminal, strutils, unicode, json, sets, math, sequtils, algorithm, times, random
 from illwave as iw import nil
 from nimwave as nw import nil
 import state, ui, audio, library, theme, commands, daemon_client, daemon, visualizer, cli
@@ -18,13 +18,16 @@ proc loadConfig(state: var AppState) =
         state.config.refreshTheme = json["refresh_theme"].getBool(false)
       if json.hasKey("viz_visible"):
         state.vizVisible = json["viz_visible"].getBool(true)
+      if json.hasKey("idle_timeout"):
+        state.config.idleTimeout = json["idle_timeout"].getInt(300)
       if json.hasKey("visualizer"):
         let vizNode = json["visualizer"]
         if vizNode.hasKey("bar_count"):
           state.viz.barCount = vizNode["bar_count"].getInt(32)
       let refreshSeed = state.config.refreshTheme or state.config.theme == "random"
       state.theme = getTheme(state.config.theme, refreshSeed)
-    except: discard
+    except:
+      stderr.writeLine("[gtm] loadConfig error: " & getCurrentExceptionMsg())
 
 proc saveConfig(state: AppState) =
   let dir = state.configPath.parentDir()
@@ -39,7 +42,8 @@ proc saveConfig(state: AppState) =
   }
   try:
     writeFile(state.configPath, $json)
-  except: discard
+  except:
+    stderr.writeLine("[gtm] saveConfig error: " & getCurrentExceptionMsg())
 
 proc loadLibrary(state: var AppState) =
   if state.libraryTracks.len > 0: return
@@ -82,7 +86,14 @@ proc getCurrentTrack(state: AppState): Track =
     return state.libraryTracks[min(state.selectIndex, state.libraryTracks.len - 1)]
   Track()
 
+proc generateShuffleOrder(count: int): seq[int] =
+  result = toSeq(0..<count)
+  for i in countup(0, count - 2):
+    let j = rand(i..<count)
+    swap(result[i], result[j])
+
 proc performFilter(state: var AppState) =
+  state.rebuildDisplayItems()
   state.filteredIndices = @[]
   if state.filterText.len > 0:
     let lowerFilter = state.filterText.toLowerAscii()
@@ -104,15 +115,37 @@ proc playSelected(state: var AppState) =
 proc nextTrack(state: var AppState) =
   let items = state.displayItems
   if items.len == 0: return
-  let next = (state.selectIndex + 1) mod items.len
-  state.selectIndex = next
+  if state.shuffleEnabled:
+    state.shuffleIndex = (state.shuffleIndex + 1) mod state.shuffleOrder.len
+    state.selectIndex = state.shuffleOrder[state.shuffleIndex]
+  elif state.repeatMode == 2:
+    state.selectIndex = state.selectIndex
+  else:
+    var next = state.selectIndex + 1
+    if next >= items.len:
+      if state.repeatMode == 1:
+        next = 0
+      else:
+        state.player.stop()
+        state.status = psStopped
+        return
+    state.selectIndex = next
   state.playSelected()
 
 proc prevTrack(state: var AppState) =
   let items = state.displayItems
   if items.len == 0: return
-  let prev = (state.selectIndex - 1 + items.len) mod items.len
-  state.selectIndex = prev
+  if state.shuffleEnabled:
+    state.shuffleIndex = (state.shuffleIndex - 1 + state.shuffleOrder.len) mod state.shuffleOrder.len
+    state.selectIndex = state.shuffleOrder[state.shuffleIndex]
+  else:
+    var prev = state.selectIndex - 1
+    if prev < 0:
+      if state.repeatMode == 1:
+        prev = items.len - 1
+      else:
+        prev = 0
+    state.selectIndex = prev
   state.playSelected()
 
 proc showVolumeCue(state: var AppState) =
@@ -124,6 +157,17 @@ proc adjustVolume(state: var AppState, delta: int) =
   state.player.setVolume(state.volume)
   state.showVolumeCue()
   if state.tab == tabSettings: state.rebuildDisplayItems()
+
+proc toggleShuffle(state: var AppState) =
+  state.shuffleEnabled = not state.shuffleEnabled
+  if state.shuffleEnabled:
+    let count = state.displayItems.len
+    if count > 0:
+      state.shuffleOrder = generateShuffleOrder(count)
+      state.shuffleIndex = 0
+
+proc cycleRepeat(state: var AppState) =
+  state.repeatMode = (state.repeatMode + 1) mod 3
 
 proc toggleMute(state: var AppState) =
   if state.volume > 0:
@@ -169,22 +213,30 @@ proc removeSelected(state: var AppState) =
   state.rebuildDisplayItems()
   state.selectIndex = min(state.selectIndex, state.displayItems.len - 1)
 
+proc cleanupAndQuit(state: var AppState, stopDaemon: bool) =
+  state.saveConfig()
+  if state.player of DaemonClient and stopDaemon:
+    DaemonClient(state.player).sendQuitDaemon()
+  elif not stopDaemon:
+    state.player.shutdown()
+  if state.viz != nil: state.viz.stopCapture()
+  try: removeFile(sockPath()) except: stderr.writeLine("[gtm] removeFile sock: " & getCurrentExceptionMsg())
+  try: removeFile(pidPath()) except: stderr.writeLine("[gtm] removeFile pid: " & getCurrentExceptionMsg())
+  terminal.showCursor()
+  eraseScreen()
+  setCursorPos(0, 0)
+  quit(0)
+
 proc quitBackground(state: var AppState) =
   state.saveConfig()
   if state.viz != nil: state.viz.stopCapture()
+  terminal.showCursor()
+  eraseScreen()
+  setCursorPos(0, 0)
   quit(0)
 
 proc quitDaemon(state: var AppState) =
-  state.saveConfig()
-  if state.player of DaemonClient:
-    let cli = DaemonClient(state.player)
-    cli.sendQuitDaemon()
-  else:
-    state.player.shutdown()
-  if state.viz != nil: state.viz.stopCapture()
-  try: removeFile(sockPath()) except: discard
-  try: removeFile(pidPath()) except: discard
-  quit(0)
+  cleanupAndQuit(state, true)
 
 proc toggleVisualizer(state: var AppState) =
   state.vizVisible = not state.vizVisible
@@ -245,8 +297,42 @@ proc addSelectionToPlaylist(state: var AppState) =
   state.selectedIndices = initHashSet[int]()
   state.rebuildDisplayItems()
 
+proc addTracksToPlaylist(state: var AppState, playlistId: int64) =
+  if state.selectedIndices.len == 0:
+    state.addingToPlaylistId = -1
+    state.addingToPlaylistName = ""
+    state.tab = tabPlaylists
+    state.rebuildDisplayItems()
+    return
+  var plIdx = -1
+  for i, pl in state.libraryPlaylists:
+    if pl.id == playlistId:
+      plIdx = i
+      break
+  if plIdx < 0: return
+  var added = 0
+  for selIdx in state.selectedIndices:
+    let realIdx = state.filteredIndex(selIdx)
+    if realIdx >= 0 and realIdx < state.libraryTracks.len:
+      let track = state.libraryTracks[realIdx]
+      if track.id notin state.libraryPlaylists[plIdx].trackIds:
+        state.libraryPlaylists[plIdx].trackIds.add(track.id)
+        if state.player of DaemonClient:
+          discard DaemonClient(state.player).addToPlaylist(playlistId, track.id, state.libraryPlaylists[plIdx].trackIds.len - 1)
+        added += 1
+  state.selectedIndices = initHashSet[int]()
+  state.addingToPlaylistId = -1
+  state.addingToPlaylistName = ""
+  state.tab = tabPlaylists
+  state.playlistContentsIdx = plIdx
+  state.selectIndex = 0
+  state.rebuildDisplayItems()
+
 proc handleQuitSignal() {.noconv.} =
   iw.deinit()
+  terminal.showCursor()
+  eraseScreen()
+  setCursorPos(0, 0)
   quit(0)
 
 const themePickerPresets* = @[
@@ -343,6 +429,14 @@ proc dispatchCommand(state: var AppState, cmdId: string) =
   of "show_now_playing":
     state.tab = tabNowPlaying
     state.rebuildDisplayItems()
+  of "toggle_shuffle":
+    state.toggleShuffle()
+  of "toggle_repeat":
+    state.cycleRepeat()
+  of "sleep_timer":
+    state.playlistInputActive = true
+    state.playlistInputPrompt = "Sleep timer minutes (5, 10, 15, 30, 60, or 0 to cancel):"
+    state.playlistInputBuffer = ""
   else: discard
 
 proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
@@ -423,10 +517,22 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
                 duration: 0.0, id: int64(state.libraryTracks.len + 1)
               ))
             state.rebuildDisplayItems()
+        elif state.playlistInputPrompt.contains("Sleep timer"):
+          let minutes = state.playlistInputBuffer.parseInt()
+          if minutes > 0:
+            state.sleepTimerRemaining = minutes
+          state.sleepTimerFrames = 0
         else:
           if state.player of DaemonClient:
             discard DaemonClient(state.player).createPlaylist(state.playlistInputBuffer)
             state.loadPlaylistsFromDaemon()
+            if state.libraryPlaylists.len > 0:
+              state.addingToPlaylistId = state.libraryPlaylists[^1].id
+              state.addingToPlaylistName = state.libraryPlaylists[^1].name
+              state.tab = tabLibrary
+              state.selectMode = false
+              state.selectedIndices = initHashSet[int]()
+              state.rebuildDisplayItems()
       state.playlistInputActive = false
       state.playlistInputBuffer = ""
       state.playlistInputPrompt = ""
@@ -445,7 +551,9 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     of iw.Key.Escape:
       state.mode = imNormal
       state.paletteQuery = ""
+      state.paletteSearchMode = false
     of iw.Key.Enter:
+      state.paletteSearchMode = false
       if state.paletteResults.len > 0 and state.paletteSelect >= 0 and
          state.paletteSelect < state.paletteResults.len:
         let cmdIdx = state.paletteResults[state.paletteSelect]
@@ -457,20 +565,24 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           return
       state.mode = imNormal
       state.paletteQuery = ""
-    of iw.Key.Backspace:
-      if state.paletteQuery.len > 0:
-        state.paletteQuery = state.paletteQuery[0..^2]
+    of iw.Key.Slash:
+      state.paletteSearchMode = true
+      state.paletteQuery = ""
     of iw.Key.J, iw.Key.Down:
       if state.paletteSelect < state.paletteResults.len - 1:
         state.paletteSelect.inc
     of iw.Key.K, iw.Key.Up:
       if state.paletteSelect > 0:
         state.paletteSelect.dec
+    of iw.Key.Backspace:
+      if state.paletteSearchMode and state.paletteQuery.len > 0:
+        state.paletteQuery = state.paletteQuery[0..^2]
     else:
-      for ch in chars:
-        let code = ch.int
-        if code >= 32 and code < 127:
-          state.paletteQuery &= $ch
+      if state.paletteSearchMode:
+        for ch in chars:
+          let code = ch.int
+          if code >= 32 and code < 127:
+            state.paletteQuery &= $ch
     if state.paletteQuery.len > 0:
       state.paletteResults = @[]
       for i, cmd in state.commands:
@@ -478,11 +590,10 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
            fuzzyMatch(state.paletteQuery, cmd.description):
           state.paletteResults.add(i)
       state.paletteSelect = 0
-    else:
+    elif not state.paletteSearchMode:
       state.paletteResults = @[]
       for i in 0..<state.commands.len:
         state.paletteResults.add(i)
-      state.paletteSelect = 0
     return
   of imLeaderMode:
     case key
@@ -617,7 +728,9 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
   of iw.Key.Minus, iw.Key.Underscore: state.adjustVolume(-5)
   of iw.Key.M: state.toggleMute()
   of iw.Key.G:
-    if state.ggPressed:
+    if state.addingToPlaylistId >= 0:
+      state.addTracksToPlaylist(state.addingToPlaylistId)
+    elif state.ggPressed:
       state.goToFirst()
       state.ggPressed = false
     else:
@@ -636,6 +749,10 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
   of iw.Key.R:
     if state.tab == tabPlaylists and state.playlistContentsIdx < 0:
       dispatchCommand(state, "rename_playlist")
+  of iw.Key.ShiftS:
+    state.toggleShuffle()
+  of iw.Key.ShiftR:
+    state.cycleRepeat()
   of iw.Key.Slash:
     state.mode = imFilter
     state.filterText = ""
@@ -660,11 +777,16 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     state.updateThemePickerResults()
     state.themePickerSelect = 0
   of iw.Key.Q:
-    if state.viz != nil: state.viz.stopCapture()
-    state.saveConfig()
-    quit(0)
+    cleanupAndQuit(state, false)
   of iw.Key.Escape:
-    if state.playlistContentsIdx >= 0:
+    if state.addingToPlaylistId >= 0:
+      state.addingToPlaylistId = -1
+      state.addingToPlaylistName = ""
+      state.selectedIndices = initHashSet[int]()
+      state.selectMode = false
+      state.tab = tabPlaylists
+      state.rebuildDisplayItems()
+    elif state.playlistContentsIdx >= 0:
       state.playlistContentsIdx = -1
       state.selectIndex = 0
       state.rebuildDisplayItems()
@@ -672,6 +794,8 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
 
 proc processEvents(state: var AppState) =
   let events = state.player.pollEvents()
+  if state.player of DaemonClient:
+    state.audioAvailable = DaemonClient(state.player).working
   for ev in events:
     case ev.kind
     of aekPositionChanged: state.timePos = ev.floatVal
@@ -681,9 +805,16 @@ proc processEvents(state: var AppState) =
     of aekPlaybackPaused: state.status = psPaused
     of aekPlaybackStopped: state.status = psStopped
     of aekTrackEnded:
-      state.player.stop()
-      state.status = psStopped
-      state.nextTrack()
+      if state.sleepTimerRemaining > 0:
+        state.player.stop()
+        state.status = psStopped
+        state.sleepTimerRemaining = 0
+      elif state.repeatMode == 2:
+        state.playSelected()
+      else:
+        state.player.stop()
+        state.status = psStopped
+        state.nextTrack()
     else: discard
 
 proc runTui(args: seq[string]) =
@@ -697,10 +828,12 @@ proc runTui(args: seq[string]) =
   ctx.data.player = dClient
   ctx.data.daemonConnected = dClient.connected
   ctx.data.loadPlaylistsFromDaemon()
-  ctx.data.audioAvailable = dClient.connected
+  ctx.data.audioAvailable = dClient.working
   initApp(ctx.data)
   ctx.data.loadConfig()
-  ctx.data.tab = tabNowPlaying
+  if ctx.data.tab != tabNowPlaying and ctx.data.tab != tabLibrary and
+     ctx.data.tab != tabPlaylists and ctx.data.tab != tabSettings:
+    ctx.data.tab = tabNowPlaying
   ctx.data.buildDefaultCommands()
   ctx.data.loadLibrary()
   ctx.data.buildPlaylistFromArgs(args)
@@ -734,6 +867,14 @@ proc runTui(args: seq[string]) =
       processEvents(ctx.data)
       if ctx.data.volumeCueTimer > 0:
         ctx.data.volumeCueTimer.dec
+      if ctx.data.sleepTimerRemaining > 0:
+        ctx.data.sleepTimerFrames.inc
+        if ctx.data.sleepTimerFrames >= 60:
+          ctx.data.sleepTimerFrames = 0
+          ctx.data.sleepTimerRemaining.dec
+          if ctx.data.sleepTimerRemaining <= 0:
+            ctx.data.player.pause()
+            ctx.data.status = psPaused
       if ctx.data.viz != nil:
         ctx.data.viz.readPcm()
       ctx.tb = iw.initTerminalBuffer(
