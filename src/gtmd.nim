@@ -1,0 +1,3 @@
+import daemon
+
+runDaemon()
