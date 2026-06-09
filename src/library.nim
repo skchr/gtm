@@ -1,4 +1,4 @@
-import os, strutils
+import os, strutils, sequtils, algorithm, sets, tables
 import state, theme
 
 when defined(useSqlite):
@@ -82,22 +82,6 @@ when defined(useSqlite):
 
   proc finalize(stmt: sqlite3_stmt) =
     discard sqlite3_finalize(stmt)
-
-  proc execSql*(db: sqlite3, sql: string; params: varargs[string, `$`]) =
-    let stmt = prepare(db, sql)
-    if stmt == nil: return
-    for i, p in params:
-      bindText(stmt, cint(i + 1), p)
-    discard sqlite3_step(stmt)
-    finalize(stmt)
-
-  proc execSqlI*(db: sqlite3, sql: string; params: varargs[string, `$`]) =
-    let stmt = prepare(db, sql)
-    if stmt == nil: return
-    for i, p in params:
-      bindText(stmt, cint(i + 1), p)
-    discard sqlite3_step(stmt)
-    finalize(stmt)
 
   proc openLibrary*(path: string): LibraryDb =
     let dir = path.parentDir()
@@ -242,7 +226,7 @@ when defined(useSqlite):
 
   proc loadTracks*(lib: LibraryDb): seq[Track] =
     let stmt = prepare(lib.db, """
-      SELECT t.id, t.path, t.title, a.name, al.title, t.duration, t.track_num, t.year, t.genre, t.play_count, t.artist_id, t.album_id
+      SELECT t.id, t.path, t.title, a.name, al.title, t.duration, t.track_num, t.year, t.genre, t.play_count, t.artist_id, t.album_id, t.added_at, t.last_played
       FROM tracks t
       LEFT JOIN artists a ON t.artist_id = a.id
       LEFT JOIN albums al ON t.album_id = al.id
@@ -255,7 +239,8 @@ when defined(useSqlite):
         artist: colText(stmt, 3.cint), album: colText(stmt, 4.cint), duration: colFloat(stmt, 5.cint),
         trackNum: colInt(stmt, 6.cint), year: colInt(stmt, 7.cint),
         genre: colText(stmt, 8.cint), playCount: colInt(stmt, 9.cint),
-        artistId: colInt64(stmt, 10.cint), albumId: colInt64(stmt, 11.cint)
+        artistId: colInt64(stmt, 10.cint), albumId: colInt64(stmt, 11.cint),
+        addedAt: colText(stmt, 12.cint), lastPlayed: colText(stmt, 13.cint)
       ))
     finalize(stmt)
 
@@ -363,12 +348,29 @@ when defined(useSqlite):
     discard sqlite3_step(stmt)
     finalize(stmt)
 
+  proc findTrackByPath*(lib: LibraryDb, path: string): int64 =
+    let stmt = prepare(lib.db, "SELECT id FROM tracks WHERE path = ?")
+    if stmt == nil: return 0
+    bindText(stmt, 1.cint, path)
+    if sqlite3_step(stmt) == SQLITE_ROW:
+      result = colInt64(stmt, 0.cint)
+    finalize(stmt)
+
   proc updatePlayCount*(lib: LibraryDb, trackId: int64) =
     let stmt = prepare(lib.db, "UPDATE tracks SET play_count = play_count + 1, last_played = datetime('now') WHERE id = ?")
     if stmt == nil: return
     bindInt64(stmt, 1.cint, trackId)
     discard sqlite3_step(stmt)
     finalize(stmt)
+
+  proc updateTrackPath*(lib: LibraryDb, oldPath, newPath, newTitle: string) =
+    let stmt = prepare(lib.db, "UPDATE tracks SET path=?, title=? WHERE path=?")
+    if stmt != nil:
+      bindText(stmt, 1.cint, newPath)
+      bindText(stmt, 2.cint, newTitle)
+      bindText(stmt, 3.cint, oldPath)
+      discard sqlite3_step(stmt)
+      finalize(stmt)
 
   proc closeDb*(lib: LibraryDb) =
     if lib != nil and lib.db != nil:
@@ -393,7 +395,9 @@ else:
   proc renamePlaylist*(lib: LibraryDb, playlistId: int64, name: string) = discard
   proc getPlaybackState*(lib: LibraryDb, key: string): string = ""
   proc setPlaybackState*(lib: LibraryDb, key, value: string) = discard
+  proc findTrackByPath*(lib: LibraryDb, path: string): int64 = 0
   proc updatePlayCount*(lib: LibraryDb, trackId: int64) = discard
+  proc updateTrackPath*(lib: LibraryDb, oldPath, newPath, newTitle: string) = discard
   proc closeDb*(lib: LibraryDb) = discard
   proc getArtistId*(lib: LibraryDb, name: string): int64 = 0
   proc getAlbumId*(lib: LibraryDb, title: string, artistId: int64, year: int, genre: string): int64 = 0
@@ -477,17 +481,35 @@ proc loadFromArgs*(args: seq[string]): seq[string] =
       except:
         stderr.writeLine("[gtm] loadFromArgs error: " & getCurrentExceptionMsg())
 
-proc rebuildDisplayItems*(state: var AppState) =
-  state.displayItems = @[]
-  case state.tab
-  of tabNowPlaying:
-    for i, track in state.libraryTracks:
+proc addTrackItems(state: var AppState, indices: seq[int]) =
+  for i in indices:
+    if i >= 0 and i < state.libraryTracks.len:
+      let track = state.libraryTracks[i]
       state.displayItems.add(LibraryItem(
         kind: likTrack, trackIdx: i,
         label: track.displayName(),
         sublabel: track.displayArtist() & " - " & track.displayAlbum(),
         id: track.id
       ))
+
+proc sortedIndices(state: AppState, field: string): seq[int] =
+  result = toSeq(0..<state.libraryTracks.len)
+  case field
+  of "addedAt":
+    result.sort(proc(a, b: int): int = cmp(state.libraryTracks[b].addedAt, state.libraryTracks[a].addedAt))
+  of "lastPlayed":
+    result.sort(proc(a, b: int): int = cmp(state.libraryTracks[b].lastPlayed, state.libraryTracks[a].lastPlayed))
+  of "mostPlayed":
+    result.sort(proc(a, b: int): int = cmp(state.libraryTracks[b].playCount, state.libraryTracks[a].playCount))
+  of "leastPlayed":
+    result.sort(proc(a, b: int): int = cmp(state.libraryTracks[a].playCount, state.libraryTracks[b].playCount))
+  else: discard
+
+proc rebuildItems*(state: var AppState) =
+  state.displayItems = @[]
+  case state.tab
+  of tabNowPlaying:
+    state.addTrackItems(toSeq(0..<state.libraryTracks.len))
   of tabLibrary:
     if state.filterScope == fsArtists:
       for a in state.libraryArtists:
@@ -499,41 +521,57 @@ proc rebuildDisplayItems*(state: var AppState) =
           sublabel: a.artistName & " (" & $a.year & ")",
           id: a.id
         ))
-    else:
-      for i, track in state.libraryTracks:
-        state.displayItems.add(LibraryItem(
-          kind: likTrack, trackIdx: i,
-          label: track.displayName(),
-          sublabel: track.displayArtist() & " - " & track.displayAlbum(),
-          id: track.id
-        ))
-  of tabPlaylists:
-    if state.playlistContentsIdx >= 0:
-      let plIdx = state.playlistContentsIdx
-      if plIdx >= 0 and plIdx < state.libraryPlaylists.len:
-        let pl = state.libraryPlaylists[plIdx]
-        for j, tid in pl.trackIds:
-          var label = "Track #" & $tid
-          for t in state.libraryTracks:
-            if t.id == tid:
-              label = t.displayName()
-              break
-          state.displayItems.add(LibraryItem(
-            kind: likTrack, trackIdx: j,
-            label: label,
-            sublabel: "",
-            id: tid
-          ))
-    else:
+    elif state.filterScope == fsPlaylists:
       for pl in state.libraryPlaylists:
         state.displayItems.add(LibraryItem(
           kind: likPlaylist, label: pl.name,
           sublabel: $pl.trackIds.len & " tracks",
           id: pl.id
         ))
+    elif state.filterScope == fsFavourites:
+      var favIndices: seq[int] = @[]
+      for i, t in state.libraryTracks:
+        if t.id in state.favouriteIds or t.isFavourite:
+          favIndices.add(i)
+      state.addTrackItems(favIndices)
+    elif state.filterScope == fsRecent:
+      state.addTrackItems(state.sortedIndices("addedAt"))
+    elif state.filterScope == fsLastPlayed:
+      state.addTrackItems(state.sortedIndices("lastPlayed"))
+    elif state.filterScope == fsMostPlayed:
+      state.addTrackItems(state.sortedIndices("mostPlayed"))
+    elif state.filterScope == fsLeastPlayed:
+      state.addTrackItems(state.sortedIndices("leastPlayed"))
+    elif state.filterScope == fsDownloads:
+      var dlIndices: seq[int] = @[]
+      let dlDir = state.ytDownloadDir
+      for i, t in state.libraryTracks:
+        if t.path.startsWith(dlDir):
+          dlIndices.add(i)
+        else:
+          for k, v in state.ytDownloaded:
+            if v == t.path:
+              dlIndices.add(i)
+              break
+      state.addTrackItems(dlIndices)
+    else:
+      state.addTrackItems(toSeq(0..<state.libraryTracks.len))
   of tabSettings:
     state.displayItems.add(LibraryItem(kind: likTrack, label: "Theme: " & themeName(state.config.theme), sublabel: "Enter to change", id: 0))
     state.displayItems.add(LibraryItem(kind: likTrack, label: "Volume: " & $state.volume & "%", sublabel: "Shift+J/K or +/-", id: 1))
     state.displayItems.add(LibraryItem(kind: likTrack, label: "Refresh Theme: " & (if state.config.refreshTheme: "On" else: "Off"), sublabel: "Enter to toggle", id: 2))
     state.displayItems.add(LibraryItem(kind: likTrack, label: "Visualizer: " & (if state.vizVisible: "Visible" else: "Hidden"), sublabel: "Enter to toggle", id: 3))
     state.displayItems.add(LibraryItem(kind: likTrack, label: "Daemon: " & (if state.daemonConnected: "Connected" else: "Disconnected"), sublabel: "", id: 4))
+    state.displayItems.add(LibraryItem(kind: likTrack, label: "Reset to Defaults", sublabel: "Enter to reset all settings", id: 5))
+    state.displayItems.add(LibraryItem(kind: likTrack, label: "Max Concurrent Downloads: " & $state.ytMaxConcurrentDownloads, sublabel: "Enter to adjust", id: 7))
+    state.displayItems.add(LibraryItem(kind: likTrack, label: "Batch YT Mode: " & (if state.ytBatchDownloadMode: "Download" else: "URL Ref"), sublabel: "Enter to toggle", id: 8))
+    let cookieLabel = if state.ytCookieSource.len == 0: "(none)" else: state.ytCookieSource
+    state.displayItems.add(LibraryItem(kind: likTrack, label: "YT Cookie: " & cookieLabel, sublabel: "Enter to change", id: 9))
+    let runtimeLabel = if state.ytJsRuntime.len == 0: "node (default)" else: state.ytJsRuntime
+    state.displayItems.add(LibraryItem(kind: likTrack, label: "YT JS Runtime: " & runtimeLabel, sublabel: "Enter to cycle", id: 10))
+    state.displayItems.add(LibraryItem(kind: likTrack, label: "Clear Search History (" & $state.ytSearchHistory.len & " entries)", sublabel: "Enter to clear", id: 11))
+    state.displayItems.add(LibraryItem(kind: likTrack, label: "Results Per Page: " & $state.ytSearchPageSize, sublabel: "Enter to adjust", id: 12))
+    state.displayItems.add(LibraryItem(kind: likTrack, label: "Crossfade Duration: " & $state.crossfadeDuration & "s", sublabel: "Enter to adjust", id: 13))
+  state.selectIndex = min(state.selectIndex, state.displayItems.len - 1)
+  if state.selectIndex < 0 and state.displayItems.len > 0:
+    state.selectIndex = 0

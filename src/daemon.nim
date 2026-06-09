@@ -14,7 +14,7 @@ type
     dckSetShuffle, dckSetRepeat, dckSetSleepTimer, dckGetState, dckResume,
     dckPrepareNext, dckCrossfade,
     dckSetEqBand, dckSetEqPreset,
-    dckGetLibrary, dckAddTrack
+    dckGetLibrary, dckAddTrack, dckUpdateTrackPath
 
   DaemonCmd* = object
     kind*: DaemonCmdKind
@@ -40,6 +40,15 @@ type
     repeatMode*: int
     sleepTimerRemaining*: int
     sleepTimerFrames*: int
+    persistFrames: int
+    playbackQueue*: seq[string]
+    shuffleOrder*: seq[int]
+    shuffleIndex*: int
+    crossfadeDuration*: int
+    crossfadePrepared*: bool
+    crossfadeStarted*: bool
+    crossfadeNextPath*: string
+    earlyPreloaded*: bool
 
 proc writePidFile() =
   let dir = stateDir()
@@ -113,6 +122,8 @@ proc parseDaemonCommand(line: string): DaemonCmd =
     of "get_library": result.kind = dckGetLibrary
     of "add_track":
       result.kind = dckAddTrack; result.strArg = $j["data"]
+    of "update_track_path":
+      result.kind = dckUpdateTrackPath; result.strArg = $j["data"]
     else: result.kind = dckStatus
   except:
     result.kind = dckStatus
@@ -131,6 +142,15 @@ proc serializeEvents(events: seq[AudioEvent]): JsonNode =
     of aekTrackEnded: obj["reason"] = %"eof"
     else: discard
     result.add(obj)
+
+proc savePlaybackState(d: Daemon) =
+  if d.lib != nil:
+    d.lib.setPlaybackState("volume", $d.player.volume)
+    d.lib.setPlaybackState("time_pos", $d.player.timePos)
+    d.lib.setPlaybackState("track_path", d.currentTrackPath)
+    d.lib.setPlaybackState("track_title", d.currentTrackTitle)
+    d.lib.setPlaybackState("track_channel", d.currentTrackChannel)
+    d.lib.setPlaybackState("state", $(d.player.state))
 
 proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
   result = %*{"ok": true}
@@ -181,14 +201,8 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
   of dckGetVolume:
     result["volume"] = %d.player.volume
   of dckQuit:
-    let stateStr = $(d.player.state)
+    d.savePlaybackState()
     if d.lib != nil:
-      d.lib.setPlaybackState("volume", $d.player.volume)
-      d.lib.setPlaybackState("time_pos", $d.player.timePos)
-      d.lib.setPlaybackState("track_path", d.currentTrackPath)
-      d.lib.setPlaybackState("track_title", d.currentTrackTitle)
-      d.lib.setPlaybackState("track_channel", d.currentTrackChannel)
-      d.lib.setPlaybackState("state", stateStr)
       d.lib.closeDb()
     d.viz.stopCapture()
     d.player.shutdown()
@@ -254,6 +268,17 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
           let trackId = d.lib.addTrack(path, title, artist, album, duration, 0, 0, "")
           result["track_id"] = %trackId
       except: stderr.writeLine("[gtm] addTrack error: " & getCurrentExceptionMsg())
+  of dckUpdateTrackPath:
+    if d.lib != nil and cmd.strArg.len > 0:
+      try:
+        let data = parseJson(cmd.strArg)
+        let oldPath = data{"old_path"}.getStr("")
+        let newPath = data{"new_path"}.getStr("")
+        let newTitle = data{"title"}.getStr("")
+        if oldPath.len > 0 and newPath.len > 0:
+          d.lib.updateTrackPath(oldPath, newPath, newTitle)
+          result["updated"] = %true
+      except: stderr.writeLine("[gtm] updateTrackPath error: " & getCurrentExceptionMsg())
   of dckCreatePlaylist:
     if d.lib != nil and cmd.strArg.len > 0:
       let id = d.lib.createPlaylist(cmd.strArg)
@@ -415,7 +440,16 @@ proc runDaemon*() =
     shuffleEnabled: false,
     repeatMode: 0,
     sleepTimerRemaining: 0,
-    sleepTimerFrames: 0
+    sleepTimerFrames: 0,
+    persistFrames: 0,
+    playbackQueue: @[],
+    shuffleOrder: @[],
+    shuffleIndex: 0,
+    crossfadeDuration: 0,
+    crossfadePrepared: false,
+    crossfadeStarted: false,
+    crossfadeNextPath: "",
+    earlyPreloaded: false
   )
   daemon.viz.startCapture()
   let libPath = dataDir() & "/gtm.db"
@@ -506,25 +540,21 @@ proc runDaemon*() =
         daemon.sleepTimerFrames = 0
         daemon.sleepTimerRemaining.dec
         if daemon.sleepTimerRemaining <= 0:
+          daemon.savePlaybackState()
           if daemon.lib != nil:
-            daemon.lib.setPlaybackState("volume", $daemon.player.volume)
-            daemon.lib.setPlaybackState("time_pos", $daemon.player.timePos)
-            daemon.lib.setPlaybackState("track_path", daemon.currentTrackPath)
-            daemon.lib.setPlaybackState("track_title", daemon.currentTrackTitle)
-            daemon.lib.setPlaybackState("track_channel", daemon.currentTrackChannel)
             daemon.lib.closeDb()
           daemon.viz.stopCapture()
           daemon.player.shutdown()
           daemon.running = false
           break
+    daemon.persistFrames.inc
+    if daemon.persistFrames >= 1800:
+      daemon.persistFrames = 0
+      daemon.savePlaybackState()
     daemon.idleFrames.inc
     if daemon.idleFrames > daemon.idleTimeout * 60 and daemon.player.state == 0:
+      daemon.savePlaybackState()
       if daemon.lib != nil:
-        daemon.lib.setPlaybackState("volume", $daemon.player.volume)
-        daemon.lib.setPlaybackState("time_pos", $daemon.player.timePos)
-        daemon.lib.setPlaybackState("track_path", daemon.currentTrackPath)
-        daemon.lib.setPlaybackState("track_title", daemon.currentTrackTitle)
-        daemon.lib.setPlaybackState("track_channel", daemon.currentTrackChannel)
         daemon.lib.closeDb()
       daemon.viz.stopCapture()
       daemon.player.shutdown()

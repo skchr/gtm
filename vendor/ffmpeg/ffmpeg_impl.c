@@ -61,7 +61,7 @@ static int alsa_open_device(FfmpegAudioCtx* ctx) {
 
   ret = snd_pcm_open(&ctx->alsa_handle, "default", SND_PCM_STREAM_PLAYBACK, 0);
   if (ret < 0) {
-    fprintf(stderr, "[ffmpeg] snd_pcm_open: %s\n", snd_strerror(ret));
+    fprintf(stderr, "[ffmpeg] decode snd_pcm_open: %s\n", snd_strerror(ret));
     return 0;
   }
   snd_pcm_hw_params_alloca(&hw);
@@ -512,15 +512,17 @@ typedef struct {
   float             volume;
   volatile int      master_ended;
   volatile int      slave_loaded;
+  volatile int      priming;        /* accumulate frames before first write */
+  int               prime_target;   /* samples to accumulate before writing */
   Equalizer         eq;
 } MixerCtx;
 
 static int mixer_alsa_open(MixerCtx* mx) {
-  if (!mx->master) return 0;
+  if (!mx->master) { fprintf(stderr, "[ffmpeg] mixer_alsa_open: no master\n"); return 0; }
   snd_pcm_hw_params_t* hw;
   unsigned int rate = mx->master->sample_rate;
   int ret = snd_pcm_open(&mx->alsa_handle, "default", SND_PCM_STREAM_PLAYBACK, 0);
-  if (ret < 0) return 0;
+  if (ret < 0) { fprintf(stderr, "[ffmpeg] mixer snd_pcm_open: %s\n", snd_strerror(ret)); return 0; }
   snd_pcm_hw_params_alloca(&hw);
   snd_pcm_hw_params_any(mx->alsa_handle, hw);
   snd_pcm_hw_params_set_access(mx->alsa_handle, hw, SND_PCM_ACCESS_RW_INTERLEAVED);
@@ -571,8 +573,10 @@ static void* mixer_thread(void* arg) {
   float* mbuf = NULL; int mcap = 0;
   float* sbuf = NULL; int scap = 0;
   float* mixbuf = NULL; int mixcap = 0;
+  float* prime_buf = NULL; int prime_cap = 0; int prime_filled = 0;
 
-  mixer_alsa_open(mx);
+  if (!mixer_alsa_open(mx))
+    fprintf(stderr, "[ffmpeg] mixer_thread: ALSA not available, no audio output\n");
 
   while (!mx->thread_stop) {
     if (!mx->playing || mx->paused) { usleep(10000); continue; }
@@ -663,14 +667,44 @@ static void* mixer_thread(void* arg) {
       // Apply volume
       if (mx->volume != 1.0f)
         for (int i = 0; i < mtotal; i++) mbuf[i] *= mx->volume;
-      if (mx->alsa_open) {
+
+      if (mx->alsa_open && mx->priming) {
+        // Accumulate samples to prevent ALSA underrun on slow streams
+        if (prime_filled + mtotal > prime_cap) {
+          prime_cap = prime_filled + mtotal + 4096;
+          prime_buf = realloc(prime_buf, prime_cap * sizeof(float));
+        }
+        memcpy(prime_buf + prime_filled, mbuf, mtotal * sizeof(float));
+        prime_filled += mtotal;
+        if (prime_filled >= mx->prime_target) {
+          // Enough buffered, write all at once and disable priming
+          if (mx->alsa_open) {
+            int fw = snd_pcm_writei(mx->alsa_handle, prime_buf, prime_filled / ch);
+            if (fw < 0) snd_pcm_recover(mx->alsa_handle, fw, 1);
+          }
+          // Copy to visualizer ring
+          for (int i = 0; i < prime_filled; i++) {
+            int wp = mx->pcm_wp;
+            int next = (wp + 1) % PCM_RING_SIZE;
+            if (next != mx->pcm_rp) { mx->pcm_ring[wp] = prime_buf[i]; mx->pcm_wp = next; }
+          }
+          mx->priming = 0;
+          prime_filled = 0;
+        }
+      } else if (mx->alsa_open) {
         int fw = snd_pcm_writei(mx->alsa_handle, mbuf, mtotal / ch);
-        if (fw < 0) snd_pcm_recover(mx->alsa_handle, fw, 1);
+        if (fw < 0) {
+          fprintf(stderr, "[ffmpeg] snd_pcm_writei err: %s\n", snd_strerror(fw));
+          snd_pcm_recover(mx->alsa_handle, fw, 1);
+        }
       }
-      for (int i = 0; i < mtotal; i++) {
-        int wp = mx->pcm_wp;
-        int next = (wp + 1) % PCM_RING_SIZE;
-        if (next != mx->pcm_rp) { mx->pcm_ring[wp] = mbuf[i]; mx->pcm_wp = next; }
+      // If priming still active, already forwarded samples via prime_buf above
+      if (!mx->priming) {
+        for (int i = 0; i < mtotal; i++) {
+          int wp = mx->pcm_wp;
+          int next = (wp + 1) % PCM_RING_SIZE;
+          if (next != mx->pcm_rp) { mx->pcm_ring[wp] = mbuf[i]; mx->pcm_wp = next; }
+        }
       }
       mx->current_time += (double)(mtotal / ch) / mx->master->sample_rate;
     }
@@ -680,7 +714,7 @@ static void* mixer_thread(void* arg) {
   av_frame_free(&mframe);
   av_packet_free(&spkt);
   av_frame_free(&sframe);
-  free(mbuf); free(sbuf); free(mixbuf);
+  free(mbuf); free(sbuf); free(mixbuf); free(prime_buf);
   return NULL;
 }
 
@@ -689,6 +723,8 @@ MixerCtx* ffmpeg_mixer_init(void) {
   if (!mx) return NULL;
   av_log_set_level(AV_LOG_QUIET);
   mx->volume = 1.0f;
+  mx->priming = 0;
+  mx->prime_target = 8192; /* ~93ms at 44100Hz stereo */
   avformat_network_init();
   return mx;
 }
@@ -704,6 +740,11 @@ void ffmpeg_mixer_uninit(MixerCtx* mx) {
   free(mx);
 }
 
+static void mixer_alsa_reopen(MixerCtx* mx) {
+  mixer_alsa_close(mx);
+  mixer_alsa_open(mx);
+}
+
 int ffmpeg_mixer_load_master(MixerCtx* mx, const char* path) {
   if (!mx) return 0;
   if (mx->master) ffmpeg_audio_uninit(mx->master);
@@ -713,6 +754,8 @@ int ffmpeg_mixer_load_master(MixerCtx* mx, const char* path) {
   mx->master_duration = mx->master->duration;
   mx->current_time = 0.0;
   mx->master_ended = 0;
+  // Reopen ALSA for new stream's sample rate/channels
+  mixer_alsa_reopen(mx);
   return 1;
 }
 
@@ -730,6 +773,7 @@ void ffmpeg_mixer_start(MixerCtx* mx) {
   if (!mx) return;
   mx->playing = 1;
   mx->paused = 0;
+  mx->priming = 1;
   if (!mx->thread_started) {
     mx->thread_stop = 0;
     pthread_create(&mx->decode_thread, NULL, mixer_thread, mx);
@@ -752,6 +796,7 @@ void ffmpeg_mixer_stop(MixerCtx* mx) {
   mx->current_time = 0.0;
   mx->master_ended = 0;
   mx->crossfade_active = 0;
+  mx->priming = 0;
 }
 
 void ffmpeg_mixer_start_crossfade(MixerCtx* mx, int duration_frames) {

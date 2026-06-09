@@ -1,9 +1,5 @@
-import state, strutils, algorithm, tables
-
-type
-  CommandCategory* = enum
-    ccPlayback, ccNavigation, ccSelection, ccPlaylist,
-    ccLibrary, ccSystem, ccView, ccGeneral
+import illwave as iw
+import state, strutils, sequtils, tables
 
 proc fuzzyMatch*(query, target: string): bool =
   if query.len == 0: return true
@@ -14,113 +10,248 @@ proc fuzzyMatch*(query, target: string): bool =
     if qi == query.len: return true
   return false
 
-proc filterCommandsByContext*(state: AppState): seq[int] =
-  result = @[]
-  for i, cmd in state.commands:
-    result.add(i)
+proc parseKeyCode*(name: string): iw.Key =
+  case name
+  of "Space": iw.Key.Space
+  of "Enter": iw.Key.Enter
+  of "Escape": iw.Key.Escape
+  of "Tab": iw.Key.Tab
+  of "Backspace": iw.Key.Backspace
+  of "Up": iw.Key.Up
+  of "Down": iw.Key.Down
+  of "Left": iw.Key.Left
+  of "Right": iw.Key.Right
+  of "Home": iw.Key.Home
+  of "End": iw.Key.End
+  of "PageUp": iw.Key.PageUp
+  of "PageDown": iw.Key.PageDown
+  of "Insert": iw.Key.Insert
+  of "Delete": iw.Key.Delete
+  of "Slash": iw.Key.Slash
+  of "QuestionMark": iw.Key.QuestionMark
+  of "Semicolon": iw.Key.Semicolon
+  of "Colon": iw.Key.Colon
+  of "Comma": iw.Key.Comma
+  of "Dot": iw.Key.Dot
+  of "Plus": iw.Key.Plus
+  of "Equals": iw.Key.Equals
+  of "Minus": iw.Key.Minus
+  of "Underscore": iw.Key.Underscore
+  of "Backslash": iw.Key.Backslash
+  of "LeftBracket": iw.Key.LeftBracket
+  of "RightBracket": iw.Key.RightBracket
+  of "GraveAccent": iw.Key.GraveAccent
+  of "Tilde": iw.Key.Tilde
+  of "ExclamationMark": iw.Key.ExclamationMark
+  of "Ampersand": iw.Key.Ampersand
+  of "Pipe": iw.Key.Pipe
+  of "At": iw.Key.At
+  of "Hash": iw.Key.Hash
+  of "Dollar": iw.Key.Dollar
+  of "Percent": iw.Key.Percent
+  of "Asterisk": iw.Key.Asterisk
+  of "LeftParen": iw.Key.LeftParen
+  of "RightParen": iw.Key.RightParen
+  of "Zero": iw.Key.Zero
+  of "One": iw.Key.One
+  of "Two": iw.Key.Two
+  of "Three": iw.Key.Three
+  of "Four": iw.Key.Four
+  of "Five": iw.Key.Five
+  of "Six": iw.Key.Six
+  of "Seven": iw.Key.Seven
+  of "Eight": iw.Key.Eight
+  of "Nine": iw.Key.Nine
+  of "F1": iw.Key.F1
+  of "F2": iw.Key.F2
+  of "F3": iw.Key.F3
+  of "F4": iw.Key.F4
+  of "F5": iw.Key.F5
+  of "F6": iw.Key.F6
+  of "F7": iw.Key.F7
+  of "F8": iw.Key.F8
+  of "F9": iw.Key.F9
+  of "F10": iw.Key.F10
+  of "F11": iw.Key.F11
+  of "F12": iw.Key.F12
+  of "CtrlBackslash": iw.Key.CtrlBackslash
+  of "CtrlRightBracket": iw.Key.CtrlRightBracket
+  of "LessThan": iw.Key.LessThan
+  of "GreaterThan": iw.Key.GreaterThan
+  of "SingleQuote": iw.Key.SingleQuote
+  of "DoubleQuote": iw.Key.DoubleQuote
+  of "LeftBrace": iw.Key.LeftBrace
+  of "RightBrace": iw.Key.RightBrace
+  of "Caret": iw.Key.Caret
+  else:
+    if name.len == 1:
+      let c = name[0]
+      if c in {'a'..'z'}:
+        iw.Key(ord(iw.Key.A) + (c.ord - 'a'.ord))
+      elif c in {'A'..'Z'}:
+        iw.Key(ord(iw.Key.ShiftA) + (c.ord - 'A'.ord))
+      elif c in {'0'..'9'}:
+        iw.Key(ord(iw.Key.Zero) + (c.ord - '0'.ord))
+      else:
+        iw.Key.None
+    elif name.startsWith("Shift") and name.len > 5:
+      let c = name[5]
+      if c in {'A'..'Z'}:
+        iw.Key(ord(iw.Key.ShiftA) + (c.ord - 'A'.ord))
+      else:
+        iw.Key.None
+    elif name.startsWith("Ctrl") and name.len > 4:
+      let c = name[4]
+      if c in {'A'..'Z'}:
+        iw.Key(ord(iw.Key.CtrlA) + (c.ord - 'A'.ord))
+      else:
+        iw.Key.None
+    elif name.startsWith("Alt") and name.len > 3:
+      let c = name[3]
+      if c in {'A'..'Z'}:
+        iw.Key(ord(iw.Key.AltA) + (c.ord - 'A'.ord))
+      else:
+        iw.Key.None
+    else:
+      iw.Key.None
 
-proc fuzzySearchCommands*(state: AppState, query: string): seq[tuple[idx: int, score: int]] =
-  let candidates = filterCommandsByContext(state)
-  result = @[]
-  for idx in candidates:
-    let cmd = state.commands[idx]
-    if fuzzyMatch(query, cmd.name) or fuzzyMatch(query, cmd.description) or fuzzyMatch(query, cmd.id):
-      let nameScore = if fuzzyMatch(query, cmd.name): 3 else: 0
-      let descScore = if fuzzyMatch(query, cmd.description): 1 else: 0
-      let idScore = if fuzzyMatch(query, cmd.id): 2 else: 0
-      result.add((idx, nameScore + descScore + idScore))
-  result.sort do (a, b: tuple[idx: int, score: int]) -> int:
-    -cmp(a.score, b.score)
+proc keyDisplayName*(key: iw.Key): string =
+  case key
+  of iw.Key.Space: "Space"
+  of iw.Key.Enter: "Enter"
+  of iw.Key.Escape: "Esc"
+  of iw.Key.Tab: "Tab"
+  of iw.Key.Backspace: "Bksp"
+  of iw.Key.Up: "Up"
+  of iw.Key.Down: "Down"
+  of iw.Key.Left: "Left"
+  of iw.Key.Right: "Right"
+  of iw.Key.Home: "Home"
+  of iw.Key.End: "End"
+  of iw.Key.PageUp: "PgUp"
+  of iw.Key.PageDown: "PgDn"
+  of iw.Key.Insert: "Ins"
+  of iw.Key.Delete: "Del"
+  of iw.Key.Slash: "/"
+  of iw.Key.QuestionMark: "?"
+  of iw.Key.Colon: ":"
+  of iw.Key.Semicolon: ";"
+  of iw.Key.Comma: ","
+  of iw.Key.Dot: "."
+  of iw.Key.Plus: "+"
+  of iw.Key.Equals: "="
+  of iw.Key.Minus: "-"
+  of iw.Key.Underscore: "_"
+  of iw.Key.Zero: "0"
+  of iw.Key.One: "1"
+  of iw.Key.Two: "2"
+  of iw.Key.Three: "3"
+  of iw.Key.Four: "4"
+  of iw.Key.Five: "5"
+  of iw.Key.Six: "6"
+  of iw.Key.Seven: "7"
+  of iw.Key.Eight: "8"
+  of iw.Key.Nine: "9"
+
+  else:
+    let ordv = key.ord
+    if ordv >= ord(iw.Key.A) and ordv <= ord(iw.Key.Z):
+      $char(ordv)
+    elif ordv >= ord(iw.Key.ShiftA) and ordv <= ord(iw.Key.ShiftZ):
+      "Shift+" & $char(ordv - ord(iw.Key.ShiftA) + ord('A'))
+    elif ordv >= ord(iw.Key.CtrlA) and ordv <= ord(iw.Key.CtrlZ):
+      "Ctrl+" & $char(ordv - ord(iw.Key.CtrlA) + ord('A'))
+    elif ordv >= ord(iw.Key.AltA) and ordv <= ord(iw.Key.AltZ):
+      "Alt+" & $char(ordv - ord(iw.Key.AltA) + ord('A'))
+    elif ordv >= ord(iw.Key.F1) and ordv <= ord(iw.Key.F12):
+      "F" & $(ordv - ord(iw.Key.F1) + 1)
+    else:
+      "?"
+
+proc bindingDisplay*(keys: seq[iw.Key]): string =
+  keys.mapIt(keyDisplayName(it)).join(",")
 
 proc registerCommand*(state: var AppState, id, name, description, icon: string,
-                      defaultKeys: seq[string]) =
-  let entry = CommandEntry(id: id, name: name, description: description,
-                           icon: icon, defaultKeys: defaultKeys)
+                      defaultKeys: seq[string], handler: proc(state: var AppState)) =
+  var parsed: seq[seq[iw.Key]] = @[]
+  for dk in defaultKeys:
+    if '+' in dk:
+      parsed.add(dk.split('+').mapIt(parseKeyCode(it.strip())))
+    else:
+      let k = parseKeyCode(dk)
+      if k != iw.Key.None:
+        parsed.add(@[k])
+  let entry = CommandEntry(
+    id: id, name: name, description: description,
+    icon: icon, defaultKeys: defaultKeys,
+    keyCodes: @[], handler: handler)
   state.commands.add(entry)
   let idx = state.commands.len - 1
   state.cmdRegistry[id] = idx
-  for key in defaultKeys:
-    state.keybindings[key] = id
+  state.commands[idx].keyCodes = parsed
+  state.keybindings[id] = id
+  for seq in parsed:
+    if seq.len == 1:
+      let key = seq[0]
+      if not state.keyDispatch.hasKey(key):
+        state.keyDispatch[key] = @[]
+      state.keyDispatch[key].add(idx)
+    elif seq.len > 1:
+      state.multiKeyDispatch[seq] = idx
+      let firstKey = seq[0]
+      if not state.keyDispatch.hasKey(firstKey):
+        state.keyDispatch[firstKey] = @[]
+      if idx notin state.keyDispatch[firstKey]:
+        state.keyDispatch[firstKey].add(idx)
 
 proc findCommandIdx*(state: AppState, id: string): int =
   if state.cmdRegistry.hasKey(id):
     return state.cmdRegistry[id]
   -1
 
-proc buildDefaultCommands*(state: var AppState) =
-  state.registerCommand("toggle_play_pause", "Toggle Play/Pause",
-    "Toggle between play and pause states", "\u25B6", @["Space", "Space"])
-  state.registerCommand("stop_playback", "Stop",
-    "Stop playback and reset position", "\u25A0", @["s"])
-  state.registerCommand("seek_forward", "Seek Forward",
-    "Seek forward 5 seconds", "\u23E9", @["l"])
-  state.registerCommand("seek_backward", "Seek Backward",
-    "Seek backward 5 seconds", "\u23EA", @["h"])
-  state.registerCommand("volume_up", "Volume Up",
-    "Increase volume by 5%", "\uF028", @["ShiftJ", "Plus", "Equals"])
-  state.registerCommand("volume_down", "Volume Down",
-    "Decrease volume by 5%", "\uF027", @["ShiftK", "Minus", "Underscore"])
-  state.registerCommand("toggle_mute", "Toggle Mute",
-    "Mute or unmute audio", "\uF026", @["m"])
-  state.registerCommand("next_track", "Next Track",
-    "Skip to next track in playlist", "\u23ED", @["n"])
-  state.registerCommand("prev_track", "Previous Track",
-    "Go to previous track", "\u23EE", @["p"])
-  state.registerCommand("nav_up", "Move Up",
-    "Move selection up in the list", "\u2B06", @["k"])
-  state.registerCommand("nav_down", "Move Down",
-    "Move selection down in the list", "\u2B07", @["j"])
-  state.registerCommand("enter_filter", "Filter/Search",
-    "Enter filter mode to search", "\U0001F50D", @["Slash"])
-  state.registerCommand("play_selected", "Play Selected",
-    "Play the currently selected item", "\u25B6", @["Enter"])
-  state.registerCommand("go_to_first", "Go to First",
-    "Jump to first item in the list", "\u23EE", @["g", "g"])
-  state.registerCommand("go_to_last", "Go to Last",
-    "Jump to last item in the list", "\u23ED", @["ShiftG"])
-  state.registerCommand("toggle_select_mode", "Toggle Select Mode",
-    "Enter or exit multi-select mode", "\U0001F7E8", @["v"])
-  state.registerCommand("select_all", "Select All",
-    "Select all visible items", "\U0001F7E9", @["CtrlA"])
-  state.registerCommand("invert_selection", "Invert Selection",
-    "Invert current selection", "\U0001F7E8", @["CtrlI"])
-  state.registerCommand("remove_selected", "Remove Selected",
-    "Remove selected items", "\u274C", @["ShiftX"])
-  state.registerCommand("add_to_playlist", "Add to Playlist...",
-    "Add selected items to playlist", "\U0001F4CB", @["ShiftA"])
-  state.registerCommand("tab_now_playing", "Now Playing",
-    "Switch to Now Playing tab", "\U0001F3B5", @["1"])
-  state.registerCommand("tab_library", "Library",
-    "Switch to Library tab", "\U0001F4DA", @["2"])
-  state.registerCommand("tab_playlists", "Playlists",
-    "Switch to Playlists tab", "\U0001F4CB", @["3"])
-  state.registerCommand("tab_settings", "Settings",
-    "Switch to Settings tab", "\u2699", @["4"])
-  state.registerCommand("show_help", "Show Help",
-    "Display help overlay with keybindings", "\u2753", @["QuestionMark"])
-  state.registerCommand("quit_background", "Quit (Background)",
-    "Exit TUI, keep playback running", "\u23F8", @["q"])
-  state.registerCommand("quit_daemon", "Quit & Stop Daemon",
-    "Exit and terminate background daemon", "\u23F9", @["ShiftQ"])
-  state.registerCommand("toggle_visualizer", "Toggle Visualizer",
-    "Show or hide audio visualizer", "\U0001F4CA", @["ShiftV"])
-  state.registerCommand("command_palette", "Command Palette",
-    "Show command palette with fuzzy search", "\u2328", @[":"])
-  state.registerCommand("change_theme", "Change Theme",
-    "Open theme picker with live preview", "\U0001F3A8", @["T"])
-  state.registerCommand("save_playlist", "Save Playlist",
-    "Save current queue as a playlist file", "\U0001F4BE", @["CtrlS"])
-  state.registerCommand("create_playlist", "Create Playlist",
-    "Create a new playlist", "\U0001F4CB", @["a"])
-  state.registerCommand("delete_playlist", "Delete Playlist",
-    "Delete the selected playlist", "\u274C", @["d"])
-  state.registerCommand("rename_playlist", "Rename Playlist",
-    "Rename the selected playlist", "\U0001F4DD", @["r"])
-  state.registerCommand("import_m3u", "Import M3U",
-    "Import a playlist from .m3u file", "\U0001F4C2", @["CtrlO"])
-  state.registerCommand("export_m3u", "Export M3U",
-    "Export playlist to .m3u file", "\U0001F4E4", @["CtrlS"])
-  state.registerCommand("rescan_library", "Rescan Library",
-    "Rescan music directories for new files", "\U0001F504", @[""])
-  state.registerCommand("show_now_playing", "Show Now Playing",
-    "Jump to Now Playing view", "\U0001F3B5", @[""])
+proc rebindCommand*(state: var AppState, id: string, newKeys: seq[string]) =
+  let idx = state.findCommandIdx(id)
+  if idx < 0: return
+  let oldParsed = state.commands[idx].keyCodes
+  # Remove old dispatch entries
+  for seq in oldParsed:
+    if seq.len == 1:
+      let key = seq[0]
+      if state.keyDispatch.hasKey(key):
+        state.keyDispatch[key].keepItIf(it != idx)
+        if state.keyDispatch[key].len == 0:
+          state.keyDispatch.del(key)
+    elif seq.len > 1:
+      state.multiKeyDispatch.del(seq)
+      let firstKey = seq[0]
+      if state.keyDispatch.hasKey(firstKey):
+        state.keyDispatch[firstKey].keepItIf(it != idx)
+        if state.keyDispatch[firstKey].len == 0:
+          state.keyDispatch.del(firstKey)
+  # Parse and add new dispatch entries
+  var parsed: seq[seq[iw.Key]] = @[]
+  for dk in newKeys:
+    if '+' in dk:
+      parsed.add(dk.split('+').mapIt(parseKeyCode(it.strip())))
+    else:
+      let k = parseKeyCode(dk)
+      if k != iw.Key.None:
+        parsed.add(@[k])
+  state.commands[idx].keyCodes = parsed
+  state.commands[idx].defaultKeys = newKeys
+  state.keybindings[id] = newKeys.join(", ")
+  for seq in parsed:
+    if seq.len == 1:
+      let key = seq[0]
+      if not state.keyDispatch.hasKey(key):
+        state.keyDispatch[key] = @[]
+      state.keyDispatch[key].add(idx)
+    elif seq.len > 1:
+      state.multiKeyDispatch[seq] = idx
+      let firstKey = seq[0]
+      if not state.keyDispatch.hasKey(firstKey):
+        state.keyDispatch[firstKey] = @[]
+      if idx notin state.keyDispatch[firstKey]:
+        state.keyDispatch[firstKey].add(idx)
+
+

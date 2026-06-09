@@ -145,7 +145,7 @@ proc startStreamUrlFetch*(url: string; p: var Process; cookieSource: string = ""
   if yt.len == 0: return false
   let cmd = yt & " -f \"ba\" -g --no-playlist --no-check-formats --no-warnings" & cookieFlags(cookieSource) & jsRuntimeFlags(jsRuntime) & " --user-agent \"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36\" --add-headers \"Referer:https://www.youtube.com/\" " & quoteShell(url) & " 2>/dev/null"
   try:
-    p = startProcess(cmd, options = {poUsePath, poEvalCommand, poStdErrToStdOut})
+    p = startProcess(cmd, options = {poUsePath, poEvalCommand})
     return true
   except:
     return false
@@ -154,27 +154,32 @@ proc pollStreamUrlFetch*(p: var Process, buf: var string): string =
   if p.running(): return ""
   try:
     buf.add(p.outputStream.readAll())
-  except Exception as e:
-    stderr.writeLine("[gtm] pollStreamUrlFetch readAll: " & e.msg)
+  except:
+    discard
   let code = try: p.peekExitCode except: -1
   close(p)
   if code != 0:
-    stderr.writeLine("[gtm] yt-dlp stream URL fetch failed (exit " & $code & "): " & buf.strip())
     return ""
   let raw = buf.strip()
   for line in raw.splitLines:
     let trimmed = line.strip()
     if trimmed.startsWith("http://") or trimmed.startsWith("https://"):
+      # Guard: skip URLs that are webpage URLs, not direct stream URLs
+      if not (trimmed.contains("googlevideo.com") or trimmed.contains("youtube.com/videoplayback") or
+              trimmed.contains("manifest.googlevideo.com") or trimmed.contains("yt-video") or
+              trimmed.contains("rr") or trimmed.contains("redirector")):
+        if trimmed.contains("youtube.com/watch") or trimmed.contains("youtu.be/") or
+           trimmed.contains("youtube.com/playlist"):
+          continue
       return trimmed
-  stderr.writeLine("[gtm] yt-dlp output contained no valid URL: " & raw[0..<min(raw.len, 200)])
   result = ""
 
 proc startDownload*(item: YtSearchResult; outputDir: string; p: var Process; cookieSource: string = ""; jsRuntime: string = "node"): bool =
   let yt = findYtdlp()
   if yt.len == 0: return false
   if not dirExists(outputDir): createDir(outputDir)
-  let cmd = yt & " -f bestaudio --extract-audio --audio-format opus --no-playlist --print filename --no-check-formats --no-warnings" & cookieFlags(cookieSource) & jsRuntimeFlags(jsRuntime) & " -o " &
-    quoteShell(outputDir / "%(title)s.%(ext)s") & " " & quoteShell(item.url) & " 2>/dev/null"
+  let cmd = yt & " -f bestaudio --extract-audio --audio-format opus --no-playlist --print after_move:filename --no-check-formats --no-warnings" & cookieFlags(cookieSource) & jsRuntimeFlags(jsRuntime) & " -o " &
+    quoteShell(outputDir / "%(title)s.%(ext)s") & " " & quoteShell(item.url) & " 2>&1"
   try:
     p = startProcess(cmd, options = {poUsePath, poEvalCommand})
     return true
@@ -183,22 +188,26 @@ proc startDownload*(item: YtSearchResult; outputDir: string; p: var Process; coo
 
 proc pollDownload*(p: var Process, buf: var string): string =
   if p.running(): return ""
+  let code = try: p.peekExitCode except: -1
   try:
     buf.add(p.outputStream.readAll())
-  except Exception as e:
-    stderr.writeLine("[gtm] pollDownload readAll: " & e.msg)
+  except:
+    discard
   close(p)
+  if code != 0:
+    return ""
   for line in buf.splitLines:
     let trimmed = line.strip()
     if trimmed.len > 0 and fileExists(trimmed):
       return trimmed
+  result = ""
 
 proc fetchPlaylistTracks*(url: string; cookieSource: string = ""; jsRuntime: string = "node"): YtPlaylistDetail =
   let yt = findYtdlp()
   if yt.len == 0: return YtPlaylistDetail()
   let cmd = yt & " --dump-json --no-playlist --flat-playlist --no-warnings" & cookieFlags(cookieSource) & " " & quoteShell(url) & " 2>/dev/null"
   try:
-    let p = startProcess(cmd, options = {poUsePath, poEvalCommand, poStdErrToStdOut})
+    let p = startProcess(cmd, options = {poUsePath, poEvalCommand})
     if p.running():
       discard p.waitForExit()
     let output = p.outputStream.readAll()

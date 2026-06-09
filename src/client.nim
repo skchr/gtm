@@ -100,26 +100,27 @@ proc sendDaemonCmd*(cli: DaemonClient, cmd: JsonNode): JsonNode =
     let data = $cmd & "\n"
     cli.sock.send(data)
     var tmp: array[16384, char]
-    var rfds: posix.TFdSet
-    FD_ZERO(rfds)
-    FD_SET(cli.sock.getFd, rfds)
-    var tv: posix.Timeval
-    tv.tv_sec = 0.Time
-    tv.tv_usec = 50_000.Suseconds
-    let sel = posix.select(cint(int(cli.sock.getFd) + 1), addr(rfds), nil, nil, addr(tv))
-    if sel > 0:
-      let n = posix.recv(cli.sock.getFd, addr tmp[0], tmp.len, 0.cint)
-      if n > 0:
-        let old = cli.buf.len; cli.buf.setLen(old + n); copyMem(addr cli.buf[old], addr tmp[0], n)
-    while true:
-      let nli = cli.buf.find('\n')
-      if nli < 0: break
-      let line = cli.buf[0..<nli]
-      cli.buf = cli.buf[nli+1..^1]
-      if line.len == 0: continue
-      let j = parseJson(line)
-      if not j.hasKey("events"):
-        return j
+    for attempt in 0..<20:
+      var rfds: posix.TFdSet
+      FD_ZERO(rfds)
+      FD_SET(cli.sock.getFd, rfds)
+      var tv: posix.Timeval
+      tv.tv_sec = 0.Time
+      tv.tv_usec = 50_000.Suseconds
+      let sel = posix.select(cint(int(cli.sock.getFd) + 1), addr(rfds), nil, nil, addr(tv))
+      if sel > 0:
+        let n = posix.recv(cli.sock.getFd, addr tmp[0], tmp.len, 0.cint)
+        if n > 0:
+          let old = cli.buf.len; cli.buf.setLen(old + n); copyMem(addr cli.buf[old], addr tmp[0], n)
+      while true:
+        let nli = cli.buf.find('\n')
+        if nli < 0: break
+        let line = cli.buf[0..<nli]
+        cli.buf = cli.buf[nli+1..^1]
+        if line.len == 0: continue
+        let j = parseJson(line)
+        if not j.hasKey("events"):
+          return j
   except:
     cli.connected = false
   return %*{"ok": false, "error": "no response"}
@@ -316,6 +317,10 @@ proc getLibrary*(cli: DaemonClient): JsonNode =
 proc addTrack*(cli: DaemonClient, data: JsonNode): JsonNode =
   cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "add_track", "data": data})
+
+proc updateTrackPath*(cli: DaemonClient, oldPath, newPath, newTitle: string): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "update_track_path", "data": {"old_path": oldPath, "new_path": newPath, "title": newTitle}})
 
 proc scanDir*(cli: DaemonClient, path: string): JsonNode =
   cli.ensureDaemon()

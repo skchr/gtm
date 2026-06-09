@@ -1,15 +1,19 @@
 import os, json, strutils, osproc
-import daemon_client, state, library, audio
+import client, state, library, audio
 
 type
   Subcommand* = enum
     scNone, scPlay, scPause, scStop, scNext, scPrev, scToggle,
-    scVolume, scStatus, scNow, scKill, scDaemon, scHelp, scVersion
+    scVolume, scShuffle, scRepeat, scSleep,
+    scStatus, scNow, scKill, scDaemon, scHelp, scVersion
 
   CliArgs* = object
     subcmd*: Subcommand
     targets*: seq[string]
     volumeLevel*: int
+    shuffleEnabled*: bool
+    repeatMode*: int
+    sleepMinutes*: int
 
 proc parseSubcmd(name: string): Subcommand =
   case name
@@ -19,6 +23,9 @@ proc parseSubcmd(name: string): Subcommand =
   of "next": scNext
   of "prev": scPrev
   of "volume": scVolume
+  of "shuffle": scShuffle
+  of "repeat": scRepeat
+  of "sleep": scSleep
   of "status": scStatus
   of "now": scNow
   of "kill": scKill
@@ -27,9 +34,8 @@ proc parseSubcmd(name: string): Subcommand =
   of "--version", "-v": scVersion
   else: scNone
 
-proc parseArgs*(): CliArgs =
+proc parseArgs*(args: seq[string] = os.commandLineParams()): CliArgs =
   result = CliArgs(subcmd: scNone)
-  let args = os.commandLineParams()
   if args.len == 0: return
   let first = args[0]
   let cmd = parseSubcmd(first)
@@ -43,6 +49,21 @@ proc parseArgs*(): CliArgs =
       try: result.volumeLevel = parseInt(args[1])
       except: result.volumeLevel = 80
     else: result.volumeLevel = -1
+  of scShuffle:
+    if args.len > 1:
+      result.shuffleEnabled = args[1].toLowerAscii() in ["1", "true", "on", "yes"]
+    else:
+      result.shuffleEnabled = true
+  of scRepeat:
+    if args.len > 1:
+      try: result.repeatMode = parseInt(args[1])
+      except: result.repeatMode = 1
+    else:
+      result.repeatMode = 1
+  of scSleep:
+    if args.len > 1:
+      try: result.sleepMinutes = parseInt(args[1])
+      except: result.sleepMinutes = 5
   of scPlay:
     result.targets = loadFromArgs(args[1..^1])
   else: discard
@@ -103,6 +124,21 @@ proc execSubcommand*(args: CliArgs): bool =
     else:
       let resp = simpleDaemonCmd("get_volume")
       echo "Volume: ", resp{"volume"}.getInt(80)
+  of scShuffle:
+    var cli = newDaemonClient()
+    cli.ensureDaemon()
+    discard cli.setShuffle(args.shuffleEnabled)
+    echo "Shuffle: ", (if args.shuffleEnabled: "on" else: "off")
+  of scRepeat:
+    var cli = newDaemonClient()
+    cli.ensureDaemon()
+    discard cli.setRepeat(args.repeatMode)
+    echo "Repeat: mode ", args.repeatMode
+  of scSleep:
+    var cli = newDaemonClient()
+    cli.ensureDaemon()
+    discard cli.setSleepTimer(args.sleepMinutes)
+    echo "Sleep timer: ", args.sleepMinutes, " minutes"
   of scStatus:
     let resp = simpleDaemonCmd("status")
     echo "State: ", resp{"state"}.getStr("unknown")
@@ -141,6 +177,9 @@ proc execSubcommand*(args: CliArgs): bool =
     echo "  next              Skip to next track"
     echo "  prev              Go to previous track"
     echo "  volume [level]    Get/set volume (0-100)"
+    echo "  shuffle [on/off]   Toggle shuffle mode"
+    echo "  repeat [mode]      Set repeat mode (0=none, 1=all, 2=one)"
+    echo "  sleep [minutes]    Set sleep timer in minutes"
     echo "  status            Show current playback status"
     echo "  now               Show current track info"
     echo "  kill              Stop the daemon process"

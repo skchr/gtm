@@ -10,7 +10,7 @@ A terminal-based music player with tabbed interface, daemon architecture, and co
 - **Leader Key**: Space shows context menu; double-tap toggles play/pause
 - **Select Mode**: Vim-style visual selection + per-item toggle
 - **Library Management**: SQLite-backed track/artist/album/playlist database
-- **Audio Backend**: MiniAudio (vendored) — no external dependencies
+- **Audio Backend**: FFmpeg + ALSA — system libraries, full format support
 - **Visualizer**: Real-time FFT spectrum analyzer via shared memory
 - **11 Themes**: Catppuccin (4), Gruvbox (2), Dracula, Tokyo Night (2), Ayu (2)
 - **Responsive Layout**: Adapts to terminal width (≥120, 60–119, 40–59 cols)
@@ -91,8 +91,8 @@ nim check src/gtm.nim                      # syntax check
 └──────────┘                    └──────────┘
                                       │
                                ┌──────┴──────┐
-                               │  miniaudio   │
-                               │  (playback)  │
+                                │ ffmpeg + alsa│
+                                │  (playback)  │
                                └──────┬──────┘
                                       │ PCM via
                                       │ shm/mmap

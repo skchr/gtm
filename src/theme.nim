@@ -2,22 +2,23 @@ import illwave as iw
 import colors, math, strutils, random
 
 type
-  ThemeMode* = enum tmDark, tmLigh
+  ThemeMode* = enum tmDark, tmLight
 
   Theme* = object
     rosewater*, flamingo*, pink*, mauve*, red*, maroon*: colors.Color
     peach*, yellow*, green*, teal*, sky*, sapphire*, blue*, lavender*: colors.Color
     text*, subtext1*, subtext0*, overlay2*, overlay1*, overlay0*: colors.Color
     surface2*, surface1*, surface0*, base*, mantle*, crust*: colors.Color
+    baseHue*: float
 
 proc c(r, g, b: uint8): colors.Color {.inline.} =
   iw.toColor(r, g, b)
 
 proc hashToInt(s: string): int =
-  var h = 0
+  var h: int = 0
   for c in s:
-    h = h * 31 + c.ord
-  result = abs(h)
+    h = h *% 31 +% c.ord
+  result = h and 0x7FFFFFFF
 
 proc hslToRgb(h, s, l: float): (uint8, uint8, uint8) =
   let hp = h / 60.0
@@ -82,6 +83,7 @@ proc generateTheme*(seed: string, mode: ThemeMode, refreshSeed: bool): Theme =
   let subH = (baseH + 30.0) mod 360.0
 
   result = Theme(
+    baseHue: baseHue,
     rosewater: accentColors[0], flamingo: accentColors[1],
     pink: accentColors[2], mauve: accentColors[3],
     red: accentColors[4], maroon: accentColors[5],
@@ -115,7 +117,7 @@ proc isDarkMode*(seed: string): bool =
 
 proc getTheme*(seed: string, refreshEachLaunch: bool): Theme =
   let dark = not isDarkMode(seed)
-  let mode = if dark: tmDark else: tmLigh
+  let mode = if dark: tmDark else: tmLight
   generateTheme(seed, mode, refreshEachLaunch)
 
 proc parseThemeFlavor*(name: string): string =

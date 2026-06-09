@@ -19,6 +19,7 @@ type
     shm: PcmRingBuffer
     bins*: array[MAX_VIS_BARS, float]
     smoothBins*: array[MAX_VIS_BARS, float]
+    peakVals*: array[MAX_VIS_BARS, float]
     running*: bool
     barCount*: int
     pcmBuf: seq[float32]
@@ -96,6 +97,17 @@ proc newVisualizer*(): Visualizer =
     barCount: 32
   )
 
+proc clear*(v: Visualizer) =
+  if v.shm.data != nil:
+    zeroMem(v.shm.data, sizeof(float32) * PCM_RING_SIZE)
+    v.shm.writePos[] = 0
+    v.shm.readPos[] = 0
+  v.pcmBuf.setLen(0)
+  for i in 0..<MAX_VIS_BARS:
+    v.bins[i] = 0.0
+    v.smoothBins[i] = 0.0
+    v.peakVals[i] = 0.0
+
 proc startCapture*(v: Visualizer) =
   v.shm = createShm(shmPath())
   v.running = true
@@ -148,18 +160,29 @@ proc processFft*(v: Visualizer) =
         real[idx] = real[idx] + tRe
         imag[idx] = imag[idx] + tIm
   let bars = max(MIN_VIS_BARS, min(MAX_VIS_BARS, v.barCount))
-  let binsPerBar = (n div 2) div bars
+  let nyquist = n div 2
   for bar in 0..<bars:
+    let logLo = ln(float(nyquist) * 0.02 + 1.0)
+    let logHi = ln(float(nyquist) + 1.0)
+    let loFrac = float(bar) / float(bars)
+    let hiFrac = float(bar + 1) / float(bars)
+    let startBin = int(exp(logLo + loFrac * (logHi - logLo)) - 1.0)
+    let endBin = int(exp(logLo + hiFrac * (logHi - logLo)) - 1.0).int
+    let s = max(1, startBin)
+    let e = min(nyquist - 1, max(endBin, s + 1))
     var sum = 0.0
-    let startBin = bar * binsPerBar
-    let endBin = if bar == bars - 1: (n div 2) - 1 else: startBin + binsPerBar
-    for b in startBin..endBin:
+    for b in s..e:
       sum += sqrt(real[b] * real[b] + imag[b] * imag[b])
-    let avg = sum / float(max(endBin - startBin + 1, 1))
+    let avg = sum / float(max(e - s + 1, 1))
     let db = 20.0 * log10(max(avg, 1e-10))
     let raw = max(0.0, min(1.0, (db + 60.0) / 60.0))
-    v.bins[bar] = raw
-    v.smoothBins[bar] = v.smoothBins[bar] * 0.7 + raw * 0.3
+    let compressed = pow(raw, 1.8)
+    v.bins[bar] = compressed
+    v.smoothBins[bar] = v.smoothBins[bar] * 0.85 + raw * 0.15
+    v.peakVals[bar] = max(v.smoothBins[bar], v.peakVals[bar] * 0.94)
+
+proc writePcm*(v: Visualizer, samples: openArray[float32]) =
+  writePcm(v.shm, samples)
 
 proc readPcm*(v: Visualizer) =
   if not v.running: return

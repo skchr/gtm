@@ -1,4 +1,4 @@
-import os, math, posix, tables, json, strutils, osproc
+import os, math, posix, tables, osproc
 
 type
   AudioBackendType* = enum abtNone, abtFFmpeg, abtDaemon, abtProcess, abtMixer

@@ -1437,7 +1437,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     of okNone:
       discard
     return
-  const sidebarScopes = [fsAll, fsArtists, fsAlbums, fsPlaylists, fsRecent, fsFavourites, fsLastPlayed, fsMostPlayed, fsLeastPlayed]
+  const sidebarScopes = [fsAll, fsArtists, fsAlbums, fsPlaylists, fsRecent, fsFavourites, fsLastPlayed, fsMostPlayed, fsLeastPlayed, fsDownloads]
   if state.tab == tabLibrary and state.libraryFocusPanel == lpSidebar and state.mode == imNormal:
     case key
     of iw.Key.J, iw.Key.Down:
@@ -1633,7 +1633,11 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     state.mode = imLeaderMode
   of iw.Key.Tab:
     if state.tab == tabLibrary:
-      if state.libraryFocusPanel == lpContent: state.libraryFocusPanel = lpSidebar
+      if state.filterScope == fsDownloads and state.libraryFocusPanel == lpContent:
+        state.downloadsTab = if state.downloadsTab == dtDownloading: dtDownloaded else: dtDownloading
+        state.selectIndex = 0
+        state.rebuildItems()
+      elif state.libraryFocusPanel == lpContent: state.libraryFocusPanel = lpSidebar
       else: state.libraryFocusPanel = lpContent
       state.needsRedraw = true
     elif state.tab == tabSettings:
@@ -1784,7 +1788,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     for i in 0..<state.libraryTracks.len: state.overlay.results.add(i)
   of iw.Key.H:
     if state.tab == tabLibrary:
-      const sbar = [fsAll, fsArtists, fsAlbums, fsPlaylists, fsRecent, fsFavourites, fsLastPlayed, fsMostPlayed, fsLeastPlayed]
+      const sbar = [fsAll, fsArtists, fsAlbums, fsPlaylists, fsRecent, fsFavourites, fsLastPlayed, fsMostPlayed, fsLeastPlayed, fsDownloads]
       state.filterScope = sbar[(state.librarySidebarSelect - 1 + sbar.len) mod sbar.len]
       state.librarySidebarSelect = (state.librarySidebarSelect - 1 + sbar.len) mod sbar.len
       state.selectIndex = 0; state.rebuildItems()
@@ -1796,7 +1800,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         state.setFeedback("[Playlist Up]")
   of iw.Key.L:
     if state.tab == tabLibrary:
-      const sbar = [fsAll, fsArtists, fsAlbums, fsPlaylists, fsRecent, fsFavourites, fsLastPlayed, fsMostPlayed, fsLeastPlayed]
+      const sbar = [fsAll, fsArtists, fsAlbums, fsPlaylists, fsRecent, fsFavourites, fsLastPlayed, fsMostPlayed, fsLeastPlayed, fsDownloads]
       state.filterScope = sbar[(state.librarySidebarSelect + 1) mod sbar.len]
       state.librarySidebarSelect = (state.librarySidebarSelect + 1) mod sbar.len
       state.selectIndex = 0; state.rebuildItems()
@@ -1822,7 +1826,11 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         state.selectIndex = 0
         state.needsRedraw = true
     elif state.tab == tabLibrary:
-      if state.libraryFocusPanel == lpContent:
+      if state.filterScope == fsDownloads and state.libraryFocusPanel == lpContent:
+        state.downloadsTab = if state.downloadsTab == dtDownloading: dtDownloaded else: dtDownloading
+        state.selectIndex = 0
+        state.rebuildItems()
+      elif state.libraryFocusPanel == lpContent:
         state.libraryFocusPanel = lpSidebar
     elif state.isPlaylistView():
       if state.playlistContentsIdx >= 0:
@@ -1838,8 +1846,12 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         state.selectIndex = 0
         state.needsRedraw = true
     elif state.tab == tabLibrary:
-      if state.libraryFocusPanel == lpSidebar:
-        const scopeMap2 = [fsAll, fsArtists, fsAlbums, fsPlaylists, fsRecent, fsFavourites, fsLastPlayed, fsMostPlayed, fsLeastPlayed]
+      if state.filterScope == fsDownloads and state.libraryFocusPanel == lpContent:
+        state.downloadsTab = if state.downloadsTab == dtDownloading: dtDownloaded else: dtDownloading
+        state.selectIndex = 0
+        state.rebuildItems()
+      elif state.libraryFocusPanel == lpSidebar:
+        const scopeMap2 = [fsAll, fsArtists, fsAlbums, fsPlaylists, fsRecent, fsFavourites, fsLastPlayed, fsMostPlayed, fsLeastPlayed, fsDownloads]
         state.filterScope = scopeMap2[state.librarySidebarSelect]
         state.libraryFocusPanel = lpContent
         state.selectIndex = 0
@@ -2173,10 +2185,12 @@ proc fullStateSync(state: var AppState, daemonState: JsonNode) =
     state.status = if s == "playing": psPlaying elif s == "paused": psPaused else: psStopped
   if daemonState.hasKey("track_path"):
     state.currentPlayingPath = daemonState["track_path"].getStr("")
+  let oldYtTitle = state.ytStreamTitle
+  let oldYtChannel = state.ytStreamChannel
+  let oldYtDuration = state.ytStreamDuration
   state.ytStreamTitle = ""
   state.ytStreamChannel = ""
   state.ytStreamDuration = ""
-  state.ytStreamUrl = ""
   if daemonState.hasKey("track_title"):
     state.ytStreamTitle = daemonState["track_title"].getStr("")
   if daemonState.hasKey("track_channel"):
@@ -2184,14 +2198,20 @@ proc fullStateSync(state: var AppState, daemonState: JsonNode) =
   if daemonState.hasKey("track_album"):
     if state.ytStreamChannel.len == 0:
       state.ytStreamChannel = daemonState["track_album"].getStr("")
+  if state.ytStreamTitle.len == 0 and oldYtTitle.len > 0:
+    state.ytStreamTitle = oldYtTitle
+    state.ytStreamChannel = oldYtChannel
+    state.ytStreamDuration = oldYtDuration
   if daemonState.hasKey("time_pos"):
     state.timePos = max(0.0, daemonState["time_pos"].getFloat(0.0))
   if state.ytStreamTitle.len > 0:
     if daemonState.hasKey("duration"):
       state.ytDurationSec = max(0.0, daemonState["duration"].getFloat(0.0))
-    state.ytPlaybackStartTime = epochTime()
-    state.ytPauseDuration = state.timePos
+    state.ytPlaybackStartTime = epochTime() - state.timePos
+    state.ytPauseDuration = 0.0
     state.ytPauseStartTime = 0.0
+    if state.status == psPaused:
+      state.ytPauseStartTime = epochTime()
   else:
     state.ytPlaybackStartTime = 0.0
     state.ytPauseDuration = 0.0
@@ -2244,6 +2264,7 @@ proc runTui(args: seq[string]) =
     for i, t in ctx.data.libraryTracks:
       if t.path == ctx.data.currentPlayingPath:
         ctx.data.selectIndex = i
+        ctx.data.currentPlayingId = t.id
         break
     if ctx.data.status == psPlaying or ctx.data.status == psPaused:
       ctx.data.setFeedback("[Resumed playback]")
@@ -2305,11 +2326,19 @@ proc runTui(args: seq[string]) =
               let libResp = cli.getLibrary()
               if libResp.hasKey("tracks") and libResp["tracks"].len > 0:
                 ctx.data.loadLibraryFromDaemon(cli, libResp)
+                # Rebuild ytDownloaded from library tracks whose path is already local
+                ctx.data.ytDownloaded.clear()
+                let dlDir = ctx.data.ytDownloadDir
+                for t in ctx.data.libraryTracks:
+                  if t.path.startsWith(dlDir):
+                    ctx.data.ytDownloaded[t.path] = t.path
+                ctx.data.downloadCount = ctx.data.ytDownloaded.len
               ctx.data.loadQueue()
               if ctx.data.currentPlayingPath.len > 0:
                 for i, t in ctx.data.libraryTracks:
                   if t.path == ctx.data.currentPlayingPath:
                     ctx.data.selectIndex = i
+                    ctx.data.currentPlayingId = t.id
                     break
               ctx.data.reconnecting = false
               ctx.data.reconnectAttempts = 0
@@ -2419,11 +2448,18 @@ proc runTui(args: seq[string]) =
           else:
             ctx.data.setFeedback("Failed to resolve stream URL")
       if ctx.data.ytDownloadQueue.len > 0 or ctx.data.ytDownloadTasks.len > 0:
+        let downloadTimeout = 600.0
         var done: seq[int] = @[]
         for i in 0..<ctx.data.ytDownloadTasks.len:
           if not ctx.data.ytDownloadTasks[i].completed:
             let p = ctx.data.ytDownloadTasks[i].process
-            if not p.running():
+            if epochTime() - ctx.data.ytDownloadTasks[i].startedAt > downloadTimeout:
+              try: p.terminate() except: discard
+              close(p)
+              ctx.data.ytDownloadTasks[i].completed = true
+              done.add(i)
+              ctx.data.showNotification("Download timed out: " & ctx.data.ytDownloadTasks[i].title, nkWarning)
+            elif not p.running():
               var path = ""
               try:
                 path = pollDownload(ctx.data.ytDownloadTasks[i].process, ctx.data.ytDownloadTasks[i].buf)
@@ -2435,6 +2471,7 @@ proc runTui(args: seq[string]) =
                 let (_, name, _) = splitFile(path)
                 let origUrl = ctx.data.ytDownloadTasks[i].url
                 ctx.data.ytDownloaded[origUrl] = path
+                ctx.data.downloadCount = ctx.data.ytDownloaded.len
                 # Update any existing library track that still points to the YouTube URL
                 for j in 0..<ctx.data.libraryTracks.len:
                   if ctx.data.libraryTracks[j].path == origUrl:
@@ -2444,6 +2481,10 @@ proc runTui(args: seq[string]) =
                     if ctx.data.currentPlayingPath == origUrl:
                       ctx.data.currentPlayingPath = path
                     break
+                # Persist the path update to the daemon's SQLite database
+                if ctx.data.player of DaemonClient:
+                  let cli = DaemonClient(ctx.data.player)
+                  discard cli.updateTrackPath(origUrl, path, name)
                 ctx.data.showNotification("Downloaded: " & name, nkSuccess)
                 ctx.data.rebuildItems()
           else:
@@ -2452,14 +2493,18 @@ proc runTui(args: seq[string]) =
           ctx.data.ytDownloadTasks.delete(done[i])
         while ctx.data.ytDownloadTasks.len < ctx.data.ytMaxConcurrentDownloads and ctx.data.ytDownloadQueue.len > 0:
           let item = ctx.data.ytDownloadQueue[0]
-          ctx.data.ytDownloadQueue.delete(0)
           var task: DownloadTask
           if startDownload(item, ctx.data.ytDownloadDir, task.process, ctx.data.ytCookieSource, ctx.data.ytJsRuntime):
+            ctx.data.ytDownloadQueue.delete(0)
             task.title = item.title
             task.url = item.url
             task.outputDir = ctx.data.ytDownloadDir
             task.completed = false
+            task.startedAt = epochTime()
             ctx.data.ytDownloadTasks.add(task)
+          else:
+            ctx.data.showNotification("Failed to start download: " & item.title, nkError)
+            break
       if ctx.data.feedbackTimer > 0:
         ctx.data.feedbackTimer.dec
       if ctx.data.ytSearchLoading and ctx.data.overlay.kind == okYtSearch and ctx.data.overlay.ytResults.len == 0:
