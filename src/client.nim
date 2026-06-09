@@ -326,6 +326,42 @@ proc scanDir*(cli: DaemonClient, path: string): JsonNode =
   cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "scan", "path": path})
 
+proc queueAdd*(cli: DaemonClient, paths: seq[string]): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "queue_add", "data": %paths})
+
+proc queueRemove*(cli: DaemonClient, index: int): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "queue_remove", "index": index})
+
+proc queueClear*(cli: DaemonClient): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "queue_clear"})
+
+proc queueList*(cli: DaemonClient): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "queue_list"})
+
+proc queueSetCursor*(cli: DaemonClient, index: int): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "queue_set_cursor", "index": index})
+
+proc addFavourite*(cli: DaemonClient, trackId: int64): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "add_favourite", "track_id": trackId})
+
+proc removeFavourite*(cli: DaemonClient, trackId: int64): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "remove_favourite", "track_id": trackId})
+
+proc getFavouritesFromDaemon*(cli: DaemonClient): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "get_favourites"})
+
+proc getFullState*(cli: DaemonClient): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "get_full_state"})
+
 proc newDaemonClient*(): DaemonClient =
   DaemonClient(
     volume: 80, state: 0, running: false,

@@ -140,11 +140,46 @@ when defined(useSqlite):
       )
     """)
     discard execRaw(lib.db, """
+      CREATE TABLE IF NOT EXISTS favourites (
+        track_id INTEGER PRIMARY KEY REFERENCES tracks(id),
+        added_at TEXT DEFAULT (datetime('now'))
+      )
+    """)
+    discard execRaw(lib.db, """
       CREATE TABLE IF NOT EXISTS playback_state (
         key TEXT PRIMARY KEY,
         value TEXT
       )
     """)
+
+  proc addFavourite*(lib: LibraryDb, trackId: int64) =
+    let stmt = prepare(lib.db, "INSERT OR IGNORE INTO favourites (track_id) VALUES (?)")
+    if stmt == nil: return
+    bindInt64(stmt, 1.cint, trackId)
+    discard sqlite3_step(stmt)
+    finalize(stmt)
+
+  proc removeFavourite*(lib: LibraryDb, trackId: int64) =
+    let stmt = prepare(lib.db, "DELETE FROM favourites WHERE track_id = ?")
+    if stmt == nil: return
+    bindInt64(stmt, 1.cint, trackId)
+    discard sqlite3_step(stmt)
+    finalize(stmt)
+
+  proc getFavourites*(lib: LibraryDb): seq[int64] =
+    let stmt = prepare(lib.db, "SELECT track_id FROM favourites ORDER BY added_at DESC")
+    if stmt == nil: return
+    while sqlite3_step(stmt) == SQLITE_ROW:
+      result.add(colInt64(stmt, 0.cint))
+    finalize(stmt)
+
+  proc isFavourite*(lib: LibraryDb, trackId: int64): bool =
+    let stmt = prepare(lib.db, "SELECT count(*) FROM favourites WHERE track_id = ?")
+    if stmt == nil: return false
+    bindInt64(stmt, 1.cint, trackId)
+    if sqlite3_step(stmt) == SQLITE_ROW:
+      result = colInt64(stmt, 0.cint) > 0
+    finalize(stmt)
 
   proc getArtistId*(lib: LibraryDb, name: string): int64 =
     let adjusted = if name.len == 0: "Unknown Artist" else: name
@@ -401,6 +436,10 @@ else:
   proc closeDb*(lib: LibraryDb) = discard
   proc getArtistId*(lib: LibraryDb, name: string): int64 = 0
   proc getAlbumId*(lib: LibraryDb, title: string, artistId: int64, year: int, genre: string): int64 = 0
+  proc addFavourite*(lib: LibraryDb, trackId: int64) = discard
+  proc removeFavourite*(lib: LibraryDb, trackId: int64) = discard
+  proc getFavourites*(lib: LibraryDb): seq[int64] = @[]
+  proc isFavourite*(lib: LibraryDb, trackId: int64): bool = false
 
 proc displayName*(track: Track): string =
   if track.title.len > 0: track.title

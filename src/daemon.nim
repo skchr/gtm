@@ -1,4 +1,4 @@
-import os, json, strutils, net, posix
+import os, json, strutils, net, posix, random
 from nativesockets import setBlocking, selectRead, SocketHandle
 proc prctl(option: cint, arg2: cstring): cint {.importc, header: "<sys/prctl.h>".}
 import audio, state, visualizer, library
@@ -14,7 +14,9 @@ type
     dckSetShuffle, dckSetRepeat, dckSetSleepTimer, dckGetState, dckResume,
     dckPrepareNext, dckCrossfade,
     dckSetEqBand, dckSetEqPreset,
-    dckGetLibrary, dckAddTrack, dckUpdateTrackPath
+    dckGetLibrary, dckAddTrack, dckUpdateTrackPath,
+    dckQueueAdd, dckQueueRemove, dckQueueClear, dckQueueList, dckQueueSetCursor,
+    dckAddFavourite, dckRemoveFavourite, dckGetFavourites, dckGetFullState
 
   DaemonCmd* = object
     kind*: DaemonCmdKind
@@ -124,6 +126,24 @@ proc parseDaemonCommand(line: string): DaemonCmd =
       result.kind = dckAddTrack; result.strArg = $j["data"]
     of "update_track_path":
       result.kind = dckUpdateTrackPath; result.strArg = $j["data"]
+    of "queue_add":
+      result.kind = dckQueueAdd; result.strArg = $j["data"]
+    of "queue_remove":
+      result.kind = dckQueueRemove; result.intArg = j{"index"}.getInt(0)
+    of "queue_clear":
+      result.kind = dckQueueClear
+    of "queue_list":
+      result.kind = dckQueueList
+    of "queue_set_cursor":
+      result.kind = dckQueueSetCursor; result.intArg = j{"index"}.getInt(0)
+    of "add_favourite":
+      result.kind = dckAddFavourite; result.intArg = j{"track_id"}.getInt(0)
+    of "remove_favourite":
+      result.kind = dckRemoveFavourite; result.intArg = j{"track_id"}.getInt(0)
+    of "get_favourites":
+      result.kind = dckGetFavourites
+    of "get_full_state":
+      result.kind = dckGetFullState
     else: result.kind = dckStatus
   except:
     result.kind = dckStatus
@@ -151,6 +171,36 @@ proc savePlaybackState(d: Daemon) =
     d.lib.setPlaybackState("track_title", d.currentTrackTitle)
     d.lib.setPlaybackState("track_channel", d.currentTrackChannel)
     d.lib.setPlaybackState("state", $(d.player.state))
+    d.lib.setPlaybackState("shuffle", $(d.shuffleEnabled))
+    d.lib.setPlaybackState("repeat", $(d.repeatMode))
+    d.lib.setPlaybackState("sleep_timer", $(d.sleepTimerRemaining))
+    d.lib.setPlaybackState("crossfade_duration", $(d.crossfadeDuration))
+    var qArr = newJArray()
+    for p in d.playbackQueue:
+      qArr.add(%p)
+    d.lib.setPlaybackState("queue_json", $qArr)
+
+
+proc shuffleOrder(count: int): seq[int] =
+  result = newSeq[int](count)
+  for i in 0..<count:
+    result[i] = i
+  for i in countup(0, count - 2):
+    let j = rand(i..<count)
+    swap(result[i], result[j])
+
+proc advanceToNextTrack(d: Daemon, forward: bool = true): bool =
+  if forward and d.playbackQueue.len > 0:
+    let nextPath = d.playbackQueue[0]
+    d.playbackQueue.delete(0)
+    d.player.stop()
+    d.player.loadFile(nextPath)
+    d.currentTrackPath = nextPath
+    d.currentTrackTitle = ""
+    d.currentTrackChannel = ""
+    d.player.play()
+    d.idleFrames = 0
+    return true
 
 proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
   result = %*{"ok": true}
@@ -193,7 +243,9 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     d.player.stop()
   of dckSeek:
     d.player.seek(cmd.floatArg)
-  of dckNext, dckPrev:
+  of dckNext:
+    discard d.advanceToNextTrack(true)
+  of dckPrev:
     d.player.stop()
     d.idleFrames = 0
   of dckSetVolume:
@@ -344,6 +396,9 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
           discard d.lib.addTrack(p, name, "", "", 0.0, 0, 0, "")
   of dckSetShuffle:
     d.shuffleEnabled = cmd.intArg != 0
+    if d.shuffleEnabled and d.playbackQueue.len > 0:
+      d.shuffleOrder = shuffleOrder(d.playbackQueue.len)
+      d.shuffleIndex = 0
     result["shuffle"] = %d.shuffleEnabled
   of dckSetRepeat:
     d.repeatMode = cmd.intArg
@@ -395,10 +450,79 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
       result["duration"] = %d.player.duration
     else:
       result["state"] = %"stopped"
+  of dckQueueAdd:
+    if cmd.strArg.len > 0:
+      try:
+        let paths = parseJson(cmd.strArg)
+        for p in paths:
+          d.playbackQueue.add(p.getStr(""))
+        result["queue_length"] = %d.playbackQueue.len
+      except: stderr.writeLine("[gtm] queueAdd error: " & getCurrentExceptionMsg())
+  of dckQueueRemove:
+    if cmd.intArg >= 0 and cmd.intArg < d.playbackQueue.len:
+      d.playbackQueue.delete(cmd.intArg)
+  of dckQueueClear:
+    d.playbackQueue = @[]
+    d.shuffleOrder = @[]
+    d.shuffleIndex = 0
+  of dckQueueList:
+    var arr = newJArray()
+    for p in d.playbackQueue:
+      arr.add(%p)
+    result["queue"] = arr
+  of dckQueueSetCursor:
+    d.shuffleIndex = cmd.intArg
+    result["cursor"] = %d.shuffleIndex
+  of dckAddFavourite:
+    if d.lib != nil:
+      d.lib.addFavourite(int64(cmd.intArg))
+  of dckRemoveFavourite:
+    if d.lib != nil:
+      d.lib.removeFavourite(int64(cmd.intArg))
+  of dckGetFavourites:
+    if d.lib != nil:
+      var arr = newJArray()
+      for t in d.lib.getFavourites():
+        arr.add(%t)
+      result["favourites"] = arr
+  of dckGetFullState:
+    result["shuffle"] = %d.shuffleEnabled
+    result["repeat"] = %d.repeatMode
+    result["sleep_timer"] = %d.sleepTimerRemaining
+    result["volume"] = %d.player.volume
+    result["time_pos"] = %d.player.timePos
+    result["duration"] = %d.player.duration
+    result["track_path"] = %d.currentTrackPath
+    result["track_title"] = %d.currentTrackTitle
+    result["track_channel"] = %d.currentTrackChannel
+    result["track_album"] = %d.player.metadata.album
+    result["crossfading"] = %d.player.getStatusFlags().crossfading
+    result["master_ended"] = %d.player.getStatusFlags().masterEnded
+    var qArr = newJArray()
+    for p in d.playbackQueue:
+      qArr.add(%p)
+    result["queue"] = qArr
+    var soArr = newJArray()
+    for i in d.shuffleOrder:
+      soArr.add(%i)
+    result["shuffleOrder"] = soArr
+    result["shuffleIndex"] = %d.shuffleIndex
+    result["crossfadeDuration"] = %d.crossfadeDuration
+    result["crossfadePrepared"] = %d.crossfadePrepared
+    result["crossfadeStarted"] = %d.crossfadeStarted
+    result["crossfadeNextPath"] = %d.crossfadeNextPath
+    result["earlyPreloaded"] = %d.earlyPreloaded
+    let st = case d.player.state
+      of 0: "stopped"
+      of 1: "playing"
+      of 2: "paused"
+      else: "unknown"
+    result["state"] = %st
+
 
 proc trySend(client: Socket, data: string): bool =
   if data.len == 0: return true
-  let n = posix.send(client.getFd, addr data[0], data.len.cint, 0.cint)
+  let n = posix.send(client.getFd, unsafeAddr data[0], data.len.cint, 0.cint)
   if n >= 0: return true
   let err = osLastError()
   if err.int32 == 11 or err.int32 == 10035:
@@ -469,6 +593,26 @@ proc runDaemon*() =
       daemon.currentTrackPath = trackPath
       daemon.currentTrackTitle = trackTitle
       daemon.currentTrackChannel = trackChannel
+    let shuffleStr = daemon.lib.getPlaybackState("shuffle")
+    if shuffleStr.len > 0:
+      try: daemon.shuffleEnabled = shuffleStr == "true" except: discard
+    let repeatStr = daemon.lib.getPlaybackState("repeat")
+    if repeatStr.len > 0:
+      try: daemon.repeatMode = parseInt(repeatStr) except: discard
+    let sleepStr = daemon.lib.getPlaybackState("sleep_timer")
+    if sleepStr.len > 0:
+      try: daemon.sleepTimerRemaining = parseInt(sleepStr) except: discard
+    let cfStr = daemon.lib.getPlaybackState("crossfade_duration")
+    if cfStr.len > 0:
+      try: daemon.crossfadeDuration = parseInt(cfStr) except: discard
+    let queueStr = daemon.lib.getPlaybackState("queue_json")
+    if queueStr.len > 0:
+      try:
+        let qj = parseJson(queueStr)
+        daemon.playbackQueue = @[]
+        for p in qj:
+          daemon.playbackQueue.add(p.getStr(""))
+      except: discard
   removeFile(sockPath())
   let srvFd = posix.socket(posix.AF_UNIX, posix.SOCK_STREAM, 0)
   daemon.server = newSocket(srvFd, Domain.AF_UNIX, SockType.SOCK_STREAM)
@@ -529,6 +673,36 @@ proc runDaemon*() =
       let evJson = %*{"events": serializeEvents(daemonEvents)}
       if not trySend(daemon.client, $evJson & "\n"):
         daemon.client = nil
+    # Auto-advance on track ended
+    for ev in daemonEvents:
+      if ev.kind == aekTrackEnded:
+        if daemon.crossfadeNextPath.len > 0:
+          daemon.currentTrackPath = daemon.crossfadeNextPath
+          daemon.crossfadePrepared = false
+          daemon.crossfadeStarted = false
+          daemon.crossfadeNextPath = ""
+        elif daemon.playbackQueue.len > 0:
+          discard daemon.advanceToNextTrack(true)
+
+    # Crossfade scheduling
+    if daemon.player.state == 1 and daemon.crossfadeDuration > 0 and daemon.playbackQueue.len > 0:
+      let dur = daemon.player.duration
+      let tpos = daemon.player.timePos
+      if dur > 0.0 and tpos >= 0.0:
+        let timeRemaining = dur - tpos
+        if timeRemaining > 0.0:
+          let prepareThreshold = float(daemon.crossfadeDuration) + 2.0
+          if not daemon.crossfadePrepared and timeRemaining <= prepareThreshold:
+            let nextPath = daemon.playbackQueue[0]
+            daemon.player.prepareNext(nextPath)
+            daemon.crossfadePrepared = true
+            daemon.crossfadeNextPath = nextPath
+          if daemon.crossfadePrepared and not daemon.crossfadeStarted and timeRemaining <= float(daemon.crossfadeDuration):
+            if daemon.playbackQueue.len > 0 and daemon.playbackQueue[0] == daemon.crossfadeNextPath:
+              daemon.playbackQueue.delete(0)
+            daemon.player.startCrossfade(float(daemon.crossfadeDuration))
+            daemon.crossfadeStarted = true
+
     daemon.viz.readPcm()
     var pcmBuf: seq[float32] = @[]
     daemon.player.readPcmFrames(pcmBuf, 512)

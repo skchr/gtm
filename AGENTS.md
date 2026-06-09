@@ -7,7 +7,13 @@ nim c -d:release src/gtm.nim   # alternative: TUI-only release build
 nim c -d:release src/gtmd.nim  # alternative: daemon-only release build
 nim check src/gtm.nim           # syntax check
 nim check src/gtmd.nim          # daemon syntax check
+# Tests:
+nim r --path:src tests/test_ipc.nim
+nim r --path:src tests/test_parse.nim
 ```
+
+## Env Vars for Build (Nim 1.6 with pkgs in ~/.nimble/pkgs)
+NIMWAVE_PATH="$HOME/.nimble/pkgs/nimwave-1.2.1" ILLWAVE_PATH="$HOME/.nimble/pkgs/illwave-0.6.0" ANSIUTILS_PATH="$HOME/.nimble/pkgs/ansiutils-0.2.0"
 
 ## Commands
 - `show_equalizer` (`E`): toggle 10-band EQ overlay with sliders, presets (j/k select, ←→ adjust, P cycle)
