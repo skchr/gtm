@@ -57,6 +57,10 @@ type
     crossfadeStarted*: bool
     crossfadeNextPath*: string
     earlyPreloaded*: bool
+    # Background scan state
+    scanningDir: string
+    scanningFiles: seq[string]
+    scanningIdx: int
     # yt-dlp state
     ytCookieSource: string
     ytJsRuntime: string
@@ -472,11 +476,14 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
       result["playlist_id"] = %cmd.intArg
   of dckScan:
     if cmd.strArg.len > 0 and dirExists(cmd.strArg):
-      let paths = scanDirectoryRecursive(cmd.strArg)
-      for p in paths:
-        let (_, name, _) = p.splitFile()
-        if d.lib != nil:
-          discard d.lib.addTrack(p, name, "", "", 0.0, 0, 0, "")
+      if d.scanningDir.len > 0:
+        result["scanning_already"] = %true
+      else:
+        d.scanningDir = cmd.strArg
+        d.scanningFiles = scanDirectoryRecursive(cmd.strArg)
+        d.scanningIdx = 0
+        result["scanning"] = %true
+        result["total_files"] = %d.scanningFiles.len
   of dckSetShuffle:
     d.shuffleEnabled = cmd.intArg != 0
     if d.shuffleEnabled and d.playbackQueue.len > 0:
@@ -700,6 +707,7 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
         done.add(i)
     for i in countdown(done.len - 1, 0):
       d.ytDownloadTasks.delete(done[i])
+    result["done"] = %(d.ytDownloadTasks.len == 0)
     var activeArr = newJArray()
     for t in d.ytDownloadTasks:
       activeArr.add(%*{"url": %t.url, "title": %t.title, "started": %t.startedAt})
@@ -754,13 +762,26 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
 
 proc trySend(client: Socket, data: string): bool =
   if data.len == 0: return true
-  let n = posix.send(client.getFd, unsafeAddr data[0], data.len.cint, 0.cint)
-  if n >= 0: return true
-  let err = osLastError()
-  if err.int32 == 11 or err.int32 == 10035:
-    return true
-  try: client.close() except: discard
-  return false
+  var remaining = data
+  var retries = 200
+  while remaining.len > 0 and retries > 0:
+    let n = posix.send(client.getFd, unsafeAddr remaining[0], remaining.len.cint, 0.cint)
+    if n > 0:
+      remaining = remaining[n..^1]
+    elif n == 0:
+      return true
+    else:
+      let err = osLastError()
+      if err.int32 == 11 or err.int32 == 10035:
+        os.sleep(10)
+        retries.dec
+      else:
+        try: client.close() except: discard
+        return false
+  if remaining.len > 0:
+    try: client.close() except: discard
+    return false
+  return true
 
 proc runDaemon*() =
   let debugMode = "--debug" in os.commandLineParams()
@@ -773,6 +794,7 @@ proc runDaemon*() =
   if crashFile.open(crashPath, fmAppend):
     let crashFd = crashFile.getFileHandle
     if not debugMode:
+      stderr.writeLine("[gtmd] GTM Daemon v" & GTM_VERSION & " starting — pid: " & $getpid() & ", socket: " & sockPath())
       discard dup2(cint(crashFd), cint(1))
     discard dup2(cint(crashFd), cint(2))
   discard prctl(15.cint, "gtmd")
@@ -807,6 +829,9 @@ proc runDaemon*() =
     crossfadeStarted: false,
     crossfadeNextPath: "",
     earlyPreloaded: false,
+    scanningDir: "",
+    scanningFiles: @[],
+    scanningIdx: 0,
     ytCookieSource: "",
     ytJsRuntime: "",
     ytDownloadDir: defaultDownloadDir,
@@ -887,6 +912,7 @@ proc runDaemon*() =
             daemon.client.close()
           daemon.client = newSocket(cliFd, Domain.AF_UNIX, SockType.SOCK_STREAM)
           setBlocking(daemon.client.getFd, false)
+          buf = ""
       if daemon.client != nil and daemon.client.getFd in readFds:
         var tmp: array[4096, char]
         let n = posix.recv(daemon.client.getFd, addr tmp[0], tmp.len.cint, 0)
@@ -1000,6 +1026,23 @@ proc runDaemon*() =
         dlDone.add(i)
     for i in countdown(dlDone.len - 1, 0):
       daemon.ytDownloadTasks.delete(dlDone[i])
+
+    # Background scan: process up to 10 files per iteration
+    if daemon.scanningDir.len > 0 and daemon.scanningFiles.len > 0:
+      let batchEnd = min(daemon.scanningIdx + 10, daemon.scanningFiles.len)
+      while daemon.scanningIdx < batchEnd:
+        let p = daemon.scanningFiles[daemon.scanningIdx]
+        let (_, name, _) = p.splitFile()
+        if daemon.lib != nil:
+          discard daemon.lib.addTrack(p, name, "", "", 0.0, 0, 0, "")
+        daemon.scanningIdx.inc
+      if daemon.scanningIdx >= daemon.scanningFiles.len:
+        daemon.scanningDir = ""
+        daemon.scanningFiles = @[]
+        daemon.scanningIdx = 0
+        if daemon.client != nil:
+          let ev = %*{"events": [%*{"kind": %10, "event": "scan_done"}]}
+          discard trySend(daemon.client, $ev & "\n")
 
     daemon.viz.readPcm()
     var pcmBuf: seq[float32] = @[]

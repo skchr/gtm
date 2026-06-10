@@ -98,18 +98,22 @@ proc sendDaemonCmd*(cli: DaemonClient, cmd: JsonNode): JsonNode =
     let data = $cmd & "\n"
     cli.sock.send(data)
     var tmp: array[16384, char]
-    for attempt in 0..<20:
+    var totalWait = 0.0
+    while totalWait < 30.0:
       var rfds: posix.TFdSet
       FD_ZERO(rfds)
       FD_SET(cli.sock.getFd, rfds)
       var tv: posix.Timeval
       tv.tv_sec = 0.Time
-      tv.tv_usec = 50_000.Suseconds
+      tv.tv_usec = 100_000.Suseconds
       let sel = posix.select(cint(int(cli.sock.getFd) + 1), addr(rfds), nil, nil, addr(tv))
       if sel > 0:
         let n = posix.recv(cli.sock.getFd, addr tmp[0], tmp.len, 0.cint)
         if n > 0:
           let old = cli.buf.len; cli.buf.setLen(old + n); copyMem(addr cli.buf[old], addr tmp[0], n)
+        elif n == 0:
+          cli.connected = false
+          return %*{"ok": false, "error": "connection closed"}
       while true:
         let nli = cli.buf.find('\n')
         if nli < 0: break
@@ -119,6 +123,7 @@ proc sendDaemonCmd*(cli: DaemonClient, cmd: JsonNode): JsonNode =
         let j = parseJson(line)
         if not j.hasKey("events"):
           return j
+      totalWait += 0.1
   except:
     cli.connected = false
   return %*{"ok": false, "error": "no response"}
@@ -223,19 +228,22 @@ method pollEvents*(cli: DaemonClient): seq[AudioEvent] =
           of aekVolumeChanged: ev.intVal = evJson{"volume"}.getInt(0)
           else: discard
           result.add(ev)
-      if json.hasKey("time_pos"):
-        cli.timePos = json["time_pos"].getFloat(0.0)
-      if json.hasKey("duration"):
-        cli.duration = json["duration"].getFloat(0.0)
-      if json.hasKey("volume"):
-        cli.volume = json["volume"].getInt(80)
-      if json.hasKey("state"):
+      elif json.hasKey("state"):
         let s = json["state"].getStr()
         cli.state = (if s == "playing": 1 elif s == "paused": 2 else: 0)
-      if json.hasKey("audio_working"):
-        cli.working = json["audio_working"].getBool(true)
-      if json.hasKey("sleep_timer"):
-        cli.sleepTimerRemaining = json["sleep_timer"].getInt(0)
+        if json.hasKey("time_pos"):
+          cli.timePos = json["time_pos"].getFloat(0.0)
+        if json.hasKey("duration"):
+          cli.duration = json["duration"].getFloat(0.0)
+        if json.hasKey("volume"):
+          cli.volume = json["volume"].getInt(80)
+        if json.hasKey("audio_working"):
+          cli.working = json["audio_working"].getBool(true)
+        if json.hasKey("sleep_timer"):
+          cli.sleepTimerRemaining = json["sleep_timer"].getInt(0)
+      else:
+        # Skip stray command response lines (leftover from timed-out commands)
+        discard
   except:
     cli.connected = false
 
