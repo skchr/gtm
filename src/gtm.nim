@@ -1,4 +1,4 @@
-import os, terminal, strutils, unicode, json, sets, math, sequtils, algorithm, times, random, posix, osproc, tables
+import os, terminal, strutils, unicode, json, sets, math, sequtils, algorithm, times, random, posix, tables
 from illwave as iw import nil
 from nimwave as nw import nil
 import state, ui, audio, library, theme, commands, client, visualizer, cli, ytdlp
@@ -29,16 +29,8 @@ proc loadConfig(state: var AppState) =
         let vizNode = json["visualizer"]
         if vizNode.hasKey("bar_count"):
           state.viz.barCount = vizNode["bar_count"].getInt(32)
-      if json.hasKey("yt_cookie_source"):
-        state.ytCookieSource = json["yt_cookie_source"].getStr("")
-      if json.hasKey("yt_js_runtime"):
-        state.ytJsRuntime = json["yt_js_runtime"].getStr("node")
-      if json.hasKey("yt_search_history"):
-        state.ytSearchHistory = json["yt_search_history"].getElems().mapIt(it.getStr(""))
       if json.hasKey("yt_search_page_size"):
         state.ytSearchPageSize = json["yt_search_page_size"].getInt(10)
-      if json.hasKey("crossfade_duration"):
-        state.crossfadeDuration = json["crossfade_duration"].getInt(5)
       if json.hasKey("keybindings"):
         state.rawKeybindingsJson = json["keybindings"]
       let refreshSeed = state.config.refreshTheme or state.config.theme == "random"
@@ -72,11 +64,7 @@ proc saveConfig(state: AppState) =
     "refresh_theme": %state.config.refreshTheme,
     "viz_visible": %state.vizVisible,
     "visualizer": %{"bar_count": %state.viz.barCount},
-    "yt_cookie_source": %state.ytCookieSource,
-    "yt_js_runtime": %state.ytJsRuntime,
-    "yt_search_history": %state.ytSearchHistory,
-    "yt_search_page_size": %state.ytSearchPageSize,
-    "crossfade_duration": %state.crossfadeDuration
+    "yt_search_page_size": %state.ytSearchPageSize
   }
   var j = json
   if state.rawKeybindingsJson != nil:
@@ -184,12 +172,6 @@ proc getCurrentTrack(state: AppState): Track =
     return state.libraryTracks[min(state.selectIndex, state.libraryTracks.len - 1)]
   Track()
 
-proc shuffleOrder(count: int): seq[int] =
-  result = toSeq(0..<count)
-  for i in countup(0, count - 2):
-    let j = rand(i..<count)
-    swap(result[i], result[j])
-
 proc applyFilter(state: var AppState) =
   state.rebuildItems()
   state.filteredIndices = @[]
@@ -223,50 +205,11 @@ proc setFeedback(state: var AppState, msg: string, kind: NotificationKind = nkIn
   state.feedbackTimer = 60
   state.markDirty(ceFeedback)
 
-proc isYtPageUrl*(path: string): bool =
-  path.contains("youtube.com") or path.contains("youtu.be")
-
 proc playSelected(state: var AppState) =
   let track = state.getCurrentTrack()
   if track.path.len > 0:
     state.timePos = 0.0
     state.duration = 0.0
-    # Check if this YT track has already been downloaded; use local file
-    if isYtPageUrl(track.path) and state.ytDownloaded.hasKey(track.path):
-      let localPath = state.ytDownloaded[track.path]
-      if fileExists(localPath):
-        state.ytStreamTitle = ""
-        state.ytStreamChannel = ""
-        state.ytStreamDuration = ""
-        state.player.loadFile(localPath)
-        state.player.play()
-        state.status = psPlaying
-        state.currentPlayingPath = localPath
-        state.currentPlayingId = track.id
-        state.markDirtyBatch(cePlayState, ceTrack)
-        if state.duration == 0.0 and track.duration > 0:
-          state.duration = track.duration
-        return
-    if isYtPageUrl(track.path) and not track.path.contains("googlevideo.com"):
-      if state.ytStreamActive: return
-      state.ytStreamPendingItem = YtSearchResult(
-        title: track.title,
-        url: track.path,
-        duration: "",
-        channel: track.displayArtist(),
-        kind: srkVideo
-      )
-      state.ytStreamActive = startStreamUrlFetch(track.path, state.ytStreamProcess, state.ytCookieSource, state.ytJsRuntime)
-      state.ytStreamBuf = ""
-      if state.ytStreamActive:
-        state.setFeedback("Resolving stream URL...")
-      else:
-        state.setFeedback("Failed to start stream resolution")
-      state.markDirty(cePlayState)
-      return
-    state.ytStreamTitle = ""
-    state.ytStreamChannel = ""
-    state.ytStreamDuration = ""
     state.player.loadFile(track.path)
     state.player.play()
     state.status = psPlaying
@@ -277,50 +220,14 @@ proc playSelected(state: var AppState) =
       state.duration = track.duration
 
 proc nextTrack(state: var AppState) =
-  let items = state.displayItems
-  if state.playbackQueue.len > 0:
-    let tIdx = state.playbackQueue[0]
-    state.playbackQueue.delete(0)
-    if state.queueCursor > 0: state.queueCursor.dec
-    state.markDirty(ceQueue)
-    if tIdx >= 0 and tIdx < state.libraryTracks.len:
-      state.selectIndex = tIdx
-      state.playSelected()
-    return
-  if items.len == 0: return
-  if state.shuffleEnabled and state.shuffleOrder.len > 0:
-    state.shuffleIndex = (state.shuffleIndex + 1) mod state.shuffleOrder.len
-    state.selectIndex = state.shuffleOrder[state.shuffleIndex]
-  elif state.repeatMode == 2:
-    state.selectIndex = state.selectIndex
-  else:
-    var next = state.selectIndex + 1
-    if next >= items.len:
-      if state.repeatMode == 1:
-        next = 0
-      else:
-        state.player.stop()
-        state.status = psStopped
-        state.markDirty(cePlayState)
-        return
-    state.selectIndex = next
-  state.playSelected()
+  state.player.stop()
+  state.player.loadFile("")
+  discard daemonSimpleCmd(DaemonClient(state.player), "next")
+  state.markDirty(cePlayState)
 
 proc prevTrack(state: var AppState) =
-  let items = state.displayItems
-  if items.len == 0: return
-  if state.shuffleEnabled and state.shuffleOrder.len > 0:
-    state.shuffleIndex = (state.shuffleIndex - 1 + state.shuffleOrder.len) mod state.shuffleOrder.len
-    state.selectIndex = state.shuffleOrder[state.shuffleIndex]
-  else:
-    var prev = state.selectIndex - 1
-    if prev < 0:
-      if state.repeatMode == 1:
-        prev = items.len - 1
-      else:
-        prev = 0
-    state.selectIndex = prev
-  state.playSelected()
+  discard daemonSimpleCmd(DaemonClient(state.player), "prev")
+  state.markDirty(cePlayState)
 
 proc adjustVolume(state: var AppState, delta: int) =
   state.volume = max(0, min(100, state.volume + delta))
@@ -330,11 +237,6 @@ proc adjustVolume(state: var AppState, delta: int) =
 
 proc toggleShuffle(state: var AppState) =
   state.shuffleEnabled = not state.shuffleEnabled
-  if state.shuffleEnabled:
-    let count = state.displayItems.len
-    if count > 0:
-      state.shuffleOrder = shuffleOrder(count)
-      state.shuffleIndex = 0
   if state.player of DaemonClient:
     discard DaemonClient(state.player).setShuffle(state.shuffleEnabled)
 
@@ -456,40 +358,6 @@ proc goToLast(state: var AppState) =
   state.selectIndex = max(0, state.filteredCount() - 1)
 
 proc queuePath*(state: AppState): string = state.dataDir / "queue.json"
-
-proc saveQueue*(state: AppState) =
-  let path = state.queuePath
-  try:
-    let dir = state.dataDir
-    if not dirExists(dir): createDir(dir)
-    var arr: seq[JsonNode] = @[]
-    for idx in state.playbackQueue:
-      if idx >= 0 and idx < state.libraryTracks.len:
-        let t = state.libraryTracks[idx]
-        arr.add(%*{"path": t.path, "title": t.title, "artist": t.artist})
-    writeFile(path, $ %*{"queue": arr, "cursor": state.queueCursor})
-  except:
-    discard
-
-proc loadQueue*(state: var AppState) =
-  let path = state.queuePath
-  if not fileExists(path): return
-  try:
-    let j = parseFile(path)
-    state.playbackQueue = @[]
-    if j.hasKey("cursor"):
-      state.queueCursor = j["cursor"].getInt(0)
-    if j.hasKey("queue"):
-      for item in j["queue"]:
-        let itemPath = item["path"].getStr("")
-        # Find matching track in current library by path
-        for i, t in state.libraryTracks:
-          if t.path == itemPath:
-            state.playbackQueue.add(i)
-            break
-  except:
-    state.playbackQueue = @[]
-    state.queueCursor = 0
 
 proc saveCurrentQueue*(state: AppState) =
   if state.libraryTracks.len == 0: return
@@ -793,30 +661,18 @@ proc execCmd(state: var AppState, cmdId: string) =
   if idx >= 0:
     state.commands[idx].handler(state)
 
-const EQ_PRESETS = ["Flat", "Rock", "Pop", "Classical", "Jazz", "HipHop", "Vocal", "BassBoost", "Headphones", "Laptop"]
-
 proc cycleEqPreset(state: var AppState) =
-  var idx = EQ_PRESETS.find(state.eqPreset)
-  idx = (idx + 1) mod EQ_PRESETS.len
-  state.eqPreset = EQ_PRESETS[idx]
-  # Apply preset gains (matching C preset values)
-  const EQ_PRESET_VALS: array[10, array[10, float]] = [
-    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-    [5.0, 4.0, 3.0, 2.0, 1.0, 0.0, 0.0, 1.0, 2.0, 3.0],
-    [2.0, 3.0, 4.0, 3.0, 1.0, 0.0, 0.0, 1.0, 2.0, 2.0],
-    [4.0, 3.0, 2.0, 1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
-    [3.0, 2.0, 1.0, 2.0, 3.0, 4.0, 3.0, 2.0, 1.0, 0.0],
-    [5.0, 4.0, 3.0, 2.0, 1.0, 0.0, 0.0, 0.0, 1.0, 2.0],
-    [1.0, 2.0, 3.0, 4.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0],
-    [7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 1.0, 1.0, 1.0],
-    [2.0, 2.0, 1.0, 0.0, -1.0, -1.0, 0.0, 1.0, 2.0, 3.0],
-    [1.0, 2.0, 2.0, 3.0, 3.0, 2.0, 1.0, 0.0, -1.0, -2.0],
-  ]
-  for i in 0..9:
-    state.eqBands[i] = EQ_PRESET_VALS[idx][i]
   if state.player of DaemonClient:
     let cli = DaemonClient(state.player)
-    cli.setEqPreset(state.eqPreset)
+    let resp = cli.getEqPresets()
+    if resp.hasKey("presets"):
+      let presets = resp["presets"]
+      var idx = 0
+      for i, p in presets:
+        if p.getStr("") == state.eqPreset:
+          idx = (parseInt(i) + 1) mod presets.len
+          break
+      state.eqPreset = presets[idx].getStr("")
 
 proc adjustSetting(state: var AppState, delta: int) =
   if state.tab != tabSettings: return
@@ -1035,10 +891,6 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         state.overlay.clear()
         state.ytDebounceAt = 0
         state.ytSearchQuery = ""
-        if state.ytSearchProcessActive:
-          close(state.ytSearchProcess)
-          state.ytSearchProcessActive = false
-        state.ytSearchOutputBuf = ""
         state.ytSearchLoading = false
       of iw.Key.Tab:
         # Cycle sub-tab: All ↔ Playlists
@@ -1092,34 +944,42 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
               state.overlay.selected.incl(idx)
           else:
             let r = state.overlay.ytResults[state.overlay.cursor]
-            if r.kind == srkPlaylist:
-              # Fetch playlist tracks
-              let plDetail = fetchPlaylistTracks(r.url, state.ytCookieSource, state.ytJsRuntime)
-              if plDetail.trackCount > 0:
-                state.overlay.ytPlaylistDetail = plDetail
-                state.overlay.ytResults = plDetail.tracks
+            if r.kind == srkPlaylist and state.player of DaemonClient:
+              let cli = DaemonClient(state.player)
+              let plResp = cli.ytFetchPlaylist(r.url)
+              if plResp.hasKey("tracks") and plResp["tracks"].len > 0:
+                var tracks: seq[YtSearchResult] = @[]
+                for jt in plResp["tracks"].items:
+                  tracks.add(YtSearchResult(
+                    kind: srkVideo,
+                    title: jt{"title"}.getStr(""),
+                    url: jt{"url"}.getStr(""),
+                    duration: jt{"duration"}.getStr(""),
+                    channel: jt{"channel"}.getStr("")
+                  ))
+                state.overlay.ytPlaylistDetail = YtPlaylistDetail(
+                  title: plResp{"title"}.getStr(r.title),
+                  trackCount: tracks.len,
+                  tracks: tracks
+                )
+                state.overlay.ytResults = tracks
                 state.overlay.cursor = 0
                 state.overlay.multiMode = false
                 state.overlay.selected = initHashSet[int]()
-                state.setFeedback("Playlist: " & plDetail.title & " (" & $plDetail.trackCount & " tracks)")
+                state.setFeedback("Playlist: " & plResp{"title"}.getStr(r.title) & " (" & $tracks.len & " tracks)")
               else:
                 state.setFeedback("Failed to fetch playlist tracks")
             else:
-              # Add to search history
-              if state.overlay.query.len > 0 and state.overlay.query notin state.ytSearchHistory:
-                state.ytSearchHistory.insert(state.overlay.query, 0)
-                if state.ytSearchHistory.len > 50:
-                  state.ytSearchHistory.setLen(50)
               state.overlay.clear()
               state.ytStreamPendingItem = r
-              state.ytStreamActive = startStreamUrlFetch(r.url, state.ytStreamProcess, state.ytCookieSource, state.ytJsRuntime)
-              state.ytStreamBuf = ""
-              if state.ytStreamActive:
+              if state.player of DaemonClient:
+                let cli = DaemonClient(state.player)
+                discard cli.ytResolveStream(r.url)
+                state.ytStreamResolving = true
                 state.setFeedback("Resolving stream URL...")
       of iw.Key.CtrlD:
         proc addToBothQueues(state: var AppState, items: seq[YtSearchResult]) =
           for item in items:
-            state.ytDownloadQueue.add(item)
             let track = Track(
               path: item.url, title: item.title, artist: item.channel,
               album: "YouTube", duration: 0.0,
@@ -1129,7 +989,6 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
             state.playbackQueue.add(state.libraryTracks.len - 1)
           state.rebuildItems()
           state.markDirty(ceQueue)
-          state.saveQueue()
         if state.overlay.multiMode:
           if state.overlay.selected.len > 0:
             var items: seq[YtSearchResult] = @[]
@@ -1200,21 +1059,16 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           case sel
           of 0:
             for item in items:
-              if state.ytBatchDownloadMode:
-                state.ytDownloadQueue.add(item)
-              else:
-                let track = Track(
-                  path: item.url, title: item.title, artist: item.channel,
-                  album: "YouTube", duration: 0.0,
-                  id: int64(state.libraryTracks.len + 1)
-                )
-                state.libraryTracks.add(track)
-                state.playbackQueue.add(state.libraryTracks.len - 1)
+              let track = Track(
+                path: item.url, title: item.title, artist: item.channel,
+                album: "YouTube", duration: 0.0,
+                id: int64(state.libraryTracks.len + 1)
+              )
+              state.libraryTracks.add(track)
+              state.playbackQueue.add(state.libraryTracks.len - 1)
             state.rebuildItems()
-            let mode = if state.ytBatchDownloadMode: "download" else: "queue"
             state.markDirty(ceQueue)
-            state.saveQueue()
-            state.showNotification("Added " & $items.len & " items to " & mode)
+            state.showNotification("Added " & $items.len & " items to queue")
           of 1:
             state.overlay = OverlayState(kind: okYtBatch, batchItems: items, batchShowPls: true)
             if state.libraryPlaylists.len > 0:
@@ -1244,7 +1098,6 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           if idx >= 0 and idx < state.libraryTracks.len:
             state.playbackQueue.add(idx)
         state.markDirty(ceQueue)
-        state.saveQueue()
         if state.status == psStopped and state.playbackQueue.len > 0:
           state.overlay.clear()
           state.nextTrack()
@@ -1304,9 +1157,6 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
             state.playbackQueue.delete(qIdx)
             if state.queueCursor >= qIdx and state.queueCursor > 0:
               state.queueCursor.dec
-            state.ytStreamTitle = ""
-            state.ytStreamChannel = ""
-            state.ytStreamDuration = ""
             state.player.loadFile(track.path)
             state.player.play()
             state.status = psPlaying
@@ -2001,13 +1851,10 @@ proc processEvents(state: var AppState) =
   let events = state.player.pollEvents()
   if state.player of DaemonClient:
     state.audioAvailable = DaemonClient(state.player).working
-  var gotPosition = false
-  var crossfadeEnded = false
   for ev in events:
     case ev.kind
     of aekPositionChanged:
       state.timePos = ev.floatVal
-      gotPosition = true
       state.markDirty(cePosition)
     of aekDurationChanged:
       state.duration = ev.floatVal
@@ -2017,167 +1864,31 @@ proc processEvents(state: var AppState) =
       state.markDirty(ceVolume)
     of aekPlaybackStarted:
       state.status = psPlaying
-      state.crossfadePrepared = false
-      state.crossfadeStarted = false
-      state.earlyPreloaded = false
-      state.crossfadeNextPath = ""
-      # Resume software timer for YouTube streams
-      if state.ytPlaybackStartTime > 0 and state.ytPauseStartTime > 0:
-        state.ytPauseDuration += epochTime() - state.ytPauseStartTime
-        state.ytPauseStartTime = 0.0
-      elif state.ytPlaybackStartTime == 0 and state.ytStreamTitle.len > 0:
-        state.ytPlaybackStartTime = epochTime()
-      # Increment play count for the in-memory track
-      if state.currentPlayingId > 0:
+      state.markDirtyBatch(cePlayState, ceTrack)
+      if state.tab != tabNowPlaying and state.currentPlayingId > 0:
         for i in 0..<state.libraryTracks.len:
           if state.libraryTracks[i].id == state.currentPlayingId:
-            state.libraryTracks[i].playCount.inc
-            state.libraryTracks[i].lastPlayed = now().format("yyyy-MM-dd HH:mm:ss")
+            let t = state.libraryTracks[i]
+            state.nowPlayingCueMsg = "Now Playing: " & t.title & (if t.artist.len > 0: " — " & t.artist else: "")
+            state.nowPlayingCueTimer = 150
             break
-      # Song change notification when not on Now Playing tab
-      if state.tab != tabNowPlaying:
-        if state.currentPlayingId > 0:
-          for i in 0..<state.libraryTracks.len:
-            if state.libraryTracks[i].id == state.currentPlayingId:
-              let t = state.libraryTracks[i]
-              let msg = "Now Playing: " & t.title & (if t.artist.len > 0: " — " & t.artist else: "")
-              state.nowPlayingCueMsg = msg
-              state.nowPlayingCueTimer = 150
-              break
-        elif state.ytStreamTitle.len > 0:
-          state.nowPlayingCueMsg = "Now Playing: " & state.ytStreamTitle
-          state.nowPlayingCueTimer = 150
-      state.markDirtyBatch(cePlayState, ceTrack)
     of aekPlaybackPaused:
       state.status = psPaused
       state.markDirty(cePlayState)
-      if state.viz != nil: state.viz.clear()
-      if state.ytPlaybackStartTime > 0 and state.ytPauseStartTime == 0:
-        state.ytPauseStartTime = epochTime()
     of aekPlaybackStopped:
       state.status = psStopped
-      state.ytStreamUrl = ""
-      state.ytPlaybackStartTime = 0.0
-      state.ytPauseDuration = 0.0
-      state.ytPauseStartTime = 0.0
       state.markDirty(cePlayState)
     of aekTrackEnded:
-      if state.crossfadeStarted:
-        crossfadeEnded = true
-      else:
-        # Auto-download YouTube stream on completion
-        if state.ytStreamTitle.len > 0 and state.ytStreamUrl.len > 0:
-          var alreadyQueued = false
-          if state.ytDownloaded.hasKey(state.ytStreamUrl):
-            alreadyQueued = true
-          for q in state.ytDownloadQueue:
-            if q.url == state.ytStreamUrl:
-              alreadyQueued = true
-              break
-          for t in state.ytDownloadTasks:
-            if t.url == state.ytStreamUrl:
-              alreadyQueued = true
-              break
-          if not alreadyQueued:
-            state.ytDownloadQueue.add(YtSearchResult(
-              title: state.ytStreamTitle,
-              url: state.ytStreamUrl,
-              duration: state.ytStreamDuration,
-              channel: state.ytStreamChannel
-            ))
-            state.showNotification("Auto-downloading: " & state.ytStreamTitle)
-        if state.sleepTimerRemaining > 0:
-          state.player.stop()
-          state.status = psStopped
-          state.sleepTimerRemaining = 0
-        elif state.playbackQueue.len > 0:
-          state.nextTrack()
-        else:
-          state.player.stop()
-          state.status = psStopped
-          state.nextTrack()
-        state.ytPlaybackStartTime = 0.0
-        state.ytPauseDuration = 0.0
-        state.ytPauseStartTime = 0.0
-        state.markDirtyBatch(cePlayState, ceQueue)
+      # Daemon handles queue advancement; TUI just syncs state
+      state.duration = 0.0
+      state.timePos = 0.0
+      state.markDirtyBatch(cePlayState, cePosition)
     else: discard
-  if crossfadeEnded:
-    state.ytStreamTitle = ""
-    state.ytStreamChannel = ""
-    state.ytStreamDuration = ""
-    state.crossfadeStarted = false
-    state.crossfadePrepared = false
-    state.earlyPreloaded = false
-    # Advance queue/selection to match daemon's auto-advanced playback
-    if state.playbackQueue.len > 0:
-      let tIdx = state.playbackQueue[0]
-      state.playbackQueue.delete(0)
-      if state.queueCursor > 0: state.queueCursor.dec
-      state.markDirty(ceQueue)
-      if tIdx >= 0 and tIdx < state.libraryTracks.len:
-        state.currentPlayingPath = state.libraryTracks[tIdx].path
-        state.currentPlayingId = state.libraryTracks[tIdx].id
-        state.selectIndex = tIdx
-        if state.duration > 0:
-          state.timePos = 0.0
-        state.markDirty(ceTrack)
-    else:
-      let items = state.displayItems
-      if items.len > 0:
-        var nextIdx = state.selectIndex + 1
-        if nextIdx >= items.len:
-          if state.repeatMode == 1:
-            nextIdx = 0
-          else:
-            nextIdx = state.selectIndex
-        if state.shuffleEnabled and state.shuffleOrder.len > 0:
-          state.shuffleIndex = (state.shuffleIndex + 1) mod state.shuffleOrder.len
-          nextIdx = state.shuffleOrder[state.shuffleIndex]
-        state.selectIndex = nextIdx
-        if nextIdx >= 0 and nextIdx < items.len:
-          let track = state.libraryTracks[items[nextIdx].trackIdx]
-          state.currentPlayingPath = track.path
-          state.currentPlayingId = track.id
-        state.markDirty(ceTrack)
-  if not gotPosition and state.status == psPlaying:
-    # Software timer fallback for YouTube streams (FFmpeg can't track HTTP stream position)
-    if state.ytPlaybackStartTime > 0 and state.ytDurationSec > 0:
-      let elapsed = epochTime() - state.ytPlaybackStartTime - state.ytPauseDuration
-      let newTime = max(0.0, min(elapsed, state.ytDurationSec))
-      if abs(newTime - state.timePos) > 0.5:
-        state.timePos = newTime
-        state.markDirty(cePosition)
-    elif state.player.timePos != state.timePos:
-      state.timePos = state.player.timePos
-      state.markDirty(cePosition)
+  if state.player.timePos != state.timePos and state.status == psPlaying:
+    state.timePos = state.player.timePos
+    state.markDirty(cePosition)
   if state.duration == 0.0 and state.player.duration > 0.0:
     state.duration = state.player.duration
-  # Crossfade scheduling
-  if state.status == psPlaying and state.duration > 0 and state.player.backendType == abtDaemon:
-    let remaining = state.duration - state.timePos
-    if remaining <= 0:
-      state.earlyPreloaded = false
-    # Phase 0: Early preload (90s before end)
-    if not state.earlyPreloaded and remaining <= 90.0 and remaining > state.crossfadeDuration.float + 2.0:
-      let nextInfo = state.getNextTrackInfo()
-      if nextInfo.path.len > 0:
-        state.player.prepareNext(nextInfo.path)
-        state.earlyPreloaded = true
-        state.crossfadeNextPath = nextInfo.path
-        state.crossfadeNextId = nextInfo.id
-    # Phase 1: Crossfade prepare (when close enough)
-    if state.crossfadeDuration > 0 and not state.crossfadePrepared and remaining <= state.crossfadeDuration.float + 2.0 and remaining > 0:
-      if not state.earlyPreloaded:
-        let nextInfo = state.getNextTrackInfo()
-        if nextInfo.path.len > 0:
-          state.player.prepareNext(nextInfo.path)
-          state.crossfadeNextPath = nextInfo.path
-          state.crossfadeNextId = nextInfo.id
-      state.crossfadePrepared = true
-    # Phase 2: Start crossfade
-    if state.crossfadeDuration > 0 and state.crossfadePrepared and not state.crossfadeStarted and remaining <= state.crossfadeDuration.float and remaining > 0:
-      state.player.startCrossfade(state.crossfadeDuration.float)
-      state.crossfadeStarted = true
 
 proc fullStateSync(state: var AppState, daemonState: JsonNode) =
   if daemonState.hasKey("state"):
@@ -2185,37 +1896,12 @@ proc fullStateSync(state: var AppState, daemonState: JsonNode) =
     state.status = if s == "playing": psPlaying elif s == "paused": psPaused else: psStopped
   if daemonState.hasKey("track_path"):
     state.currentPlayingPath = daemonState["track_path"].getStr("")
-  let oldYtTitle = state.ytStreamTitle
-  let oldYtChannel = state.ytStreamChannel
-  let oldYtDuration = state.ytStreamDuration
-  state.ytStreamTitle = ""
-  state.ytStreamChannel = ""
-  state.ytStreamDuration = ""
   if daemonState.hasKey("track_title"):
-    state.ytStreamTitle = daemonState["track_title"].getStr("")
+    state.currentPlayingTitle = daemonState["track_title"].getStr("")
   if daemonState.hasKey("track_channel"):
-    state.ytStreamChannel = daemonState["track_channel"].getStr("")
-  if daemonState.hasKey("track_album"):
-    if state.ytStreamChannel.len == 0:
-      state.ytStreamChannel = daemonState["track_album"].getStr("")
-  if state.ytStreamTitle.len == 0 and oldYtTitle.len > 0:
-    state.ytStreamTitle = oldYtTitle
-    state.ytStreamChannel = oldYtChannel
-    state.ytStreamDuration = oldYtDuration
+    state.currentPlayingChannel = daemonState["track_channel"].getStr("")
   if daemonState.hasKey("time_pos"):
     state.timePos = max(0.0, daemonState["time_pos"].getFloat(0.0))
-  if state.ytStreamTitle.len > 0:
-    if daemonState.hasKey("duration"):
-      state.ytDurationSec = max(0.0, daemonState["duration"].getFloat(0.0))
-    state.ytPlaybackStartTime = epochTime() - state.timePos
-    state.ytPauseDuration = 0.0
-    state.ytPauseStartTime = 0.0
-    if state.status == psPaused:
-      state.ytPauseStartTime = epochTime()
-  else:
-    state.ytPlaybackStartTime = 0.0
-    state.ytPauseDuration = 0.0
-    state.ytPauseStartTime = 0.0
   if daemonState.hasKey("duration"):
     state.duration = max(0.0, daemonState["duration"].getFloat(0.0))
   if daemonState.hasKey("volume"):
@@ -2226,13 +1912,8 @@ proc fullStateSync(state: var AppState, daemonState: JsonNode) =
     state.repeatMode = daemonState["repeat"].getInt(0)
   if daemonState.hasKey("sleep_timer"):
     state.sleepTimerRemaining = daemonState["sleep_timer"].getInt(0)
-  if daemonState.hasKey("crossfading"):
-    state.crossfading = daemonState["crossfading"].getBool(false)
-  if daemonState.hasKey("master_ended"):
-    state.masterEnded = daemonState["master_ended"].getBool(false)
-  state.crossfadeStarted = false
-  state.crossfadePrepared = false
-  state.earlyPreloaded = false
+  if daemonState.hasKey("crossfadeDuration"):
+    state.crossfadeDuration = daemonState["crossfadeDuration"].getInt(0)
 
 proc runTui(args: seq[string]) =
   terminal.enableTrueColors()
@@ -2253,7 +1934,6 @@ proc runTui(args: seq[string]) =
   if dClient.connected:
     let daemonState = dClient.getDaemonState()
     fullStateSync(ctx.data, daemonState)
-  ctx.data.loadQueue()
   ctx.data.player.setVolume(ctx.data.volume)
   ctx.data.initCommands()
   ctx.data.applyKeybindings()
@@ -2333,7 +2013,6 @@ proc runTui(args: seq[string]) =
                   if t.path.startsWith(dlDir):
                     ctx.data.ytDownloaded[t.path] = t.path
                 ctx.data.downloadCount = ctx.data.ytDownloaded.len
-              ctx.data.loadQueue()
               if ctx.data.currentPlayingPath.len > 0:
                 for i, t in ctx.data.libraryTracks:
                   if t.path == ctx.data.currentPlayingPath:
@@ -2347,164 +2026,91 @@ proc runTui(args: seq[string]) =
           ctx.data.reconnecting = false
           ctx.data.reconnectAttempts = 0
           ctx.data.setFeedback("[Daemon connected]")
-      if ctx.data.overlay.kind == okYtSearch:
+      if ctx.data.overlay.kind == okYtSearch and ctx.data.player of DaemonClient:
+        let cli = DaemonClient(ctx.data.player)
         if ctx.data.ytDebounceAt > 0 and epochTime() >= ctx.data.ytDebounceAt:
           ctx.data.ytDebounceAt = 0
           if ctx.data.overlay.query.len > 0:
-            # If query changed while a search was active, kill the old process
             if ctx.data.ytSearchQuery != ctx.data.overlay.query:
-              if ctx.data.ytSearchProcessActive:
-                try:
-                  ctx.data.ytSearchProcess.terminate()
-                except: discard
-                close(ctx.data.ytSearchProcess)
-                ctx.data.ytSearchProcessActive = false
-                ctx.data.ytSearchOutputBuf = ""
+              if ctx.data.ytSearchActive:
+                discard cli.ytSearchCancel()
               ctx.data.overlay.ytResults = @[]
               ctx.data.overlay.cursor = 0
               ctx.data.ytSearchQuery = ctx.data.overlay.query
               ctx.data.ytSearchPage = 0
-            if not ctx.data.ytSearchProcessActive:
-              ctx.data.ytSearchProcessActive = startYoutubeSearch(ctx.data.overlay.query, ctx.data.ytSearchProcess, ctx.data.ytCookieSource, ctx.data.ytSearchPageSize * max(1, ctx.data.ytSearchPage + 1))
+            if not ctx.data.ytSearchActive:
+              discard cli.ytSearch(ctx.data.overlay.query, ctx.data.ytSearchPageSize * max(1, ctx.data.ytSearchPage + 1))
+              ctx.data.ytSearchActive = true
               ctx.data.ytSearchLoading = true
               ctx.data.markDirty(ceSearchLoading)
-        if ctx.data.ytSearchProcessActive:
-          let results = pollYoutubeSearch(ctx.data.ytSearchProcess, ctx.data.ytSearchOutputBuf)
-          if results.len > 0:
-            if ctx.data.overlay.ytResults.len == 0:
-              ctx.data.overlay.ytResults = results
-              ctx.data.overlay.cursor = 0
-            else:
-              var seen: HashSet[string]
-              for r in ctx.data.overlay.ytResults: seen.incl(r.url)
-              for r in results:
-                if r.url notin seen:
-                  ctx.data.overlay.ytResults.add(r)
-                  seen.incl(r.url)
-            ctx.data.markDirty(ceSearchResults)
-          if not ctx.data.ytSearchProcess.running():
-            let finalResults = finishYoutubeSearch(ctx.data.ytSearchProcess, ctx.data.ytSearchOutputBuf)
-            if finalResults.len > 0:
-              var seen: HashSet[string]
-              for r in ctx.data.overlay.ytResults: seen.incl(r.url)
-              for r in finalResults:
-                if r.url notin seen:
-                  ctx.data.overlay.ytResults.add(r)
-                  seen.incl(r.url)
+        if ctx.data.ytSearchActive:
+          let pollResp = cli.ytSearchPoll()
+          if pollResp.hasKey("results"):
+            var results: seq[YtSearchResult] = @[]
+            for jr in pollResp["results"].items:
+              results.add(YtSearchResult(
+                title: jr{"title"}.getStr(""),
+                url: jr{"url"}.getStr(""),
+                duration: jr{"duration"}.getStr(""),
+                channel: jr{"channel"}.getStr(""),
+                kind: YtSearchResultKind(jr{"kind"}.getInt(0))
+              ))
+            if results.len > 0:
+              if ctx.data.overlay.ytResults.len == 0:
+                ctx.data.overlay.ytResults = results
+                ctx.data.overlay.cursor = 0
+              else:
+                var seen: HashSet[string]
+                for r in ctx.data.overlay.ytResults: seen.incl(r.url)
+                for r in results:
+                  if r.url notin seen:
+                    ctx.data.overlay.ytResults.add(r)
+                    seen.incl(r.url)
               ctx.data.markDirty(ceSearchResults)
-            ctx.data.ytSearchProcessActive = false
-            ctx.data.ytSearchLoading = false
-            ctx.data.ytSearchOutputBuf = ""
-            ctx.data.markDirty(ceSearchResults)
-      if ctx.data.ytStreamActive:
-        if not ctx.data.ytStreamProcess.running():
-          let url = pollStreamUrlFetch(ctx.data.ytStreamProcess, ctx.data.ytStreamBuf)
-          ctx.data.ytStreamActive = false
-          ctx.data.ytStreamBuf = ""
+            if pollResp.hasKey("done") and pollResp["done"].getBool():
+              ctx.data.ytSearchActive = false
+              ctx.data.ytSearchLoading = false
+              ctx.data.markDirty(ceSearchResults)
+      if ctx.data.ytStreamResolving and ctx.data.player of DaemonClient:
+        let cli = DaemonClient(ctx.data.player)
+        let pollResp = cli.ytResolveStreamPoll()
+        if pollResp.hasKey("stream_url"):
+          ctx.data.ytStreamResolving = false
+          let url = pollResp["stream_url"].getStr("")
           if url.len > 0 and ctx.data.ytStreamPendingItem.title.len > 0:
-            ctx.data.ytStreamTitle = ctx.data.ytStreamPendingItem.title
-            ctx.data.ytStreamChannel = ctx.data.ytStreamPendingItem.channel
-            ctx.data.ytStreamDuration = ctx.data.ytStreamPendingItem.duration
-            ctx.data.ytStreamUrl = ctx.data.ytStreamPendingItem.url
-            # Parse duration string (e.g. "3:45") into seconds for progress tracking
-            ctx.data.ytDurationSec = parseDurationToSec(ctx.data.ytStreamPendingItem.duration)
-            if ctx.data.ytDurationSec > 0:
-              ctx.data.duration = ctx.data.ytDurationSec
-            # Start software timer for elapsed time tracking
-            ctx.data.ytPlaybackStartTime = epochTime()
-            ctx.data.ytPauseDuration = 0.0
-            ctx.data.ytPauseStartTime = 0.0
-            if ctx.data.player of DaemonClient:
-              let cli = DaemonClient(ctx.data.player)
-              cli.pendingStreamTitle = ctx.data.ytStreamPendingItem.title
-              cli.pendingStreamChannel = ctx.data.ytStreamPendingItem.channel
             ctx.data.player.loadFile(url)
             ctx.data.player.play()
             ctx.data.status = psPlaying
             ctx.data.currentPlayingPath = url
-            if ctx.data.player of DaemonClient:
-              ctx.data.currentPlayingId = DaemonClient(ctx.data.player).lastTrackId
-            else:
-              ctx.data.currentPlayingId = 0
             ctx.data.markDirtyBatch(cePlayState, ceTrack)
             ctx.data.showNotification("Streaming: " & ctx.data.ytStreamPendingItem.title, nkInfo)
-            # Add stream track to library so it appears in Recent / Last Played
-            block:
-              var existsInLib = false
-              for t in ctx.data.libraryTracks:
-                if t.path == ctx.data.ytStreamPendingItem.url:
-                  existsInLib = true
-                  break
-              if not existsInLib:
-                ctx.data.libraryTracks.add(Track(
-                  path: ctx.data.ytStreamPendingItem.url,
-                  title: ctx.data.ytStreamPendingItem.title,
-                  artist: ctx.data.ytStreamPendingItem.channel,
-                  album: "", duration: ctx.data.ytDurationSec.float,
-                  id: int64(ctx.data.libraryTracks.len + 1),
-                  isFavourite: false
-                ))
-                ctx.data.rebuildItems()
           else:
             ctx.data.setFeedback("Failed to resolve stream URL")
-      if ctx.data.ytDownloadQueue.len > 0 or ctx.data.ytDownloadTasks.len > 0:
-        let downloadTimeout = 600.0
-        var done: seq[int] = @[]
-        for i in 0..<ctx.data.ytDownloadTasks.len:
-          if not ctx.data.ytDownloadTasks[i].completed:
-            let p = ctx.data.ytDownloadTasks[i].process
-            if epochTime() - ctx.data.ytDownloadTasks[i].startedAt > downloadTimeout:
-              try: p.terminate() except: discard
-              close(p)
-              ctx.data.ytDownloadTasks[i].completed = true
-              done.add(i)
-              ctx.data.showNotification("Download timed out: " & ctx.data.ytDownloadTasks[i].title, nkWarning)
-            elif not p.running():
-              var path = ""
-              try:
-                path = pollDownload(ctx.data.ytDownloadTasks[i].process, ctx.data.ytDownloadTasks[i].buf)
-              except:
-                discard
-              ctx.data.ytDownloadTasks[i].completed = true
-              done.add(i)
-              if path.len > 0:
-                let (_, name, _) = splitFile(path)
-                let origUrl = ctx.data.ytDownloadTasks[i].url
-                ctx.data.ytDownloaded[origUrl] = path
-                ctx.data.downloadCount = ctx.data.ytDownloaded.len
-                # Update any existing library track that still points to the YouTube URL
-                for j in 0..<ctx.data.libraryTracks.len:
-                  if ctx.data.libraryTracks[j].path == origUrl:
-                    ctx.data.libraryTracks[j].path = path
-                    ctx.data.libraryTracks[j].title = name
-                    # If this is the currently playing track, update the path
-                    if ctx.data.currentPlayingPath == origUrl:
-                      ctx.data.currentPlayingPath = path
-                    break
-                # Persist the path update to the daemon's SQLite database
-                if ctx.data.player of DaemonClient:
-                  let cli = DaemonClient(ctx.data.player)
-                  discard cli.updateTrackPath(origUrl, path, name)
-                ctx.data.showNotification("Downloaded: " & name, nkSuccess)
-                ctx.data.rebuildItems()
+        elif pollResp.hasKey("done") and pollResp["done"].getBool():
+          ctx.data.ytStreamResolving = false
+          ctx.data.setFeedback("Failed to resolve stream URL")
+      if ctx.data.ytDownloadActive and ctx.data.player of DaemonClient:
+        let cli = DaemonClient(ctx.data.player)
+        let pollResp = cli.ytDownloadPoll()
+        if pollResp.hasKey("done") and pollResp["done"].getBool():
+          ctx.data.ytDownloadActive = false
+          if pollResp.hasKey("path") and pollResp["path"].getStr("").len > 0:
+            let path = pollResp["path"].getStr("")
+            let (_, name, _) = splitFile(path)
+            let origUrl = if pollResp.hasKey("url"): pollResp["url"].getStr("") else: ""
+            ctx.data.ytDownloaded[origUrl] = path
+            ctx.data.downloadCount = ctx.data.ytDownloaded.len
+            for j in 0..<ctx.data.libraryTracks.len:
+              if ctx.data.libraryTracks[j].path == origUrl:
+                ctx.data.libraryTracks[j].path = path
+                ctx.data.libraryTracks[j].title = name
+                if ctx.data.currentPlayingPath == origUrl:
+                  ctx.data.currentPlayingPath = path
+                break
+            ctx.data.rebuildItems()
+            ctx.data.showNotification("Downloaded: " & name, nkSuccess)
           else:
-            done.add(i)
-        for i in countdown(done.len - 1, 0):
-          ctx.data.ytDownloadTasks.delete(done[i])
-        while ctx.data.ytDownloadTasks.len < ctx.data.ytMaxConcurrentDownloads and ctx.data.ytDownloadQueue.len > 0:
-          let item = ctx.data.ytDownloadQueue[0]
-          var task: DownloadTask
-          if startDownload(item, ctx.data.ytDownloadDir, task.process, ctx.data.ytCookieSource, ctx.data.ytJsRuntime):
-            ctx.data.ytDownloadQueue.delete(0)
-            task.title = item.title
-            task.url = item.url
-            task.outputDir = ctx.data.ytDownloadDir
-            task.completed = false
-            task.startedAt = epochTime()
-            ctx.data.ytDownloadTasks.add(task)
-          else:
-            ctx.data.showNotification("Failed to start download: " & item.title, nkError)
-            break
+            ctx.data.showNotification("Download failed", nkError)
       if ctx.data.feedbackTimer > 0:
         ctx.data.feedbackTimer.dec
       if ctx.data.ytSearchLoading and ctx.data.overlay.kind == okYtSearch and ctx.data.overlay.ytResults.len == 0:
@@ -2538,8 +2144,6 @@ proc runTui(args: seq[string]) =
         oldTimePos = ctx.data.timePos
       if ctx.data.vizVisible and ctx.data.viz != nil and frameNo mod 6 == 0:
         ctx.data.markDirty(cePosition)
-      if ceQueue in ctx.data.dirtyFlags:
-        ctx.data.saveQueue()
       let shouldDraw = resized or ctx.data.needsRedraw or ctx.data.dirtyFlags.card > 0
       if shouldDraw:
         ctx.tb = iw.initTerminalBuffer(curW, curH)

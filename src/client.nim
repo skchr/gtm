@@ -8,8 +8,6 @@ type
     connected*: bool
     buf: string
     sleepTimerRemaining*: int
-    pendingStreamTitle*: string
-    pendingStreamChannel*: string
     lastTrackId*: int64
     drainedEvents: seq[AudioEvent]
 
@@ -130,11 +128,7 @@ proc daemonSimpleCmd*(cli: DaemonClient, cmd: string): JsonNode =
 
 method loadFile*(cli: DaemonClient, path: string) =
   cli.ensureDaemon()
-  var cmd = %*{"cmd": "load_file", "path": path}
-  if cli.pendingStreamTitle.len > 0:
-    cmd["title"] = %cli.pendingStreamTitle
-    cmd["channel"] = %cli.pendingStreamChannel
-  let resp = sendDaemonCmd(cli, cmd)
+  let resp = sendDaemonCmd(cli, %*{"cmd": "load_file", "path": path})
   cli.lastTrackId = 0
   if resp.hasKey("track_id"):
     cli.lastTrackId = resp["track_id"].getInt().int64
@@ -362,10 +356,65 @@ proc getFullState*(cli: DaemonClient): JsonNode =
   cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "get_full_state"})
 
+proc ytSearch*(cli: DaemonClient, query: string, pageSize: int = 10): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "yt_search", "query": query, "page_size": pageSize})
+
+proc ytSearchPoll*(cli: DaemonClient): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "yt_search_poll"})
+
+proc ytSearchCancel*(cli: DaemonClient): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "yt_search_cancel"})
+
+proc ytResolveStream*(cli: DaemonClient, url: string): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "yt_resolve_stream", "url": url})
+
+proc ytResolveStreamPoll*(cli: DaemonClient): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "yt_resolve_stream_poll"})
+
+proc ytDownload*(cli: DaemonClient, url, title, channel: string): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "yt_download", "url": url, "title": title, "channel": channel})
+
+proc ytDownloadPoll*(cli: DaemonClient): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "yt_download_poll"})
+
+proc ytCancelDownload*(cli: DaemonClient, url: string): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "yt_cancel_download", "url": url})
+
+proc ytListDownloads*(cli: DaemonClient): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "yt_list_downloads"})
+
+proc ytFetchPlaylist*(cli: DaemonClient, url: string): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "yt_fetch_playlist", "url": url})
+
+proc ytSetConfig*(cli: DaemonClient, cookieSource, jsRuntime, downloadDir: string, maxConcurrent: int): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "yt_set_config", "cookie_source": cookieSource, "js_runtime": jsRuntime, "download_dir": downloadDir, "max_concurrent": maxConcurrent})
+
+proc ytGetSearchHistory*(cli: DaemonClient): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "yt_get_search_history"})
+
+proc ytClearSearchHistory*(cli: DaemonClient): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "yt_clear_search_history"})
+
+proc getEqPresets*(cli: DaemonClient): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "list_eq_presets"})
+
 proc newDaemonClient*(): DaemonClient =
   DaemonClient(
     volume: 80, state: 0, running: false,
     connected: false, buf: "", backendType: abtDaemon,
-    working: true, sleepTimerRemaining: 0,
-    pendingStreamTitle: "", pendingStreamChannel: ""
+    working: true, sleepTimerRemaining: 0
   )

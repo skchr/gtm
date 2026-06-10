@@ -126,6 +126,7 @@ type
     process*: Process
     title*: string
     url*: string
+    channel*: string
     outputDir*: string
     buf*: string
     completed*: bool
@@ -289,6 +290,11 @@ type
     ytPauseDuration*: float
     ytPauseStartTime*: float
     ytDurationSec*: float
+    ytSearchActive*: bool
+    ytStreamResolving*: bool
+    ytDownloadActive*: bool
+    currentPlayingTitle*: string
+    currentPlayingChannel*: string
     cursorVisible*: bool
 
 const

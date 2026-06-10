@@ -1,7 +1,7 @@
-import os, json, strutils, net, posix, random
+import os, json, strutils, net, posix, random, osproc, streams, times, tables
 from nativesockets import setBlocking, selectRead, SocketHandle
 proc prctl(option: cint, arg2: cstring): cint {.importc, header: "<sys/prctl.h>".}
-import audio, state, visualizer, library
+import audio, state, visualizer, library, ytdlp
 
 type
   DaemonCmdKind* = enum
@@ -16,7 +16,13 @@ type
     dckSetEqBand, dckSetEqPreset,
     dckGetLibrary, dckAddTrack, dckUpdateTrackPath,
     dckQueueAdd, dckQueueRemove, dckQueueClear, dckQueueList, dckQueueSetCursor,
-    dckAddFavourite, dckRemoveFavourite, dckGetFavourites, dckGetFullState
+    dckAddFavourite, dckRemoveFavourite, dckGetFavourites, dckGetFullState,
+    dckYtSearch, dckYtSearchPoll, dckYtSearchCancel,
+    dckYtResolveStream, dckYtResolveStreamPoll,
+    dckYtDownload, dckYtDownloadPoll, dckYtCancelDownload,
+    dckYtListDownloads, dckYtFetchPlaylist,
+    dckYtSetConfig, dckYtGetSearchHistory, dckYtClearSearchHistory,
+    dckListEqPresets
 
   DaemonCmd* = object
     kind*: DaemonCmdKind
@@ -51,6 +57,25 @@ type
     crossfadeStarted*: bool
     crossfadeNextPath*: string
     earlyPreloaded*: bool
+    # yt-dlp state
+    ytCookieSource: string
+    ytJsRuntime: string
+    ytDownloadDir: string
+    ytMaxConcurrentDownloads: int
+    ytSearchProcess: Process
+    ytSearchBuf: string
+    ytSearchActive: bool
+    ytSearchQuery: string
+    ytSearchResults: seq[YtSearchResult]
+    ytStreamProcess: Process
+    ytStreamBuf: string
+    ytStreamActive: bool
+    ytStreamResultUrl: string
+    ytStreamPendingTitle: string
+    ytStreamPendingChannel: string
+    ytStreamPendingDuration: string
+    ytDownloadTasks: seq[DownloadTask]
+    ytDownloaded: Table[string, string]
 
 proc writePidFile() =
   let dir = stateDir()
@@ -144,6 +169,38 @@ proc parseDaemonCommand(line: string): DaemonCmd =
       result.kind = dckGetFavourites
     of "get_full_state":
       result.kind = dckGetFullState
+    of "yt_search":
+      result.kind = dckYtSearch; result.strArg = j{"query"}.getStr(""); result.intArg = j{"page_size"}.getInt(10)
+    of "yt_search_poll":
+      result.kind = dckYtSearchPoll
+    of "yt_search_cancel":
+      result.kind = dckYtSearchCancel
+    of "yt_resolve_stream":
+      result.kind = dckYtResolveStream; result.strArg = j{"url"}.getStr("")
+      result.strArg2 = j{"title"}.getStr(""); result.strArg3 = j{"channel"}.getStr("")
+    of "yt_resolve_stream_poll":
+      result.kind = dckYtResolveStreamPoll
+    of "yt_download":
+      result.kind = dckYtDownload; result.strArg = j{"url"}.getStr("")
+      result.strArg2 = j{"title"}.getStr(""); result.strArg3 = j{"channel"}.getStr("")
+    of "yt_download_poll":
+      result.kind = dckYtDownloadPoll
+    of "yt_cancel_download":
+      result.kind = dckYtCancelDownload; result.strArg = j{"url"}.getStr("")
+    of "yt_list_downloads":
+      result.kind = dckYtListDownloads
+    of "yt_fetch_playlist":
+      result.kind = dckYtFetchPlaylist; result.strArg = j{"url"}.getStr("")
+    of "yt_set_config":
+      result.kind = dckYtSetConfig; result.strArg = j{"cookie_source"}.getStr("")
+      result.strArg2 = j{"js_runtime"}.getStr(""); result.strArg3 = j{"download_dir"}.getStr("")
+      result.intArg = j{"max_concurrent"}.getInt(4)
+    of "yt_get_search_history":
+      result.kind = dckYtGetSearchHistory
+    of "yt_clear_search_history":
+      result.kind = dckYtClearSearchHistory
+    of "list_eq_presets":
+      result.kind = dckListEqPresets
     else: result.kind = dckStatus
   except:
     result.kind = dckStatus
@@ -175,6 +232,10 @@ proc savePlaybackState(d: Daemon) =
     d.lib.setPlaybackState("repeat", $(d.repeatMode))
     d.lib.setPlaybackState("sleep_timer", $(d.sleepTimerRemaining))
     d.lib.setPlaybackState("crossfade_duration", $(d.crossfadeDuration))
+    d.lib.setPlaybackState("yt_cookie_source", d.ytCookieSource)
+    d.lib.setPlaybackState("yt_js_runtime", d.ytJsRuntime)
+    d.lib.setPlaybackState("yt_download_dir", d.ytDownloadDir)
+    d.lib.setPlaybackState("yt_max_concurrent", $(d.ytMaxConcurrentDownloads))
     var qArr = newJArray()
     for p in d.playbackQueue:
       qArr.add(%p)
@@ -189,18 +250,40 @@ proc shuffleOrder(count: int): seq[int] =
     let j = rand(i..<count)
     swap(result[i], result[j])
 
-proc advanceToNextTrack(d: Daemon, forward: bool = true): bool =
-  if forward and d.playbackQueue.len > 0:
-    let nextPath = d.playbackQueue[0]
+proc nextTrackFromQueue(d: Daemon): string =
+  if d.shuffleEnabled and d.shuffleOrder.len > 0:
+    if d.shuffleIndex < d.shuffleOrder.len:
+      let idx = d.shuffleOrder[d.shuffleIndex]
+      if idx >= 0 and idx < d.playbackQueue.len:
+        result = d.playbackQueue[idx]
+      d.shuffleIndex.inc
+    if d.shuffleIndex >= d.shuffleOrder.len:
+      if d.repeatMode == 1:
+        d.shuffleOrder = shuffleOrder(d.playbackQueue.len)
+        d.shuffleIndex = 0
+        if d.shuffleOrder.len > 0:
+          result = d.playbackQueue[d.shuffleOrder[0]]
+          d.shuffleIndex = 1
+      else:
+        result = ""
+  elif d.playbackQueue.len > 0:
+    result = d.playbackQueue[0]
     d.playbackQueue.delete(0)
-    d.player.stop()
-    d.player.loadFile(nextPath)
-    d.currentTrackPath = nextPath
-    d.currentTrackTitle = ""
-    d.currentTrackChannel = ""
-    d.player.play()
-    d.idleFrames = 0
-    return true
+    if d.repeatMode == 1 and result.len > 0:
+      d.playbackQueue.add(result)
+
+proc advanceToNextTrack(d: Daemon, forward: bool = true): bool =
+  if forward:
+    let nextPath = d.nextTrackFromQueue()
+    if nextPath.len > 0:
+      d.player.stop()
+      d.player.loadFile(nextPath)
+      d.currentTrackPath = nextPath
+      d.currentTrackTitle = ""
+      d.currentTrackChannel = ""
+      d.player.play()
+      d.idleFrames = 0
+      return true
 
 proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
   result = %*{"ok": true}
@@ -518,6 +601,155 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
       of 2: "paused"
       else: "unknown"
     result["state"] = %st
+  of dckYtSearch:
+    if d.ytSearchActive:
+      try: d.ytSearchProcess.terminate() except: discard
+      close(d.ytSearchProcess)
+    d.ytSearchBuf = ""
+    d.ytSearchResults = @[]
+    d.ytSearchQuery = cmd.strArg
+    d.ytSearchActive = startYoutubeSearch(cmd.strArg, d.ytSearchProcess, d.ytCookieSource, cmd.intArg)
+    if d.ytSearchActive and d.lib != nil:
+      d.lib.addSearchQuery(cmd.strArg)
+    result["active"] = %d.ytSearchActive
+  of dckYtSearchPoll:
+    if d.ytSearchActive:
+      let newResults = pollYoutubeSearch(d.ytSearchProcess, d.ytSearchBuf)
+      for r in newResults:
+        d.ytSearchResults.add(r)
+      if not d.ytSearchProcess.running():
+        let finalResults = finishYoutubeSearch(d.ytSearchProcess, d.ytSearchBuf)
+        for r in finalResults:
+          d.ytSearchResults.add(r)
+        d.ytSearchActive = false
+        d.ytSearchBuf = ""
+      var arr = newJArray()
+      for r in d.ytSearchResults:
+        arr.add(%*{"title": %r.title, "url": %r.url, "duration": %r.duration, "channel": %r.channel, "kind": %r.kind.int})
+      result["results"] = arr
+      result["done"] = %(not d.ytSearchActive)
+    else:
+      result["done"] = %true
+      result["results"] = newJArray()
+  of dckYtSearchCancel:
+    if d.ytSearchActive:
+      try: d.ytSearchProcess.terminate() except: discard
+      close(d.ytSearchProcess)
+    d.ytSearchActive = false
+    d.ytSearchBuf = ""
+    d.ytSearchResults = @[]
+  of dckYtResolveStream:
+    d.ytStreamBuf = ""
+    d.ytStreamResultUrl = ""
+    d.ytStreamPendingTitle = cmd.strArg2
+    d.ytStreamPendingChannel = cmd.strArg3
+    d.ytStreamActive = startStreamUrlFetch(cmd.strArg, d.ytStreamProcess, d.ytCookieSource, d.ytJsRuntime)
+    result["active"] = %d.ytStreamActive
+  of dckYtResolveStreamPoll:
+    if d.ytStreamActive:
+      if not d.ytStreamProcess.running():
+        d.ytStreamResultUrl = pollStreamUrlFetch(d.ytStreamProcess, d.ytStreamBuf)
+        d.ytStreamActive = false
+        d.ytStreamBuf = ""
+      result["url"] = %d.ytStreamResultUrl
+      result["title"] = %d.ytStreamPendingTitle
+      result["channel"] = %d.ytStreamPendingChannel
+      result["done"] = %(not d.ytStreamActive)
+    else:
+      result["done"] = %true
+      result["url"] = %""
+  of dckYtDownload:
+    if cmd.strArg.len > 0:
+      var task: DownloadTask
+      if startDownload(YtSearchResult(url: cmd.strArg, title: cmd.strArg2, channel: cmd.strArg3), d.ytDownloadDir, task.process, d.ytCookieSource, d.ytJsRuntime):
+        task.title = cmd.strArg2
+        task.url = cmd.strArg
+        task.channel = cmd.strArg3
+        task.outputDir = d.ytDownloadDir
+        task.completed = false
+        task.startedAt = epochTime()
+        d.ytDownloadTasks.add(task)
+        result["started"] = %true
+      else:
+        result["started"] = %false
+    else:
+      result["started"] = %false
+  of dckYtDownloadPoll:
+    let timeout = 600.0
+    var done: seq[int] = @[]
+    for i in 0..<d.ytDownloadTasks.len:
+      if not d.ytDownloadTasks[i].completed:
+        let p = d.ytDownloadTasks[i].process
+        if epochTime() - d.ytDownloadTasks[i].startedAt > timeout:
+          try: p.terminate() except: discard
+          close(p)
+          d.ytDownloadTasks[i].completed = true
+          done.add(i)
+        elif not p.running():
+          var path = ""
+          try: path = pollDownload(d.ytDownloadTasks[i].process, d.ytDownloadTasks[i].buf)
+          except: discard
+          d.ytDownloadTasks[i].completed = true
+          done.add(i)
+          if path.len > 0:
+            d.ytDownloaded[d.ytDownloadTasks[i].url] = path
+            if d.lib != nil:
+              d.lib.addDownload(d.ytDownloadTasks[i].url, path, d.ytDownloadTasks[i].title, d.ytDownloadTasks[i].channel)
+              d.lib.updateTrackPath(d.ytDownloadTasks[i].url, path, d.ytDownloadTasks[i].title)
+      else:
+        done.add(i)
+    for i in countdown(done.len - 1, 0):
+      d.ytDownloadTasks.delete(done[i])
+    var activeArr = newJArray()
+    for t in d.ytDownloadTasks:
+      activeArr.add(%*{"url": %t.url, "title": %t.title, "started": %t.startedAt})
+    result["active"] = activeArr
+    var completedArr = newJArray()
+    for url, path in d.ytDownloaded:
+      completedArr.add(%*{"url": %url, "path": %path})
+    result["completed"] = completedArr
+  of dckYtCancelDownload:
+    for i in 0..<d.ytDownloadTasks.len:
+      if d.ytDownloadTasks[i].url == cmd.strArg:
+        try: d.ytDownloadTasks[i].process.terminate() except: discard
+        close(d.ytDownloadTasks[i].process)
+        d.ytDownloadTasks.delete(i)
+        break
+  of dckYtListDownloads:
+    var arr = newJArray()
+    if d.lib != nil:
+      for dl in d.lib.getDownloads():
+        arr.add(%*{"url": %dl.url, "path": %dl.path, "title": %dl.title})
+    result["downloads"] = arr
+  of dckYtFetchPlaylist:
+    var pl = fetchPlaylistTracks(cmd.strArg, d.ytCookieSource, d.ytJsRuntime)
+    var tracksArr = newJArray()
+    for t in pl.tracks:
+      tracksArr.add(%*{"title": %t.title, "url": %t.url, "duration": %t.duration, "channel": %t.channel, "kind": %t.kind.int})
+    result["title"] = %pl.title
+    result["channel"] = %pl.channel
+    result["tracks"] = tracksArr
+    result["track_count"] = %pl.trackCount
+  of dckYtSetConfig:
+    d.ytCookieSource = cmd.strArg
+    d.ytJsRuntime = cmd.strArg2
+    if cmd.strArg3.len > 0: d.ytDownloadDir = cmd.strArg3
+    if cmd.intArg > 0: d.ytMaxConcurrentDownloads = cmd.intArg
+    result["cookie_source"] = %d.ytCookieSource
+    result["js_runtime"] = %d.ytJsRuntime
+    result["download_dir"] = %d.ytDownloadDir
+    result["max_concurrent"] = %d.ytMaxConcurrentDownloads
+  of dckYtGetSearchHistory:
+    var arr = newJArray()
+    if d.lib != nil:
+      for q in d.lib.getSearchHistory():
+        arr.add(%q)
+    result["history"] = arr
+  of dckYtClearSearchHistory:
+    if d.lib != nil:
+      d.lib.clearSearchHistory()
+  of dckListEqPresets:
+    result["presets"] = %["Flat", "Rock", "Pop", "Classical", "Jazz", "HipHop", "Vocal", "BassBoost", "Headphones", "Laptop"]
 
 
 proc trySend(client: Socket, data: string): bool =
@@ -556,6 +788,7 @@ proc runDaemon*() =
   if player == nil or not player.working:
     stderr.writeLine("[gtm] FFmpeg unavailable, trying process backend (mpv/ffplay)")
     player = newProcessBackend()
+  let defaultDownloadDir = dataDir() & "/downloads"
   var daemon = Daemon(
     player: player,
     viz: newVisualizer(),
@@ -573,7 +806,15 @@ proc runDaemon*() =
     crossfadePrepared: false,
     crossfadeStarted: false,
     crossfadeNextPath: "",
-    earlyPreloaded: false
+    earlyPreloaded: false,
+    ytCookieSource: "",
+    ytJsRuntime: "",
+    ytDownloadDir: defaultDownloadDir,
+    ytMaxConcurrentDownloads: 4,
+    ytSearchActive: false,
+    ytStreamActive: false,
+    ytStreamResultUrl: "",
+    ytDownloaded: initTable[string, string]()
   )
   daemon.viz.startCapture()
   let libPath = dataDir() & "/gtm.db"
@@ -605,6 +846,18 @@ proc runDaemon*() =
     let cfStr = daemon.lib.getPlaybackState("crossfade_duration")
     if cfStr.len > 0:
       try: daemon.crossfadeDuration = parseInt(cfStr) except: discard
+    let ytCookie = daemon.lib.getPlaybackState("yt_cookie_source")
+    if ytCookie.len > 0: daemon.ytCookieSource = ytCookie
+    let ytJs = daemon.lib.getPlaybackState("yt_js_runtime")
+    if ytJs.len > 0: daemon.ytJsRuntime = ytJs
+    let ytDlDir = daemon.lib.getPlaybackState("yt_download_dir")
+    if ytDlDir.len > 0: daemon.ytDownloadDir = ytDlDir
+    let ytMax = daemon.lib.getPlaybackState("yt_max_concurrent")
+    if ytMax.len > 0:
+      try: daemon.ytMaxConcurrentDownloads = parseInt(ytMax) except: discard
+    # Restore completed downloads from database
+    for dl in daemon.lib.getDownloads():
+      daemon.ytDownloaded[dl.url] = dl.path
     let queueStr = daemon.lib.getPlaybackState("queue_json")
     if queueStr.len > 0:
       try:
@@ -684,24 +937,69 @@ proc runDaemon*() =
         elif daemon.playbackQueue.len > 0:
           discard daemon.advanceToNextTrack(true)
 
-    # Crossfade scheduling
-    if daemon.player.state == 1 and daemon.crossfadeDuration > 0 and daemon.playbackQueue.len > 0:
-      let dur = daemon.player.duration
-      let tpos = daemon.player.timePos
-      if dur > 0.0 and tpos >= 0.0:
-        let timeRemaining = dur - tpos
-        if timeRemaining > 0.0:
-          let prepareThreshold = float(daemon.crossfadeDuration) + 2.0
-          if not daemon.crossfadePrepared and timeRemaining <= prepareThreshold:
-            let nextPath = daemon.playbackQueue[0]
-            daemon.player.prepareNext(nextPath)
-            daemon.crossfadePrepared = true
-            daemon.crossfadeNextPath = nextPath
-          if daemon.crossfadePrepared and not daemon.crossfadeStarted and timeRemaining <= float(daemon.crossfadeDuration):
-            if daemon.playbackQueue.len > 0 and daemon.playbackQueue[0] == daemon.crossfadeNextPath:
-              daemon.playbackQueue.delete(0)
-            daemon.player.startCrossfade(float(daemon.crossfadeDuration))
-            daemon.crossfadeStarted = true
+    # Crossfade scheduling (uses nextTrackFromQueue to get next path without consuming it)
+    if daemon.player.state == 1 and daemon.crossfadeDuration > 0:
+      let hasQueue = daemon.shuffleEnabled and daemon.shuffleOrder.len > 0 and daemon.shuffleIndex < daemon.shuffleOrder.len
+      let hasQueue2 = not daemon.shuffleEnabled and daemon.playbackQueue.len > 0
+      if hasQueue or hasQueue2:
+        let dur = daemon.player.duration
+        let tpos = daemon.player.timePos
+        if dur > 0.0 and tpos >= 0.0:
+          let timeRemaining = dur - tpos
+          if timeRemaining > 0.0:
+            let prepareThreshold = float(daemon.crossfadeDuration) + 2.0
+            if not daemon.crossfadePrepared and timeRemaining <= prepareThreshold:
+              var nextPath = ""
+              if daemon.shuffleEnabled and daemon.shuffleOrder.len > 0 and daemon.shuffleIndex < daemon.shuffleOrder.len:
+                nextPath = daemon.playbackQueue[daemon.shuffleOrder[daemon.shuffleIndex]]
+              elif daemon.playbackQueue.len > 0:
+                nextPath = daemon.playbackQueue[0]
+              if nextPath.len > 0:
+                daemon.player.prepareNext(nextPath)
+                daemon.crossfadePrepared = true
+                daemon.crossfadeNextPath = nextPath
+            if daemon.crossfadePrepared and not daemon.crossfadeStarted and timeRemaining <= float(daemon.crossfadeDuration):
+              # Consume the next track from queue
+              if daemon.shuffleEnabled:
+                daemon.shuffleIndex.inc
+              elif daemon.playbackQueue.len > 0 and daemon.playbackQueue[0] == daemon.crossfadeNextPath:
+                daemon.playbackQueue.delete(0)
+                if daemon.repeatMode == 1:
+                  daemon.playbackQueue.add(daemon.crossfadeNextPath)
+              daemon.player.startCrossfade(float(daemon.crossfadeDuration))
+              daemon.crossfadeStarted = true
+
+    # yt-dlp download task management
+    let dlTimeout = 600.0
+    var dlDone: seq[int] = @[]
+    for i in 0..<daemon.ytDownloadTasks.len:
+      if not daemon.ytDownloadTasks[i].completed:
+        let p = daemon.ytDownloadTasks[i].process
+        if epochTime() - daemon.ytDownloadTasks[i].startedAt > dlTimeout:
+          try: p.terminate() except: discard
+          close(p)
+          daemon.ytDownloadTasks[i].completed = true
+          dlDone.add(i)
+        elif not p.running():
+          var path = ""
+          try: path = pollDownload(daemon.ytDownloadTasks[i].process, daemon.ytDownloadTasks[i].buf)
+          except: discard
+          daemon.ytDownloadTasks[i].completed = true
+          dlDone.add(i)
+          if path.len > 0:
+            let dlUrl = daemon.ytDownloadTasks[i].url
+            daemon.ytDownloaded[dlUrl] = path
+            if daemon.lib != nil:
+              daemon.lib.addDownload(dlUrl, path, daemon.ytDownloadTasks[i].title, daemon.ytDownloadTasks[i].channel)
+              daemon.lib.updateTrackPath(dlUrl, path, daemon.ytDownloadTasks[i].title)
+            if daemon.client != nil:
+              let ev = %*{"events": [%*{"kind": %10, "event": "yt_download_done", "url": %dlUrl, "path": %path, "title": %daemon.ytDownloadTasks[i].title}]}
+              if not trySend(daemon.client, $ev & "\n"):
+                daemon.client = nil
+      else:
+        dlDone.add(i)
+    for i in countdown(dlDone.len - 1, 0):
+      daemon.ytDownloadTasks.delete(dlDone[i])
 
     daemon.viz.readPcm()
     var pcmBuf: seq[float32] = @[]

@@ -151,6 +151,23 @@ when defined(useSqlite):
         value TEXT
       )
     """)
+    discard execRaw(lib.db, """
+      CREATE TABLE IF NOT EXISTS downloads (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_url TEXT UNIQUE NOT NULL,
+        local_path TEXT NOT NULL,
+        title TEXT DEFAULT '',
+        channel TEXT DEFAULT '',
+        downloaded_at TEXT DEFAULT (datetime('now'))
+      )
+    """)
+    discard execRaw(lib.db, """
+      CREATE TABLE IF NOT EXISTS search_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        query TEXT NOT NULL,
+        searched_at TEXT DEFAULT (datetime('now'))
+      )
+    """)
 
   proc addFavourite*(lib: LibraryDb, trackId: int64) =
     let stmt = prepare(lib.db, "INSERT OR IGNORE INTO favourites (track_id) VALUES (?)")
@@ -407,6 +424,48 @@ when defined(useSqlite):
       discard sqlite3_step(stmt)
       finalize(stmt)
 
+  proc addDownload*(lib: LibraryDb, sourceUrl, localPath, title, channel: string) =
+    let stmt = prepare(lib.db, "INSERT OR IGNORE INTO downloads (source_url, local_path, title, channel) VALUES (?, ?, ?, ?)")
+    if stmt == nil: return
+    bindText(stmt, 1.cint, sourceUrl)
+    bindText(stmt, 2.cint, localPath)
+    bindText(stmt, 3.cint, title)
+    bindText(stmt, 4.cint, channel)
+    discard sqlite3_step(stmt)
+    finalize(stmt)
+
+  proc getDownloadByUrl*(lib: LibraryDb, sourceUrl: string): string =
+    let stmt = prepare(lib.db, "SELECT local_path FROM downloads WHERE source_url = ?")
+    if stmt == nil: return ""
+    bindText(stmt, 1.cint, sourceUrl)
+    if sqlite3_step(stmt) == SQLITE_ROW:
+      result = colText(stmt, 0.cint)
+    finalize(stmt)
+
+  proc getDownloads*(lib: LibraryDb): seq[tuple[url, path, title: string]] =
+    let stmt = prepare(lib.db, "SELECT source_url, local_path, title FROM downloads ORDER BY downloaded_at DESC")
+    if stmt == nil: return
+    while sqlite3_step(stmt) == SQLITE_ROW:
+      result.add((colText(stmt, 0.cint), colText(stmt, 1.cint), colText(stmt, 2.cint)))
+    finalize(stmt)
+
+  proc addSearchQuery*(lib: LibraryDb, query: string) =
+    let stmt = prepare(lib.db, "INSERT INTO search_history (query) VALUES (?)")
+    if stmt == nil: return
+    bindText(stmt, 1.cint, query)
+    discard sqlite3_step(stmt)
+    finalize(stmt)
+
+  proc getSearchHistory*(lib: LibraryDb): seq[string] =
+    let stmt = prepare(lib.db, "SELECT DISTINCT query FROM search_history ORDER BY searched_at DESC LIMIT 50")
+    if stmt == nil: return
+    while sqlite3_step(stmt) == SQLITE_ROW:
+      result.add(colText(stmt, 0.cint))
+    finalize(stmt)
+
+  proc clearSearchHistory*(lib: LibraryDb) =
+    discard execRaw(lib.db, "DELETE FROM search_history")
+
   proc closeDb*(lib: LibraryDb) =
     if lib != nil and lib.db != nil:
       discard sqlite3_close(lib.db)
@@ -440,6 +499,12 @@ else:
   proc removeFavourite*(lib: LibraryDb, trackId: int64) = discard
   proc getFavourites*(lib: LibraryDb): seq[int64] = @[]
   proc isFavourite*(lib: LibraryDb, trackId: int64): bool = false
+  proc addDownload*(lib: LibraryDb, sourceUrl, localPath, title, channel: string) = discard
+  proc getDownloadByUrl*(lib: LibraryDb, sourceUrl: string): string = ""
+  proc getDownloads*(lib: LibraryDb): seq[tuple[url, path, title: string]] = @[]
+  proc addSearchQuery*(lib: LibraryDb, query: string) = discard
+  proc getSearchHistory*(lib: LibraryDb): seq[string] = @[]
+  proc clearSearchHistory*(lib: LibraryDb) = discard
 
 proc displayName*(track: Track): string =
   if track.title.len > 0: track.title
