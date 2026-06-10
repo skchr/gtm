@@ -75,7 +75,7 @@ proc startYoutubeSearch*(query: string; p: var Process; cookieSource: string = "
   let yt = findYtdlp()
   if yt.len == 0: return false
   let searchQuery = "ytsearch" & $pageSize & ":" & query
-  let cmd = yt & " " & quoteShell(searchQuery) & " --dump-json --no-playlist --flat-playlist --no-warnings" & cookieFlags(cookieSource) & " 2>/dev/null"
+  let cmd = yt & " " & quoteShell(searchQuery) & " --dump-json --no-playlist --no-flat-playlist --no-warnings" & cookieFlags(cookieSource) & " 2>/dev/null"
   try:
     p = startProcess(cmd, options = {poUsePath, poEvalCommand})
     return true
@@ -178,7 +178,7 @@ proc startDownload*(item: YtSearchResult; outputDir: string; p: var Process; coo
   let yt = findYtdlp()
   if yt.len == 0: return false
   if not dirExists(outputDir): createDir(outputDir)
-  let cmd = yt & " -f bestaudio --extract-audio --audio-format opus --no-playlist --print after_move:filename --no-check-formats --no-warnings" & cookieFlags(cookieSource) & jsRuntimeFlags(jsRuntime) & " -o " &
+  let cmd = yt & " -f bestaudio --extract-audio --audio-format opus --no-playlist --print after_move:filepath --no-check-formats --no-warnings --user-agent \"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36\" --add-headers \"Referer:https://www.youtube.com/\"" & cookieFlags(cookieSource) & jsRuntimeFlags(jsRuntime) & " -o " &
     quoteShell(outputDir / "%(title)s.%(ext)s") & " " & quoteShell(item.url) & " 2>&1"
   try:
     p = startProcess(cmd, options = {poUsePath, poEvalCommand})

@@ -298,7 +298,7 @@ type
     cursorVisible*: bool
 
 const
-  GTM_VERSION* {.strdefine.} = "0.2.0"
+  GTM_VERSION* {.strdefine.} = "0.2.2"
   GTM_BUILD_TIME* {.strdefine.} = ""
 
 

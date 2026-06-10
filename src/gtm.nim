@@ -974,9 +974,14 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
               state.ytStreamPendingItem = r
               if state.player of DaemonClient:
                 let cli = DaemonClient(state.player)
-                discard cli.ytResolveStream(r.url)
-                state.ytStreamResolving = true
-                state.setFeedback("Resolving stream URL...")
+                if state.ytBatchDownloadMode:
+                  discard cli.ytDownload(r.url, r.title, r.channel)
+                  state.ytDownloadActive = true
+                  state.setFeedback("Downloading: " & r.title)
+                else:
+                  discard cli.ytResolveStream(r.url)
+                  state.ytStreamResolving = true
+                  state.setFeedback("Resolving stream URL...")
       of iw.Key.CtrlD:
         proc addToBothQueues(state: var AppState, items: seq[YtSearchResult]) =
           for item in items:
@@ -2074,9 +2079,9 @@ proc runTui(args: seq[string]) =
       if ctx.data.ytStreamResolving and ctx.data.player of DaemonClient:
         let cli = DaemonClient(ctx.data.player)
         let pollResp = cli.ytResolveStreamPoll()
-        if pollResp.hasKey("stream_url"):
+        if pollResp.hasKey("url"):
           ctx.data.ytStreamResolving = false
-          let url = pollResp["stream_url"].getStr("")
+          let url = pollResp["url"].getStr("")
           if url.len > 0 and ctx.data.ytStreamPendingItem.title.len > 0:
             ctx.data.player.loadFile(url)
             ctx.data.player.play()

@@ -80,6 +80,8 @@ type
     ytStreamPendingDuration: string
     ytDownloadTasks: seq[DownloadTask]
     ytDownloaded: Table[string, string]
+    ytLastCompletedPath: string
+    ytLastCompletedUrl: string
 
 proc writePidFile() =
   let dir = stateDir()
@@ -700,6 +702,8 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
           done.add(i)
           if path.len > 0:
             d.ytDownloaded[d.ytDownloadTasks[i].url] = path
+            d.ytLastCompletedPath = path
+            d.ytLastCompletedUrl = d.ytDownloadTasks[i].url
             if d.lib != nil:
               d.lib.addDownload(d.ytDownloadTasks[i].url, path, d.ytDownloadTasks[i].title, d.ytDownloadTasks[i].channel)
               d.lib.updateTrackPath(d.ytDownloadTasks[i].url, path, d.ytDownloadTasks[i].title)
@@ -708,6 +712,11 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     for i in countdown(done.len - 1, 0):
       d.ytDownloadTasks.delete(done[i])
     result["done"] = %(d.ytDownloadTasks.len == 0)
+    if d.ytLastCompletedPath.len > 0:
+      result["path"] = %d.ytLastCompletedPath
+      result["url"] = %d.ytLastCompletedUrl
+      d.ytLastCompletedPath = ""
+      d.ytLastCompletedUrl = ""
     var activeArr = newJArray()
     for t in d.ytDownloadTasks:
       activeArr.add(%*{"url": %t.url, "title": %t.title, "started": %t.startedAt})
@@ -839,7 +848,9 @@ proc runDaemon*() =
     ytSearchActive: false,
     ytStreamActive: false,
     ytStreamResultUrl: "",
-    ytDownloaded: initTable[string, string]()
+    ytDownloaded: initTable[string, string](),
+    ytLastCompletedPath: "",
+    ytLastCompletedUrl: ""
   )
   daemon.viz.startCapture()
   let libPath = dataDir() & "/gtm.db"
@@ -1015,6 +1026,8 @@ proc runDaemon*() =
           if path.len > 0:
             let dlUrl = daemon.ytDownloadTasks[i].url
             daemon.ytDownloaded[dlUrl] = path
+            daemon.ytLastCompletedPath = path
+            daemon.ytLastCompletedUrl = dlUrl
             if daemon.lib != nil:
               daemon.lib.addDownload(dlUrl, path, daemon.ytDownloadTasks[i].title, daemon.ytDownloadTasks[i].channel)
               daemon.lib.updateTrackPath(dlUrl, path, daemon.ytDownloadTasks[i].title)
