@@ -210,7 +210,7 @@ proc playSelected(state: var AppState) =
   if track.path.len > 0:
     state.timePos = 0.0
     state.duration = 0.0
-    state.player.loadFile(track.path)
+    state.player.loadFile(track.path, track.title, track.artist)
     state.player.play()
     state.status = psPlaying
     state.currentPlayingPath = track.path
@@ -2144,7 +2144,7 @@ proc runTui(args: seq[string]) =
           ctx.data.ytStreamResolving = false
           let url = pollResp["url"].getStr("")
           if url.len > 0 and ctx.data.ytStreamPendingItem.title.len > 0:
-            ctx.data.player.loadFile(url)
+            ctx.data.player.loadFile(url, ctx.data.ytStreamPendingItem.title, ctx.data.ytStreamPendingItem.channel)
             ctx.data.player.play()
             ctx.data.status = psPlaying
             ctx.data.currentPlayingPath = url

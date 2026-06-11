@@ -92,9 +92,22 @@ static void alsa_close_device(FfmpegAudioCtx* ctx) {
   ctx->alsa_open = 0;
 }
 
+static int probe_alsa_default(void) {
+  snd_pcm_t* handle = NULL;
+  int ret = snd_pcm_open(&handle, "default", SND_PCM_STREAM_PLAYBACK, 0);
+  if (ret < 0) return 0;
+  snd_pcm_close(handle);
+  return 1;
+}
+
 FfmpegAudioCtx* ffmpeg_audio_init(void) {
   FfmpegAudioCtx* ctx = calloc(1, sizeof(FfmpegAudioCtx));
   if (!ctx) return NULL;
+  if (!probe_alsa_default()) {
+    fprintf(stderr, "[ffmpeg] ALSA default device not available\n");
+    free(ctx);
+    return NULL;
+  }
   av_log_set_level(AV_LOG_QUIET);
   ctx->volume = 1.0f;
   ctx->audio_stream_idx = -1;
@@ -197,7 +210,7 @@ int ffmpeg_audio_load(FfmpegAudioCtx* ctx, const char* path) {
 
   av_opt_set_chlayout(ctx->swr_ctx, "in_chlayout", &par->ch_layout, 0);
   av_opt_set_int(ctx->swr_ctx, "in_sample_rate", par->sample_rate, 0);
-  av_opt_set_sample_fmt(ctx->swr_ctx, "in_sample_fmt", par->format, 0);
+  av_opt_set_sample_fmt(ctx->swr_ctx, "in_sample_fmt", ctx->codec_ctx->sample_fmt, 0);
   av_opt_set_chlayout(ctx->swr_ctx, "out_chlayout", &out_ch_layout, 0);
   av_opt_set_int(ctx->swr_ctx, "out_sample_rate", par->sample_rate, 0);
   av_opt_set_sample_fmt(ctx->swr_ctx, "out_sample_fmt", AV_SAMPLE_FMT_FLT, 0);
@@ -721,6 +734,11 @@ static void* mixer_thread(void* arg) {
 MixerCtx* ffmpeg_mixer_init(void) {
   MixerCtx* mx = calloc(1, sizeof(MixerCtx));
   if (!mx) return NULL;
+  if (!probe_alsa_default()) {
+    fprintf(stderr, "[ffmpeg] mixer: ALSA default device not available\n");
+    free(mx);
+    return NULL;
+  }
   av_log_set_level(AV_LOG_QUIET);
   mx->volume = 1.0f;
   mx->priming = 0;

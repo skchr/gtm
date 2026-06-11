@@ -57,7 +57,6 @@ type
     crossfadePrepared*: bool
     crossfadeStarted*: bool
     crossfadeNextPath*: string
-    earlyPreloaded*: bool
     # Background scan state
     scanningDir: string
     scanningFiles: seq[string]
@@ -311,6 +310,10 @@ proc advanceToNextTrack(d: Daemon, forward: bool = true): bool =
       d.currentTrackChannel = ""
       d.player.play()
       d.idleFrames = 0
+      if d.lib != nil:
+        let trackId = d.lib.findTrackByPath(nextPath)
+        if trackId > 0:
+          d.lib.updatePlayCount(trackId)
       return true
 
 proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
@@ -654,7 +657,6 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     result["crossfadePrepared"] = %d.crossfadePrepared
     result["crossfadeStarted"] = %d.crossfadeStarted
     result["crossfadeNextPath"] = %d.crossfadeNextPath
-    result["earlyPreloaded"] = %d.earlyPreloaded
     let st = case d.player.state
       of 0: "stopped"
       of 1: "playing"
@@ -870,10 +872,11 @@ proc runDaemon*() =
   var crashFile: File
   if crashFile.open(crashPath, fmAppend):
     let crashFd = crashFile.getFileHandle
-    if not debugMode:
+    if debugMode:
       stderr.writeLine("[gtmd] GTM Daemon v" & GTM_VERSION & " starting — pid: " & $getpid() & ", socket: " & sockPath())
+    else:
       discard dup2(cint(crashFd), cint(1))
-    discard dup2(cint(crashFd), cint(2))
+      discard dup2(cint(crashFd), cint(2))
   discard prctl(15.cint, "gtmd")
   writePidFile()
   setupSignalHandlers()
@@ -881,12 +884,15 @@ proc runDaemon*() =
   when defined(useFFmpeg):
     player = newMixerBackend()
     if not player.working:
+      echo "[gtm] Mixer backend unavailable (ALSA?), trying FFmpeg fallback"
       player = newFfmpegBackend()
+    if not player.working:
+      echo "[gtm] FFmpeg backend unavailable, trying process backend (mpv/ffplay)"
+      player = newProcessBackend()
   else:
     player = nil
   if player == nil or not player.working:
-    stderr.writeLine("[gtm] FFmpeg unavailable, trying process backend (mpv/ffplay)")
-    player = newProcessBackend()
+    stderr.writeLine("[gtm] All audio backends unavailable")
   let defaultDownloadDir = dataDir() & "/audio"
   var daemon = Daemon(
     player: player,
@@ -906,7 +912,6 @@ proc runDaemon*() =
     crossfadePrepared: false,
     crossfadeStarted: false,
     crossfadeNextPath: "",
-    earlyPreloaded: false,
     scanningDir: "",
     scanningFiles: @[],
     scanningIdx: 0,
@@ -1050,6 +1055,10 @@ proc runDaemon*() =
       if ev.kind == aekTrackEnded:
         if daemon.crossfadeNextPath.len > 0:
           daemon.currentTrackPath = daemon.crossfadeNextPath
+          if daemon.lib != nil:
+            let cfId = daemon.lib.findTrackByPath(daemon.crossfadeNextPath)
+            if cfId > 0:
+              daemon.lib.updatePlayCount(cfId)
           daemon.crossfadePrepared = false
           daemon.crossfadeStarted = false
           daemon.crossfadeNextPath = ""

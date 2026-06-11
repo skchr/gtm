@@ -33,7 +33,7 @@ type
     backendType*: AudioBackendType
     working*: bool
 
-method loadFile*(b: AudioBackend, path: string) {.base.} = discard
+method loadFile*(b: AudioBackend, path: string, title: string = "", channel: string = "") {.base.} = discard
 method play*(b: AudioBackend) {.base.} = discard
 method pause*(b: AudioBackend) {.base.} = discard
 method stop*(b: AudioBackend) {.base.} = discard
@@ -57,7 +57,7 @@ type
     lastPath: string
     paused: bool
 
-method loadFile*(b: ProcessBackend, path: string) =
+method loadFile*(b: ProcessBackend, path: string, title: string = "", channel: string = "") =
   b.stop()
   b.timePos = 0.0
   b.duration = 0.0
@@ -176,7 +176,7 @@ when defined(useFFmpeg):
     else:
       output.setLen(0)
 
-  method loadFile*(b: FfmpegBackend, path: string) =
+  method loadFile*(b: FfmpegBackend, path: string, title: string = "", channel: string = "") =
     b.stop()
     b.timePos = 0.0
     b.duration = 0.0
@@ -288,7 +288,7 @@ when defined(useFFmpeg):
     else:
       output.setLen(0)
 
-  method loadFile*(b: MixerBackend, path: string) =
+  method loadFile*(b: MixerBackend, path: string, title: string = "", channel: string = "") =
     b.stop()
     b.timePos = 0.0
     b.duration = 0.0

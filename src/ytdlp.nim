@@ -8,6 +8,29 @@ proc findYtdlp*(): string =
   if result.len == 0:
     result = findExe("youtube-dl")
 
+proc parseYtPrintLines(lines: seq[string], start: int): (YtSearchResult, int) =
+  ## Parse 4 --print output lines (title, url, duration, channel) starting at `start`.
+  ## Returns (result, next_index) or (default, -1) if fewer than 4 lines remain.
+  if start + 3 >= lines.len:
+    return (YtSearchResult(), -1)
+  let title = lines[start]
+  let url = lines[start+1]
+  if title.len == 0 or url.len == 0:
+    return (YtSearchResult(), start + 4)
+  let durRaw = lines[start+2]
+  let channel = lines[start+3]
+  var dur = ""
+  if durRaw.len > 0:
+    try:
+      let d = parseFloat(durRaw)
+      let m = int(d) div 60
+      let s = int(d) mod 60
+      dur = $m & ":" & ($s).align(2, '0')
+    except: discard
+  let isPlaylist = url.contains("playlist?list=")
+  result = (YtSearchResult(title: title, url: url, duration: dur, channel: channel,
+    kind: if isPlaylist: srkPlaylist else: srkVideo), start + 4)
+
 proc parseYtJsonLine*(line: string): YtSearchResult =
   try:
     let j = parseJson(line)
@@ -75,17 +98,34 @@ proc startYoutubeSearch*(query: string; p: var Process; cookieSource: string = "
   let yt = findYtdlp()
   if yt.len == 0: return false
   let searchQuery = "ytsearch" & $pageSize & ":" & query
-  let cmd = yt & " " & quoteShell(searchQuery) & " --dump-json --no-playlist --no-flat-playlist --no-warnings" & cookieFlags(cookieSource) & " 2>/dev/null"
+  let cmd = yt & " " & quoteShell(searchQuery) & " --no-playlist --print \"title\" --print \"webpage_url\" --print \"duration\" --print \"channel\" --no-warnings" & cookieFlags(cookieSource) & " 2>/dev/null"
   try:
     p = startProcess(cmd, options = {poUsePath, poEvalCommand})
     return true
   except:
     return false
 
+proc parseYtPrintBuf(buf: var string): seq[YtSearchResult] =
+  ## Parse all complete 4-line groups from buf, leaving incomplete tail in buf.
+  result = @[]
+  let lines = buf.splitLines()
+  if lines.len == 0: return
+  var idx = 0
+  while true:
+    let (r, next) = parseYtPrintLines(lines, idx)
+    if next < 0: break
+    if r.title.len > 0:
+      result.add(r)
+    idx = next
+  if idx < lines.len:
+    buf = lines[idx..^1].join("\n")
+  else:
+    buf = ""
+
 proc pollYoutubeSearch*(p: var Process, buf: var string): seq[YtSearchResult] =
   ## Non-blocking read of yt-dlp stdout. Reads whatever data is available,
-  ## parses complete JSON lines, returns partial results.
-  ## Does NOT close the process. Incomplete lines stay in buf.
+  ## parses complete 4-line groups (title, url, duration, channel), returns
+  ## partial results. Does NOT close the process. Incomplete groups stay in buf.
   result = @[]
   try:
     let outFd = p.outputHandle()
@@ -100,15 +140,7 @@ proc pollYoutubeSearch*(p: var Process, buf: var string): seq[YtSearchResult] =
       let n = readFd(outFd, addr tmp[0], tmp.len.cint)
       if n > 0:
         let old = buf.len; buf.setLen(old + n); copyMem(addr buf[old], addr tmp[0], n)
-    while true:
-      let nli = buf.find('\n')
-      if nli < 0: break
-      let line = buf[0..<nli]
-      buf = buf[nli+1..^1]
-      if line.len > 0:
-        let r = parseYtJsonLine(line)
-        if r.title.len > 0:
-          result.add(r)
+    result = parseYtPrintBuf(buf)
   except:
     discard
 
@@ -134,11 +166,7 @@ proc finishYoutubeSearch*(p: var Process, buf: var string): seq[YtSearchResult] 
   except:
     discard
   close(p)
-  for line in buf.splitLines:
-    if line.len > 0:
-      let r = parseYtJsonLine(line)
-      if r.title.len > 0:
-        result.add(r)
+  result = parseYtPrintBuf(buf)
 
 proc startStreamUrlFetch*(url: string; p: var Process; cookieSource: string = ""; jsRuntime: string = "node"): bool =
   let yt = findYtdlp()

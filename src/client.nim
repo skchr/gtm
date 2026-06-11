@@ -136,9 +136,9 @@ proc sendDaemonCmd*(cli: DaemonClient, cmd: JsonNode): JsonNode =
 proc daemonSimpleCmd*(cli: DaemonClient, cmd: string): JsonNode =
   sendDaemonCmd(cli, %*{"cmd": cmd})
 
-method loadFile*(cli: DaemonClient, path: string) =
+method loadFile*(cli: DaemonClient, path: string, title: string = "", channel: string = "") =
   cli.ensureDaemon()
-  let resp = sendDaemonCmd(cli, %*{"cmd": "load_file", "path": path})
+  let resp = sendDaemonCmd(cli, %*{"cmd": "load_file", "path": path, "title": title, "channel": channel})
   cli.lastTrackId = 0
   if resp.hasKey("track_id"):
     cli.lastTrackId = resp["track_id"].getInt().int64
