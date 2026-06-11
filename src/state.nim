@@ -14,7 +14,7 @@ type
     ceReconnecting
 
   InputMode* = enum
-    imNormal, imFilter, imSelectMode, imLeaderMode
+    imNormal, imFilter, imLeaderMode
 
   LibraryPanel* = enum
     lpSidebar, lpContent
@@ -62,6 +62,7 @@ type
     lastTab*: AppTab
     refreshTheme*: bool
     idleTimeout*: int
+    ipcTimeout*: int
 
   LibraryItemKind* = enum
     likTrack, likArtist, likAlbum, likPlaylist
@@ -278,6 +279,7 @@ type
     aboutVisible*: bool
     reconnecting*: bool
     reconnectAttempts*: int
+    pingMissed*: int
     spinnerFrame*: int
     queueCursor*: int
     queuePendingConfirm*: int
@@ -293,8 +295,11 @@ type
     ytSearchActive*: bool
     ytStreamResolving*: bool
     ytDownloadActive*: bool
+    ytPlaylistFetching*: bool
     currentPlayingTitle*: string
     currentPlayingChannel*: string
+    upNextMsg*: string
+    upNextTimer*: int
     cursorVisible*: bool
 
 const

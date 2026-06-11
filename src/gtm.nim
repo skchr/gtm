@@ -25,6 +25,8 @@ proc loadConfig(state: var AppState) =
         state.vizVisible = json["viz_visible"].getBool(true)
       if json.hasKey("idle_timeout"):
         state.config.idleTimeout = json["idle_timeout"].getInt(300)
+      if json.hasKey("ipc_timeout"):
+        state.config.ipcTimeout = json["ipc_timeout"].getInt(3)
       if json.hasKey("visualizer"):
         let vizNode = json["visualizer"]
         if vizNode.hasKey("bar_count"):
@@ -64,7 +66,8 @@ proc saveConfig(state: AppState) =
     "refresh_theme": %state.config.refreshTheme,
     "viz_visible": %state.vizVisible,
     "visualizer": %{"bar_count": %state.viz.barCount},
-    "yt_search_page_size": %state.ytSearchPageSize
+    "yt_search_page_size": %state.ytSearchPageSize,
+    "ipc_timeout": %state.config.ipcTimeout
   }
   var j = json
   if state.rawKeybindingsJson != nil:
@@ -224,6 +227,8 @@ proc playSelected(state: var AppState) =
       state.duration = track.duration
 
 proc nextTrack(state: var AppState) =
+  state.upNextTimer = 0
+  state.upNextMsg = ""
   # Sync TUI queue to daemon before advancing, so daemon knows what's queued
   if state.player of DaemonClient:
     let cli = DaemonClient(state.player)
@@ -245,6 +250,8 @@ proc nextTrack(state: var AppState) =
   state.markDirty(cePlayState)
 
 proc prevTrack(state: var AppState) =
+  state.upNextTimer = 0
+  state.upNextMsg = ""
   discard daemonSimpleCmd(DaemonClient(state.player), "prev")
   state.markDirty(cePlayState)
 
@@ -286,7 +293,7 @@ proc moveSelection(state: var AppState, delta: int) =
         of scAudio: 3
         of scYouTube: 6
         of scAppearance: 2
-        of scSystem: 1
+        of scSystem: 2
       state.selectIndex = max(0, min(maxIdx, state.selectIndex + delta))
     return
   let count = state.filteredCount()
@@ -304,6 +311,8 @@ proc toggleSelect(state: var AppState) =
   if state.selectMode:
     state.selectedIndices = initHashSet[int]()
     state.selectionAnchor = state.selectIndex
+  else:
+    state.selectedIndices = initHashSet[int]()
 
 proc selectAll(state: var AppState) =
   let count = state.filteredCount()
@@ -756,7 +765,12 @@ proc adjustSetting(state: var AppState, delta: int) =
     case state.selectIndex
     of 0: # Idle Timeout
       state.config.idleTimeout = max(30, min(600, state.config.idleTimeout + delta * 30))
-    of 1: # Reset All — action on Enter only
+    of 1: # Daemon IPC Timeout
+      state.config.ipcTimeout = max(1, min(30, state.config.ipcTimeout + delta))
+      if state.player of DaemonClient:
+        DaemonClient(state.player).ipcTimeoutSec = float(state.config.ipcTimeout)
+      state.saveConfig()
+    of 2: # Reset All — action on Enter only
       discard
     else: discard
   state.rebuildItems()
@@ -976,29 +990,16 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
             let r = state.overlay.ytResults[state.overlay.cursor]
             if r.kind == srkPlaylist and state.player of DaemonClient:
               let cli = DaemonClient(state.player)
-              let plResp = cli.ytFetchPlaylist(r.url)
-              if plResp.hasKey("tracks") and plResp["tracks"].len > 0:
-                var tracks: seq[YtSearchResult] = @[]
-                for jt in plResp["tracks"].items:
-                  tracks.add(YtSearchResult(
-                    kind: srkVideo,
-                    title: jt{"title"}.getStr(""),
-                    url: jt{"url"}.getStr(""),
-                    duration: jt{"duration"}.getStr(""),
-                    channel: jt{"channel"}.getStr("")
-                  ))
-                state.overlay.ytPlaylistDetail = YtPlaylistDetail(
-                  title: plResp{"title"}.getStr(r.title),
-                  trackCount: tracks.len,
-                  tracks: tracks
-                )
-                state.overlay.ytResults = tracks
-                state.overlay.cursor = 0
-                state.overlay.multiMode = false
-                state.overlay.selected = initHashSet[int]()
-                state.setFeedback("Playlist: " & plResp{"title"}.getStr(r.title) & " (" & $tracks.len & " tracks)")
+              if state.ytPlaylistFetching:
+                state.setFeedback("Playlist fetch already in progress")
               else:
-                state.setFeedback("Failed to fetch playlist tracks")
+                let plResp = cli.ytFetchPlaylist(r.url)
+                if plResp.hasKey("pending") and plResp["pending"].getBool():
+                  state.ytPlaylistFetching = true
+                  state.ytSearchLoading = true
+                  state.setFeedback("Fetching playlist tracks...")
+                else:
+                  state.setFeedback("Failed to start playlist fetch")
             else:
               state.overlay.clear()
               state.ytStreamPendingItem = r
@@ -1460,22 +1461,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     else:
       state.mode = imNormal
     return
-  of imSelectMode:
-    case key
-    of iw.Key.Escape, iw.Key.V:
-      state.selectMode = false
-      state.selectedIndices = initHashSet[int]()
-      state.mode = imNormal
-    of iw.Key.J:
-      state.moveSelection(1)
-    of iw.Key.K:
-      state.moveSelection(-1)
-    of iw.Key.Space:
-      state.mode = imLeaderMode
-    else:
-      if key >= iw.Key.A and key <= iw.Key.Z:
-        discard
-    return
+
   of imFilter:
     case key
     of iw.Key.Escape:
@@ -1650,7 +1636,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         else: discard
       of scSystem:
         case state.selectIndex
-        of 1: # Reset All
+        of 2: # Reset All
           state.config.theme = "mocha"
           state.theme = getTheme("mocha")
           state.volume = 80
@@ -1911,18 +1897,22 @@ proc processEvents(state: var AppState) =
       state.markDirty(ceVolume)
     of aekPlaybackStarted:
       state.status = psPlaying
+      let autoAdvanced = ev.metadata.getOrDefault("auto_advanced", "false") == "true"
       # Sync track info from event metadata (for auto-advanced queue downloads)
       if ev.metadata.hasKey("track_path"):
         state.currentPlayingPath = ev.metadata["track_path"]
         state.currentPlayingTitle = ev.metadata.getOrDefault("track_title", "")
         state.currentPlayingChannel = ev.metadata.getOrDefault("track_channel", "")
       state.markDirtyBatch(cePlayState, ceTrack)
-      # Show Now Playing notification
-      if state.currentPlayingTitle.len > 0:
-        state.showNotification("Now Playing: " & state.currentPlayingTitle &
-          (if state.currentPlayingChannel.len > 0: " — " & state.currentPlayingChannel else: ""))
-      elif state.currentPlayingPath.len > 0:
-        state.showNotification("Now Playing: " & state.currentPlayingPath.splitFile().name.replace(".", " "))
+      # Show Now Playing notification (skip if auto-advanced — "Up Next" was already shown)
+      if not autoAdvanced:
+        if state.currentPlayingTitle.len > 0:
+          state.showNotification("Now Playing: " & state.currentPlayingTitle &
+            (if state.currentPlayingChannel.len > 0: " — " & state.currentPlayingChannel else: ""))
+        elif state.currentPlayingPath.len > 0:
+          state.showNotification("Now Playing: " & state.currentPlayingPath.splitFile().name.replace(".", " "))
+      state.upNextTimer = 0
+      state.upNextMsg = ""
       if state.tab != tabNowPlaying and state.currentPlayingId > 0:
         for i in 0..<state.libraryTracks.len:
           if state.libraryTracks[i].id == state.currentPlayingId:
@@ -1950,12 +1940,39 @@ proc processEvents(state: var AppState) =
         state.crossfading = false
         state.crossfadePrepared = false
     of aekCustomEvent:
-      if ev.strVal == "queue_changed" and state.player of DaemonClient:
+      if ev.strVal == "up_next":
+        let nextTitle = ev.metadata.getOrDefault("next_title", "")
+        let nextChannel = ev.metadata.getOrDefault("next_channel", "")
+        if nextTitle.len > 0:
+          state.upNextMsg = "Up Next: " & nextTitle &
+            (if nextChannel.len > 0: " — " & nextChannel else: "")
+        else:
+          let nextPath = ev.metadata.getOrDefault("next_path", "")
+          if nextPath.len > 0:
+            state.upNextMsg = "Up Next: " & nextPath.splitFile().name.replace(".", " ")
+        state.upNextTimer = 150
+        state.markDirty(ceFeedback)
+      elif ev.strVal == "queue_changed" and state.player of DaemonClient:
         let cli = DaemonClient(state.player)
         let fullState = cli.getFullState()
         if fullState.hasKey("shuffleIndex"):
           state.shuffleIndex = fullState["shuffleIndex"].getInt(0)
           state.markDirty(ceQueue)
+        # Rebuild TUI playbackQueue from daemon queue paths
+        if ev.metadata.hasKey("queue"):
+          try:
+            let daemonQueue = parseJson(ev.metadata["queue"])
+            var newQueue: seq[int] = @[]
+            for qItem in daemonQueue.items:
+              let qPath = qItem.getStr("")
+              for i, t in state.libraryTracks:
+                if t.path == qPath:
+                  newQueue.add(i)
+                  break
+            if newQueue.len > 0:
+              state.playbackQueue = newQueue
+              state.markDirty(ceQueue)
+          except: discard
       elif ev.strVal == "yt_download_done":
         # Update libraryTracks entries that still point to the download URL
         let dlUrl = ev.metadata.getOrDefault("url", "")
@@ -2012,6 +2029,7 @@ proc runTui(args: seq[string]) =
   ctx.data.audioAvailable = dClient.working
   initApp(ctx.data)
   ctx.data.loadConfig()
+  dClient.ipcTimeoutSec = float(ctx.data.config.ipcTimeout)
   if ctx.data.ytCookieSource.len == 0:
     ctx.data.ytCookieSource = detectBrowserCookieSource()
   if dClient.connected:
@@ -2200,6 +2218,36 @@ proc runTui(args: seq[string]) =
             ctx.data.showNotification("Downloaded: " & name, nkSuccess)
           else:
             ctx.data.showNotification("Download failed", nkError)
+      if ctx.data.ytPlaylistFetching and ctx.data.player of DaemonClient:
+        let cli = DaemonClient(ctx.data.player)
+        let pollResp = cli.ytFetchPlaylistPoll()
+        if pollResp.hasKey("done") and pollResp["done"].getBool():
+          ctx.data.ytPlaylistFetching = false
+          ctx.data.ytSearchLoading = false
+          if pollResp.hasKey("tracks") and pollResp["tracks"].len > 0:
+            var tracks: seq[YtSearchResult] = @[]
+            for jt in pollResp["tracks"].items:
+              tracks.add(YtSearchResult(
+                kind: srkVideo,
+                title: jt{"title"}.getStr(""),
+                url: jt{"url"}.getStr(""),
+                duration: jt{"duration"}.getStr(""),
+                channel: jt{"channel"}.getStr("")
+              ))
+            let plTitle = pollResp{"title"}.getStr("Playlist")
+            ctx.data.overlay.ytPlaylistDetail = YtPlaylistDetail(
+              title: plTitle,
+              trackCount: tracks.len,
+              tracks: tracks
+            )
+            ctx.data.overlay.ytResults = tracks
+            ctx.data.overlay.cursor = 0
+            ctx.data.overlay.multiMode = false
+            ctx.data.overlay.selected = initHashSet[int]()
+            ctx.data.setFeedback("Playlist: " & plTitle & " (" & $tracks.len & " tracks)")
+            ctx.data.markDirty(ceSearchResults)
+          else:
+            ctx.data.setFeedback("Failed to fetch playlist tracks")
       if ctx.data.feedbackTimer > 0:
         ctx.data.feedbackTimer.dec
       if ctx.data.ytSearchLoading and ctx.data.overlay.kind == okYtSearch and ctx.data.overlay.ytResults.len == 0:
@@ -2210,8 +2258,15 @@ proc runTui(args: seq[string]) =
         ctx.data.notificationTimer.dec
       if ctx.data.nowPlayingCueTimer > 0:
         ctx.data.nowPlayingCueTimer.dec
+      if ctx.data.upNextTimer > 0:
+        ctx.data.upNextTimer.dec
       if ctx.data.sleepTimerRemaining > 0 and ctx.data.player of DaemonClient:
         ctx.data.sleepTimerRemaining = DaemonClient(ctx.data.player).sleepTimerRemaining
+      # Reconnection cooldown (frame-based, no os.sleep)
+      if ctx.data.player of DaemonClient:
+        let cli = DaemonClient(ctx.data.player)
+        if cli.reconnectCooldown > 0:
+          cli.reconnectCooldown.dec
       let curW = terminal.terminalWidth()
       let curH = terminal.terminalHeight()
       resized = false

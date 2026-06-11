@@ -480,7 +480,7 @@ method render*(node: LibraryContentView, ctx: var nw.Context[AppState]) =
           track.displayAlbum()[0..<min(track.displayAlbum().len, max(1, cols.wAlbum - 4))] & "\u2026"
         else: track.displayAlbum()
         let time = if track.duration > 0: formatTime(track.duration) else: ""
-        writeStr(ctx.tb, cols.xTitle, line, nameTrunc, if isSelected: theme.text else: theme.text)
+        writeStr(ctx.tb, cols.xTitle, line, nameTrunc, if isSelected: theme.blue else: theme.text)
         writeStr(ctx.tb, cols.xArtist, line, artistTrunc, theme.subtext1)
         writeStr(ctx.tb, cols.xAlbum, line, albumTrunc, theme.subtext1)
         writeStr(ctx.tb, cols.xDuration, line, time, theme.overlay0)
@@ -638,6 +638,10 @@ method render*(node: SettingsView, ctx: var nw.Context[AppState]) =
     sliderWidget(state.config.idleTimeout, 600, 14)
     writeStr(ctx.tb, contentX + contentW - 8, line, "s", theme.subtext0)
     line.inc
+    settingsRow("Daemon IPC Timeout")
+    sliderWidget(state.config.ipcTimeout, 30, 14)
+    writeStr(ctx.tb, contentX + contentW - 8, line, "s", theme.subtext0)
+    line.inc
     settingsRow("Reset All Settings")
     writeStr(ctx.tb, contentX + contentW - 8, line, "[Reset]", theme.peach)
     line.inc
@@ -713,8 +717,7 @@ method render*(node: StatusBarComp, ctx: var nw.Context[AppState]) =
     hints = " Enter: Apply  ESC: Cancel "
   elif state.overlay.kind == okCommandPalette:
     hints = " Enter: Execute  ESC: Cancel "
-  elif state.mode == imSelectMode:
-    hints = " j/k:Extend  v:Exit select  Space: Actions"
+
   elif state.mode == imLeaderMode:
     hints = " Pick an action or ESC to cancel"
   else:
@@ -1315,6 +1318,26 @@ method render*(node: NowPlayingCueOverlay, ctx: var nw.Context[AppState]) =
     writeStr(ctx.tb, boxX + 1, curY, prefix & line, theme.blue)
     curY.inc
 
+type UpNextCueOverlay* = ref object of nw.Node
+method render*(node: UpNextCueOverlay, ctx: var nw.Context[AppState]) =
+  let w = iw.width(ctx.tb)
+  if w < 20 or ctx.data.upNextTimer <= 0 or ctx.data.upNextMsg.len == 0: return
+  let theme = ctx.data.theme
+  let text = ctx.data.upNextMsg
+  let boxW = min(w div 3 * 2, 52)
+  let innerW = max(1, boxW - 4)
+  let lines = wordWrap(text, innerW)
+  let boxH = 1 + lines.len
+  let boxX = 2
+  let boxY = 2
+  fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.surface0)
+  iw.drawRect(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1)
+  var curY = boxY + 1
+  for idx, line in lines:
+    let prefix = if idx == 0: " \u23ED " else: "     "
+    writeStr(ctx.tb, boxX + 1, curY, prefix & line, theme.peach)
+    curY.inc
+
 type PlaylistInputOverlay* = ref object of nw.Node
 method render*(node: PlaylistInputOverlay, ctx: var nw.Context[AppState]) =
   let w = iw.width(ctx.tb)
@@ -1430,6 +1453,8 @@ proc renderApp*(ctx: var nw.Context[AppState]) =
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(FeedbackCueOverlay(), sliceCtx)
   if ctx.data.nowPlayingCueTimer > 0 and ctx.data.nowPlayingCueMsg.len > 0:
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(NowPlayingCueOverlay(), sliceCtx)
+  if ctx.data.upNextTimer > 0 and ctx.data.upNextMsg.len > 0:
+    sliceCtx = nw.slice(ctx, 0, 0, w, h); render(UpNextCueOverlay(), sliceCtx)
   if ctx.data.mode == imLeaderMode:
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(LeaderMenuOverlay(), sliceCtx)
   if ctx.data.playlistInputActive:

@@ -10,6 +10,9 @@ type
     sleepTimerRemaining*: int
     lastTrackId*: int64
     drainedEvents: seq[AudioEvent]
+    ipcTimeoutSec*: float
+    pingMissed*: int
+    reconnectCooldown*: int
 
 proc daemonIsRunning*(): bool =
   let p = pidPath()
@@ -55,14 +58,15 @@ proc connectToDaemon*(cli: DaemonClient): bool =
 proc ensureDaemon*(cli: DaemonClient) =
   if cli == nil: return
   if cli.connected: return
-  if not daemonIsRunning():
+  if cli.reconnectCooldown > 0: return
+  if daemonIsRunning():
+    if connectToDaemon(cli):
+      cli.reconnectCooldown = 0
+    else:
+      cli.reconnectCooldown = 30
+  else:
     startDaemonProcess()
-    for i in 0..30:
-      os.sleep(20)
-      if daemonIsRunning(): break
-  for i in 0..15:
-    if connectToDaemon(cli): return
-    os.sleep(20)
+    cli.reconnectCooldown = 30
 
 proc drainEventLines(cli: DaemonClient, buf: var string) =
   cli.drainedEvents = @[]
@@ -90,6 +94,7 @@ proc drainEventLines(cli: DaemonClient, buf: var string) =
             ev.metadata["track_path"] = evJson{"track_path"}.getStr("")
             ev.metadata["track_title"] = evJson{"track_title"}.getStr("")
             ev.metadata["track_channel"] = evJson{"track_channel"}.getStr("")
+          ev.metadata["auto_advanced"] = $(evJson{"auto_advanced"}.getBool(false))
         of aekMetadataChanged: ev.strVal = evJson{"event"}.getStr("")
         of aekCustomEvent:
           ev.strVal = evJson{"event"}.getStr("")
@@ -101,6 +106,14 @@ proc drainEventLines(cli: DaemonClient, buf: var string) =
             ev.metadata["path"] = evJson["path"].getStr("")
           if evJson.hasKey("title"):
             ev.metadata["title"] = evJson["title"].getStr("")
+          if evJson.hasKey("next_path"):
+            ev.metadata["next_path"] = evJson["next_path"].getStr("")
+          if evJson.hasKey("next_title"):
+            ev.metadata["next_title"] = evJson["next_title"].getStr("")
+          if evJson.hasKey("next_channel"):
+            ev.metadata["next_channel"] = evJson["next_channel"].getStr("")
+          if evJson.hasKey("queue"):
+            ev.metadata["queue"] = $evJson["queue"]
         else: discard
         cli.drainedEvents.add(ev)
     except:
@@ -108,14 +121,15 @@ proc drainEventLines(cli: DaemonClient, buf: var string) =
       break
 
 proc sendDaemonCmd*(cli: DaemonClient, cmd: JsonNode): JsonNode =
-  if cli == nil or cli.sock == nil: return %*{"ok": false, "error": "not connected"}
+  if cli == nil or cli.sock == nil or not cli.connected: return %*{"ok": false, "error": "not connected"}
   try:
     drainEventLines(cli, cli.buf)
     let data = $cmd & "\n"
     cli.sock.send(data)
     var tmp: array[16384, char]
+    let timeout = if cli.ipcTimeoutSec > 0: cli.ipcTimeoutSec else: 3.0
     var totalWait = 0.0
-    while totalWait < 30.0:
+    while totalWait < timeout:
       var rfds: posix.TFdSet
       FD_ZERO(rfds)
       FD_SET(cli.sock.getFd, rfds)
@@ -443,6 +457,15 @@ proc ytFetchPlaylist*(cli: DaemonClient, url: string): JsonNode =
   cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "yt_fetch_playlist", "url": url})
 
+proc ytFetchPlaylistPoll*(cli: DaemonClient): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "yt_fetch_playlist_poll"})
+
+proc ping*(cli: DaemonClient): bool =
+  cli.ensureDaemon()
+  let resp = sendDaemonCmd(cli, %*{"cmd": "ping"})
+  result = resp.hasKey("pong") and resp["pong"].getBool(false)
+
 proc ytSetConfig*(cli: DaemonClient, cookieSource, jsRuntime, downloadDir: string, maxConcurrent: int): JsonNode =
   cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "yt_set_config", "cookie_source": cookieSource, "js_runtime": jsRuntime, "download_dir": downloadDir, "max_concurrent": maxConcurrent})
@@ -463,5 +486,6 @@ proc newDaemonClient*(): DaemonClient =
   DaemonClient(
     volume: 80, state: 0, running: false,
     connected: false, buf: "", backendType: abtDaemon,
-    working: true, sleepTimerRemaining: 0
+    working: true, sleepTimerRemaining: 0,
+    ipcTimeoutSec: 3.0, pingMissed: 0, reconnectCooldown: 0
   )
