@@ -548,6 +548,10 @@ proc isUrl*(path: string): bool =
   path.startsWith("tcp://") or path.startsWith("udp://") or
   path.startsWith("ftp://")
 
+proc isYtWatchUrl*(path: string): bool =
+  (path.contains("youtube.com/watch") or path.contains("youtu.be/")) and
+  not path.contains("googlevideo.com")
+
 const m3uExtensions = [".m3u", ".m3u8"]
 
 proc isM3uFile*(path: string): bool =

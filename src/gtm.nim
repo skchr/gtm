@@ -233,12 +233,13 @@ proc nextTrack(state: var AppState) =
       if resp.hasKey("queue") and resp["queue"].len > 0:
         daemonQueueEmpty = false
       if daemonQueueEmpty and state.playbackQueue.len > 0:
-        var paths: seq[string] = @[]
+        var items: seq[(string, string, string)] = @[]
         for idx in state.playbackQueue:
           if idx >= 0 and idx < state.libraryTracks.len:
-            paths.add(state.libraryTracks[idx].path)
-        if paths.len > 0:
-          discard cli.queueAdd(paths)
+            let t = state.libraryTracks[idx]
+            items.add((t.path, t.title, t.artist))
+        if items.len > 0:
+          discard cli.queueAdd(items)
   state.player.stop()
   discard daemonSimpleCmd(DaemonClient(state.player), "next")
   state.markDirty(cePlayState)
@@ -1128,14 +1129,15 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         if state.overlay.cursor > 0:
           state.overlay.cursor.dec
       of iw.Key.Enter:
-        var paths: seq[string] = @[]
+        var items: seq[(string, string, string)] = @[]
         for idx in state.overlay.selected:
           if idx >= 0 and idx < state.libraryTracks.len:
             state.playbackQueue.add(idx)
-            paths.add(state.libraryTracks[idx].path)
+            let t = state.libraryTracks[idx]
+            items.add((t.path, t.title, t.artist))
         # Sync queue to daemon for auto-advance/crossfade
-        if paths.len > 0 and state.player of DaemonClient:
-          discard DaemonClient(state.player).queueAdd(paths)
+        if items.len > 0 and state.player of DaemonClient:
+          discard DaemonClient(state.player).queueAdd(items)
         state.markDirty(ceQueue)
         if state.status == psStopped and state.playbackQueue.len > 0:
           state.overlay.clear()
@@ -1909,7 +1911,18 @@ proc processEvents(state: var AppState) =
       state.markDirty(ceVolume)
     of aekPlaybackStarted:
       state.status = psPlaying
+      # Sync track info from event metadata (for auto-advanced queue downloads)
+      if ev.metadata.hasKey("track_path"):
+        state.currentPlayingPath = ev.metadata["track_path"]
+        state.currentPlayingTitle = ev.metadata.getOrDefault("track_title", "")
+        state.currentPlayingChannel = ev.metadata.getOrDefault("track_channel", "")
       state.markDirtyBatch(cePlayState, ceTrack)
+      # Show Now Playing notification
+      if state.currentPlayingTitle.len > 0:
+        state.showNotification("Now Playing: " & state.currentPlayingTitle &
+          (if state.currentPlayingChannel.len > 0: " — " & state.currentPlayingChannel else: ""))
+      elif state.currentPlayingPath.len > 0:
+        state.showNotification("Now Playing: " & state.currentPlayingPath.splitFile().name.replace(".", " "))
       if state.tab != tabNowPlaying and state.currentPlayingId > 0:
         for i in 0..<state.libraryTracks.len:
           if state.libraryTracks[i].id == state.currentPlayingId:
@@ -1942,6 +1955,16 @@ proc processEvents(state: var AppState) =
         let fullState = cli.getFullState()
         if fullState.hasKey("shuffleIndex"):
           state.shuffleIndex = fullState["shuffleIndex"].getInt(0)
+          state.markDirty(ceQueue)
+      elif ev.strVal == "yt_download_done":
+        # Update libraryTracks entries that still point to the download URL
+        let dlUrl = ev.metadata.getOrDefault("url", "")
+        let dlPath = ev.metadata.getOrDefault("path", "")
+        if dlUrl.len > 0 and dlPath.len > 0:
+          for i in 0..<state.libraryTracks.len:
+            if state.libraryTracks[i].path == dlUrl:
+              state.libraryTracks[i].path = dlPath
+              break
           state.markDirty(ceQueue)
     else: discard
   if state.player.timePos != state.timePos and state.status == psPlaying:

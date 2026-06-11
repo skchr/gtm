@@ -1,4 +1,4 @@
-import os, json, strutils, net, osproc, posix
+import os, json, strutils, net, osproc, posix, tables
 from nativesockets import setBlocking
 import state, audio
 
@@ -85,11 +85,22 @@ proc drainEventLines(cli: DaemonClient, buf: var string) =
         of aekPositionChanged: ev.floatVal = evJson{"time_pos"}.getFloat(0.0)
         of aekDurationChanged: ev.floatVal = evJson{"duration"}.getFloat(0.0)
         of aekVolumeChanged: ev.intVal = evJson{"volume"}.getInt(0)
+        of aekPlaybackStarted:
+          if evJson.hasKey("track_path"):
+            ev.metadata["track_path"] = evJson{"track_path"}.getStr("")
+            ev.metadata["track_title"] = evJson{"track_title"}.getStr("")
+            ev.metadata["track_channel"] = evJson{"track_channel"}.getStr("")
         of aekMetadataChanged: ev.strVal = evJson{"event"}.getStr("")
         of aekCustomEvent:
           ev.strVal = evJson{"event"}.getStr("")
           if evJson.hasKey("shuffleIndex"):
             ev.intVal = evJson["shuffleIndex"].getInt(0)
+          if evJson.hasKey("url"):
+            ev.metadata["url"] = evJson["url"].getStr("")
+          if evJson.hasKey("path"):
+            ev.metadata["path"] = evJson["path"].getStr("")
+          if evJson.hasKey("title"):
+            ev.metadata["title"] = evJson["title"].getStr("")
         else: discard
         cli.drainedEvents.add(ev)
     except:
@@ -231,11 +242,22 @@ method pollEvents*(cli: DaemonClient): seq[AudioEvent] =
             cli.timePos = ev.floatVal
           of aekDurationChanged: ev.floatVal = evJson{"duration"}.getFloat(0.0)
           of aekVolumeChanged: ev.intVal = evJson{"volume"}.getInt(0)
+          of aekPlaybackStarted:
+            if evJson.hasKey("track_path"):
+              ev.metadata["track_path"] = evJson{"track_path"}.getStr("")
+              ev.metadata["track_title"] = evJson{"track_title"}.getStr("")
+              ev.metadata["track_channel"] = evJson{"track_channel"}.getStr("")
           of aekMetadataChanged: ev.strVal = evJson{"event"}.getStr("")
           of aekCustomEvent:
             ev.strVal = evJson{"event"}.getStr("")
             if evJson.hasKey("shuffleIndex"):
               ev.intVal = evJson["shuffleIndex"].getInt(0)
+            if evJson.hasKey("url"):
+              ev.metadata["url"] = evJson["url"].getStr("")
+            if evJson.hasKey("path"):
+              ev.metadata["path"] = evJson["path"].getStr("")
+            if evJson.hasKey("title"):
+              ev.metadata["title"] = evJson["title"].getStr("")
           else: discard
           result.add(ev)
       elif json.hasKey("state"):
@@ -338,9 +360,12 @@ proc scanDir*(cli: DaemonClient, path: string): JsonNode =
   cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "scan", "path": path})
 
-proc queueAdd*(cli: DaemonClient, paths: seq[string]): JsonNode =
+proc queueAdd*(cli: DaemonClient, items: seq[tuple[path, title, channel: string]]): JsonNode =
   cli.ensureDaemon()
-  sendDaemonCmd(cli, %*{"cmd": "queue_add", "data": %paths})
+  var arr = newJArray()
+  for (path, title, channel) in items:
+    arr.add(%*{"path": path, "title": title, "channel": channel})
+  sendDaemonCmd(cli, %*{"cmd": "queue_add", "data": arr})
 
 proc queueRemove*(cli: DaemonClient, index: int): JsonNode =
   cli.ensureDaemon()
