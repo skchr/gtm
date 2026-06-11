@@ -230,7 +230,78 @@ proc pollDownload*(p: var Process, buf: var string): string =
       return trimmed
   result = ""
 
+proc startPlaylistFetch*(url: string; p: var Process; cookieSource: string = ""; jsRuntime: string = "node"): bool =
+  let yt = findYtdlp()
+  if yt.len == 0: return false
+  let cmd = yt & " --dump-json --no-playlist --flat-playlist --no-warnings" & cookieFlags(cookieSource) & jsRuntimeFlags(jsRuntime) & " " & quoteShell(url) & " 2>/dev/null"
+  try:
+    p = startProcess(cmd, options = {poUsePath, poEvalCommand})
+    return true
+  except:
+    return false
+
+proc pollPlaylistFetch*(p: var Process, buf: var string): seq[YtSearchResult] =
+  ## Non-blocking read of playlist fetch stdout. Reads available data,
+  ## parses complete JSON lines, returns partial results.
+  result = @[]
+  try:
+    let outFd = p.outputHandle()
+    var rfds: TFdSet
+    FD_ZERO(rfds)
+    FD_SET(outFd, rfds)
+    var tv: Timeval
+    tv.tv_sec = 0.Time
+    tv.tv_usec = 0.Suseconds
+    if select(cint(outFd) + 1, addr(rfds), nil, nil, addr(tv)) > 0:
+      var tmp: array[16384, char]
+      let n = readFd(outFd, addr tmp[0], tmp.len.cint)
+      if n > 0:
+        let old = buf.len; buf.setLen(old + n); copyMem(addr buf[old], addr tmp[0], n)
+    # Parse complete JSON lines from buffer
+    while true:
+      let nli = buf.find('\n')
+      if nli < 0: break
+      let line = buf[0..<nli]
+      buf = buf[nli+1..^1]
+      if line.len > 0:
+        let r = parseYtJsonLine(line)
+        if r.title.len > 0:
+          result.add(r)
+  except:
+    discard
+
+proc finishPlaylistFetch*(p: var Process, buf: var string): seq[YtSearchResult] =
+  ## Drains remaining stdout data, closes process, returns any final results.
+  result = @[]
+  try:
+    let outFd = p.outputHandle()
+    var rfds: TFdSet
+    FD_ZERO(rfds)
+    FD_SET(outFd, rfds)
+    var tv: Timeval
+    tv.tv_sec = 0.Time
+    tv.tv_usec = 0.Suseconds
+    while select(cint(outFd) + 1, addr(rfds), nil, nil, addr(tv)) > 0:
+      var tmp: array[16384, char]
+      let n = readFd(outFd, addr tmp[0], tmp.len.cint)
+      if n <= 0: break
+      let old = buf.len; buf.setLen(old + n); copyMem(addr buf[old], addr tmp[0], n)
+      FD_ZERO(rfds)
+      FD_SET(outFd, rfds)
+  except:
+    discard
+  close(p)
+  # Parse remaining lines
+  for line in buf.splitLines:
+    if line.len > 0:
+      let r = parseYtJsonLine(line)
+      if r.title.len > 0:
+        result.add(r)
+  buf = ""
+
 proc fetchPlaylistTracks*(url: string; cookieSource: string = ""; jsRuntime: string = "node"): YtPlaylistDetail =
+  ## Legacy blocking version — still used for backward compat but UNCHANGED internally.
+  ## New code should use startPlaylistFetch/pollPlaylistFetch/finishPlaylistFetch.
   let yt = findYtdlp()
   if yt.len == 0: return YtPlaylistDetail()
   let cmd = yt & " --dump-json --no-playlist --flat-playlist --no-warnings" & cookieFlags(cookieSource) & " " & quoteShell(url) & " 2>/dev/null"

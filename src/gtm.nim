@@ -35,8 +35,18 @@ proc loadConfig(state: var AppState) =
         state.ytSearchPageSize = json["yt_search_page_size"].getInt(10)
       if json.hasKey("keybindings"):
         state.rawKeybindingsJson = json["keybindings"]
+      if json.hasKey("footer_preset"):
+        let fp = json["footer_preset"].getStr("full")
+        state.footerPreset = parseEnum[FooterPresetName]("fpn" & fp.capitalizeAscii(), fpnFull)
+      if json.hasKey("highlight_overrides"):
+        state.userHighlightOverrides = json["highlight_overrides"]
+      if json.hasKey("crossfade_duration"):
+        state.crossfadeDuration = json["crossfade_duration"].getInt(0)
+      if json.hasKey("crossfade_curve"):
+        state.crossfadeCurve = CrossfadeCurveType(json["crossfade_curve"].getInt(1))
       let refreshSeed = state.config.refreshTheme or state.config.theme == "random"
       state.theme = getTheme(state.config.theme, refreshSeed)
+      state.highlightGroups = initHighlightGroups(state.theme)
     except:
       stderr.writeLine("[gtm] loadConfig error: " & getCurrentExceptionMsg())
 
@@ -66,6 +76,9 @@ proc saveConfig(state: AppState) =
     "refresh_theme": %state.config.refreshTheme,
     "viz_visible": %state.vizVisible,
     "visualizer": %{"bar_count": %state.viz.barCount},
+    "footer_preset": %($state.footerPreset).substr(3).toLowerAscii(),
+    "crossfade_duration": %state.crossfadeDuration,
+    "crossfade_curve": %state.crossfadeCurve.ord,
     "yt_search_page_size": %state.ytSearchPageSize,
     "ipc_timeout": %state.config.ipcTimeout
   }
@@ -290,9 +303,9 @@ proc moveSelection(state: var AppState, delta: int) =
       state.selectIndex = 0
     else:
       let maxIdx = case state.settingsCategory
-        of scAudio: 3
+        of scAudio: 4
         of scYouTube: 6
-        of scAppearance: 2
+        of scAppearance: 3
         of scSystem: 2
       state.selectIndex = max(0, min(maxIdx, state.selectIndex + delta))
     return
@@ -634,7 +647,7 @@ proc initCommands(state: var AppState) =
           s.playlistInputPrompt = "Rename Playlist:"
           s.playlistInputBuffer = s.libraryPlaylists[idx].name)
   state.registerCommand("toggle_favourite", "Toggle Favourite",
-    "Mark or unmark the selected track as favourite", "\u2605", @["f"],
+    "Mark or unmark the selected track as favourite", "\u2605", @["F"],
     proc(s: var AppState) =
       let idx = s.selectIndex
       let items = s.displayItems
@@ -728,6 +741,17 @@ proc adjustSetting(state: var AppState, delta: int) =
     of 2: # Crossfade Duration
       state.crossfadeDuration = max(0, min(10, state.crossfadeDuration + delta))
       state.saveConfig()
+    of 3: # Crossfade Curve
+      let curves = [cctEqualPower, cctQuadratic, cctCubic, cctAsymmetric]
+      var i = 0
+      for idx, v in curves:
+        if v == state.crossfadeCurve:
+          i = (idx + delta + curves.len) mod curves.len
+          break
+      state.crossfadeCurve = curves[i]
+      if state.player of DaemonClient:
+        DaemonClient(state.player).setCrossfadeCurve(state.crossfadeCurve.ord)
+      state.saveConfig()
     else: discard
   of scYouTube:
     case state.selectIndex
@@ -760,6 +784,15 @@ proc adjustSetting(state: var AppState, delta: int) =
       discard
     of 1: # Refresh Theme
       state.config.refreshTheme = not state.config.refreshTheme
+    of 2: # Footer Preset
+      let vals = [fpnMinimal, fpnCompact, fpnFull, fpnInfo, fpnNavigator, fpnDebug, fpnMusic, fpnClock]
+      var i = 0
+      for idx, v in vals:
+        if v == state.footerPreset:
+          i = (idx + delta + vals.len) mod vals.len
+          break
+      state.footerPreset = vals[i]
+      state.saveConfig()
     else: discard
   of scSystem:
     case state.selectIndex
@@ -910,12 +943,12 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         if state.overlay.query.len > 0:
           state.overlay.query = state.overlay.query[0..^2]
           state.updateThemePickerResults()
-      of iw.Key.J, iw.Key.Down:
+      of iw.Key.Down:
         if state.overlay.cursor < state.overlay.strResults.len - 1:
           state.overlay.cursor.inc
           let seed = state.overlay.strResults[state.overlay.cursor]
           state.applyTheme(seed)
-      of iw.Key.K, iw.Key.Up:
+      of iw.Key.Up:
         if state.overlay.cursor > 0:
           state.overlay.cursor.dec
           let seed = state.overlay.strResults[state.overlay.cursor]
@@ -1025,6 +1058,16 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
             state.playbackQueue.add(state.libraryTracks.len - 1)
           state.rebuildItems()
           state.markDirty(ceQueue)
+          if state.player of DaemonClient:
+            let cli = DaemonClient(state.player)
+            if cli.connected:
+              var syncItems: seq[tuple[path, title, channel: string]] = @[]
+              for idx in state.playbackQueue:
+                if idx >= 0 and idx < state.libraryTracks.len:
+                  let t = state.libraryTracks[idx]
+                  syncItems.add((t.path, t.title, t.artist))
+              if syncItems.len > 0:
+                discard cli.queueAdd(syncItems)
         if state.overlay.multiMode:
           if state.overlay.selected.len > 0:
             var items: seq[YtSearchResult] = @[]
@@ -1058,10 +1101,10 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         of iw.Key.Escape:
           state.overlay.batchShowPls = false
           state.overlay.cursor = 0
-        of iw.Key.J, iw.Key.Down:
+        of iw.Key.Down:
           if state.overlay.cursor < state.libraryPlaylists.len - 1:
             state.overlay.cursor.inc
-        of iw.Key.K, iw.Key.Up:
+        of iw.Key.Up:
           if state.overlay.cursor > 0:
             state.overlay.cursor.dec
         of iw.Key.Enter:
@@ -1084,9 +1127,9 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         case key
         of iw.Key.Escape:
           state.overlay.clear()
-        of iw.Key.J, iw.Key.Down:
+        of iw.Key.Down:
           if state.overlay.cursor < 2: state.overlay.cursor.inc
-        of iw.Key.K, iw.Key.Up:
+        of iw.Key.Up:
           if state.overlay.cursor > 0: state.overlay.cursor.dec
         of iw.Key.Enter:
           let sel = state.overlay.cursor
@@ -1123,10 +1166,10 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
       case key
       of iw.Key.Escape:
         state.overlay.clear()
-      of iw.Key.J, iw.Key.Down:
+      of iw.Key.Down:
         if state.overlay.cursor < state.overlay.results.len - 1:
           state.overlay.cursor.inc
-      of iw.Key.K, iw.Key.Up:
+      of iw.Key.Up:
         if state.overlay.cursor > 0:
           state.overlay.cursor.dec
       of iw.Key.Enter:
@@ -1180,11 +1223,11 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
       case key
       of iw.Key.Escape:
         state.overlay.clear()
-      of iw.Key.J, iw.Key.Down:
+      of iw.Key.Down:
         if state.overlay.cursor < state.playbackQueue.len - 1:
           state.overlay.cursor.inc
           state.overlay = OverlayState(kind: okQueueOverlay, cursor: state.overlay.cursor)
-      of iw.Key.K, iw.Key.Up:
+      of iw.Key.Up:
         if state.overlay.cursor > 0:
           state.overlay.cursor.dec
           state.overlay = OverlayState(kind: okQueueOverlay, cursor: state.overlay.cursor)
@@ -1230,10 +1273,10 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
       case key
       of iw.Key.Escape:
         state.overlay.clear()
-      of iw.Key.J, iw.Key.Down:
+      of iw.Key.Down:
         if state.overlay.cursor < state.overlay.results.len - 1:
           state.overlay.cursor.inc
-      of iw.Key.K, iw.Key.Up:
+      of iw.Key.Up:
         if state.overlay.cursor > 0:
           state.overlay.cursor.dec
       of iw.Key.Enter:
@@ -1309,9 +1352,9 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         state.overlay.clear()
       of iw.Key.Slash:
         state.overlay.query = ""
-      of iw.Key.J, iw.Key.Down:
+      of iw.Key.Down:
         state.overlay.cursor = (state.overlay.cursor + 1) mod max(state.overlay.results.len, 1)
-      of iw.Key.K, iw.Key.Up:
+      of iw.Key.Up:
         state.overlay.cursor = (state.overlay.cursor - 1 + state.overlay.results.len) mod max(state.overlay.results.len, 1)
       of iw.Key.Backspace:
         if state.overlay.query.len > 0:
@@ -1332,6 +1375,49 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         state.overlay.results = @[]
         for i in 0..<state.commands.len:
           state.overlay.results.add(i)
+    of okFuzzyFinder:
+      case key
+      of iw.Key.Escape:
+        state.overlay.clear()
+      of iw.Key.Enter:
+        if state.overlay.results.len > 0 and state.overlay.cursor >= 0 and
+           state.overlay.cursor < state.overlay.results.len:
+          let idx = state.overlay.results[state.overlay.cursor]
+          state.overlay.clear()
+          if idx >= 0 and idx < state.libraryTracks.len:
+            state.selectIndex = idx
+            state.playSelected()
+      of iw.Key.Down:
+        if state.overlay.cursor < state.overlay.results.len - 1:
+          state.overlay.cursor.inc
+      of iw.Key.Up:
+        if state.overlay.cursor > 0:
+          state.overlay.cursor.dec
+      of iw.Key.Backspace:
+        if state.overlay.query.len > 0:
+          state.overlay.query = state.overlay.query[0..^2]
+      else:
+        for ch in chars:
+          let code = ch.int
+          if code >= 32 and code < 127:
+            state.overlay.query &= $ch
+      state.overlay.results = @[]
+      state.overlay.strResults = @[]
+      if state.overlay.query.len > 0:
+        let q = state.overlay.query.toLowerAscii()
+        for i, t in state.libraryTracks:
+          if fuzzyMatch(q, t.displayName().toLowerAscii()) or
+             fuzzyMatch(q, t.displayArtist().toLowerAscii()):
+            state.overlay.results.add(i)
+            state.overlay.strResults.add(t.displayName() & "  \u2014  " & t.displayArtist())
+      else:
+        for i, t in state.libraryTracks:
+          state.overlay.results.add(i)
+          state.overlay.strResults.add(t.displayName() & "  \u2014  " & t.displayArtist())
+      if state.overlay.results.len > 0:
+        state.overlay.cursor = min(state.overlay.cursor, state.overlay.results.len - 1)
+      else:
+        state.overlay.cursor = 0
     of okNone:
       discard
     return
@@ -1827,6 +1913,12 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
       for i in 0..<state.libraryTracks.len:
         state.overlay.results.add(i)
   of iw.Key.F:
+    state.overlay = OverlayState(kind: okFuzzyFinder, query: "")
+    for i in 0..<state.libraryTracks.len:
+      state.overlay.results.add(i)
+      let t = state.libraryTracks[i]
+      state.overlay.strResults.add(t.displayName() & "  \u2014  " & t.displayArtist())
+  of iw.Key.ShiftF:
     execCmd(state, "toggle_favourite")
   of iw.Key.T:
     state.overlay = OverlayState(kind: okThemePicker, query: "")
@@ -1927,10 +2019,19 @@ proc processEvents(state: var AppState) =
       state.status = psStopped
       state.markDirty(cePlayState)
     of aekTrackEnded:
-      # Daemon handles queue advancement; TUI just syncs state
       state.duration = 0.0
       state.timePos = 0.0
-      state.markDirtyBatch(cePlayState, cePosition)
+      # Consume queue — daemon already advanced
+      if state.playbackQueue.len > 0:
+        state.playbackQueue.delete(0)
+        state.markDirty(ceQueue)
+      # Sync selectIndex to current playing track
+      if state.currentPlayingPath.len > 0:
+        for i, t in state.libraryTracks:
+          if t.path == state.currentPlayingPath:
+            state.selectIndex = i
+            break
+      state.markDirtyBatch(cePlayState, cePosition, ceTrack)
     of aekMetadataChanged:
       if ev.strVal == "crossfade_started":
         state.crossfadeStarted = true
@@ -1969,9 +2070,8 @@ proc processEvents(state: var AppState) =
                 if t.path == qPath:
                   newQueue.add(i)
                   break
-            if newQueue.len > 0:
-              state.playbackQueue = newQueue
-              state.markDirty(ceQueue)
+            state.playbackQueue = newQueue
+            state.markDirty(ceQueue)
           except: discard
       elif ev.strVal == "yt_download_done":
         # Update libraryTracks entries that still point to the download URL
@@ -2014,6 +2114,8 @@ proc fullStateSync(state: var AppState, daemonState: JsonNode) =
     state.sleepTimerRemaining = daemonState["sleep_timer"].getInt(0)
   if daemonState.hasKey("crossfadeDuration"):
     state.crossfadeDuration = daemonState["crossfadeDuration"].getInt(0)
+  if daemonState.hasKey("crossfadeCurve"):
+    state.crossfadeCurve = CrossfadeCurveType(daemonState["crossfadeCurve"].getInt(1))
 
 proc runTui(args: seq[string]) =
   terminal.enableTrueColors()
@@ -2028,6 +2130,7 @@ proc runTui(args: seq[string]) =
   ctx.data.loadPlaylists()
   ctx.data.audioAvailable = dClient.working
   initApp(ctx.data)
+  ctx.data.highlightGroups = initHighlightGroups(ctx.data.theme)
   ctx.data.loadConfig()
   dClient.ipcTimeoutSec = float(ctx.data.config.ipcTimeout)
   if ctx.data.ytCookieSource.len == 0:

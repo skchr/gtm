@@ -46,10 +46,11 @@ method shutdown*(b: AudioBackend) {.base.} = discard
 method getMetadata*(b: AudioBackend, path: string): TrackMetadata {.base.} = TrackMetadata()
 method readPcmFrames*(b: AudioBackend, output: var seq[float32], maxCount: int) {.base.} = discard
 method prepareNext*(b: AudioBackend, path: string) {.base.} = discard
-method startCrossfade*(b: AudioBackend, durationSeconds: float) {.base.} = discard
+method startCrossfade*(b: AudioBackend, durationSeconds: float, reverse: bool = false) {.base.} = discard
 method getStatusFlags*(b: AudioBackend): tuple[crossfading, masterEnded: bool] {.base.} = (false, false)
 method setEqBand*(b: AudioBackend, band: int, gainDb: float) {.base.} = discard
 method setEqPreset*(b: AudioBackend, name: string) {.base.} = discard
+method setCrossfadeCurve*(b: AudioBackend, curveType: int) {.base.} = discard
 
 type
   ProcessBackend* = ref object of AudioBackend
@@ -157,7 +158,8 @@ when defined(useFFmpeg):
   proc ffmpeg_mixer_master_ended(ctx: FfmpegCtx): cint {.importc.}
   proc ffmpeg_mixer_read_pcm(ctx: FfmpegCtx, output: ptr float32, count: cint): cint {.importc.}
   proc ffmpeg_mixer_get_metadata(ctx: FfmpegCtx, title, artist, album: ptr cstring, duration: ptr cdouble) {.importc.}
-  proc ffmpeg_mixer_start_crossfade(ctx: FfmpegCtx, duration_frames: cint) {.importc.}
+  proc ffmpeg_mixer_start_crossfade(ctx: FfmpegCtx, duration_frames: cint, reverse: cint = 0) {.importc.}
+  proc ffmpeg_mixer_set_crossfade_curve(ctx: FfmpegCtx, curve_type: cint) {.importc.}
   proc ffmpeg_mixer_set_eq_band(ctx: FfmpegCtx, band: cint, gain_db: cfloat): cint {.importc.}
   proc ffmpeg_mixer_set_eq_preset(ctx: FfmpegCtx, name: cstring): cint {.importc.}
 
@@ -340,11 +342,11 @@ when defined(useFFmpeg):
   method prepareNext*(b: MixerBackend, path: string) =
     discard ffmpeg_mixer_load_slave(b.ctx, path.cstring)
 
-  method startCrossfade*(b: MixerBackend, durationSeconds: float) =
+  method startCrossfade*(b: MixerBackend, durationSeconds: float, reverse: bool = false) =
     if b.ctx == nil or b.duration <= 0: return
     let sampleRate = 44100  # default, matched to master
     let frames = (durationSeconds * sampleRate.float32).cint
-    ffmpeg_mixer_start_crossfade(b.ctx, frames)
+    ffmpeg_mixer_start_crossfade(b.ctx, frames, reverse.cint)
 
   method getStatusFlags*(b: MixerBackend): tuple[crossfading, masterEnded: bool] =
     if b.ctx == nil: return (false, false)
@@ -358,6 +360,9 @@ when defined(useFFmpeg):
 
   method setEqPreset*(b: MixerBackend, name: string) =
     discard ffmpeg_mixer_set_eq_preset(b.ctx, name.cstring)
+
+  method setCrossfadeCurve*(b: MixerBackend, curveType: int) =
+    ffmpeg_mixer_set_crossfade_curve(b.ctx, curveType.cint)
 
   method pollEvents*(b: MixerBackend): seq[AudioEvent] =
     result = @[]

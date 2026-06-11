@@ -525,6 +525,8 @@ typedef struct {
   float             volume;
   volatile int      master_ended;
   volatile int      slave_loaded;
+  int               crossfade_reverse;
+  int               crossfade_curve; /* 0=equal-power, 1=quadratic, 2=cubic, 3=asymmetric */
   volatile int      priming;        /* accumulate frames before first write */
   int               prime_target;   /* samples to accumulate before writing */
   Equalizer         eq;
@@ -612,12 +614,56 @@ static void* mixer_thread(void* arg) {
     if (mx->crossfade_active && mx->slave && mx->slave->fmt_ctx) {
       int stotal = decode_into_buf(mx->slave, spkt, sframe, &sbuf, &scap);
       if (stotal > 0) {
-        // Crossfade: equal-power curve
         int total_frames = mx->crossfade_total_frames;
         int remaining = mx->crossfade_frames_remaining;
-        double progress = 1.0 - (total_frames > 0 ? (double)remaining / total_frames : 0.0);
-        float mgain = cos(progress * 3.14159 / 2.0);
-        float sgain = sin(progress * 3.14159 / 2.0);
+        double p = 1.0 - (total_frames > 0 ? (double)remaining / total_frames : 0.0);
+        float mgain, sgain;
+        if (mx->crossfade_reverse) {
+          double rp = 1.0 - p;
+          switch (mx->crossfade_curve) {
+            case 0: /* EqualPower */
+              mgain = cos(rp * 3.14159f / 2.0f);
+              sgain = sin(rp * 3.14159f / 2.0f);
+              break;
+            case 1: /* Quadratic */
+              mgain = (1.0f - rp) * (1.0f - rp);
+              sgain = rp * rp;
+              break;
+            case 2: /* Cubic */
+              mgain = (1.0f - rp) * (1.0f - rp) * (1.0f - rp);
+              sgain = rp * rp * rp;
+              break;
+            case 3: /* Asymmetric */
+              mgain = cos(rp * 3.14159f / 2.0f);
+              sgain = sin(rp * rp * 3.14159f / 2.0f);
+              break;
+            default:
+              mgain = cos(rp * 3.14159f / 2.0f);
+              sgain = sin(rp * 3.14159f / 2.0f);
+          }
+        } else {
+          switch (mx->crossfade_curve) {
+            case 0: /* EqualPower */
+              mgain = cos(p * 3.14159f / 2.0f);
+              sgain = sin(p * 3.14159f / 2.0f);
+              break;
+            case 1: /* Quadratic */
+              mgain = (1.0f - p) * (1.0f - p);
+              sgain = p * p;
+              break;
+            case 2: /* Cubic */
+              mgain = (1.0f - p) * (1.0f - p) * (1.0f - p);
+              sgain = p * p * p;
+              break;
+            case 3: /* Asymmetric */
+              mgain = cos(p * p * 3.14159f / 2.0f);
+              sgain = sin(p * 3.14159f / 2.0f);
+              break;
+            default:
+              mgain = cos(p * 3.14159f / 2.0f);
+              sgain = sin(p * 3.14159f / 2.0f);
+          }
+        }
 
         int nsamples = mtotal < stotal ? mtotal : stotal;
         if (nsamples > mixcap) { mixbuf = realloc(mixbuf, nsamples * sizeof(float)); mixcap = nsamples; }
@@ -648,6 +694,7 @@ static void* mixer_thread(void* arg) {
         mx->crossfade_frames_remaining--;
         if (mx->crossfade_frames_remaining <= 0) {
           mx->crossfade_active = 0;
+          mx->crossfade_reverse = 0;
           // Auto-promote slave to master
           if (mx->slave) {
             FfmpegAudioCtx* old = mx->master;
@@ -808,26 +855,33 @@ void ffmpeg_mixer_pause(MixerCtx* mx) {
 
 void ffmpeg_mixer_stop(MixerCtx* mx) {
   if (!mx) return;
-  mx->playing = 0;
+      mx->playing = 0;
   mx->paused = 1;
   if (mx->alsa_open) { snd_pcm_drop(mx->alsa_handle); snd_pcm_prepare(mx->alsa_handle); }
   mx->current_time = 0.0;
   mx->master_ended = 0;
   mx->crossfade_active = 0;
+  mx->crossfade_reverse = 0;
   mx->priming = 0;
 }
 
-void ffmpeg_mixer_start_crossfade(MixerCtx* mx, int duration_frames) {
+void ffmpeg_mixer_start_crossfade(MixerCtx* mx, int duration_frames, int reverse) {
   if (!mx || !mx->slave || !mx->slave_loaded) return;
   mx->crossfade_active = 1;
   mx->crossfade_total_frames = duration_frames;
   mx->crossfade_frames_remaining = duration_frames;
+  mx->crossfade_reverse = reverse ? 1 : 0;
   // Rewind slave to beginning
   if (mx->slave->fmt_ctx && mx->slave->audio_stream_idx >= 0) {
     avcodec_flush_buffers(mx->slave->codec_ctx);
     AVStream* st = mx->slave->fmt_ctx->streams[mx->slave->audio_stream_idx];
     av_seek_frame(mx->slave->fmt_ctx, mx->slave->audio_stream_idx, 0, AVSEEK_FLAG_BACKWARD);
   }
+}
+
+void ffmpeg_mixer_set_crossfade_curve(MixerCtx* mx, int curve_type) {
+  if (!mx) return;
+  mx->crossfade_curve = curve_type;
 }
 
 double ffmpeg_mixer_get_time(MixerCtx* mx) {

@@ -23,6 +23,7 @@ type
     dckYtListDownloads, dckYtFetchPlaylist, dckYtFetchPlaylistPoll,
     dckYtSetConfig, dckYtGetSearchHistory, dckYtClearSearchHistory,
     dckListEqPresets,
+    dckSetCrossfadeCurve,
     dckPing
 
   DaemonCmd* = object
@@ -55,6 +56,7 @@ type
     shuffleOrder*: seq[int]
     shuffleIndex*: int
     crossfadeDuration*: int
+    crossfadeCurve*: int
     crossfadePrepared*: bool
     crossfadeStarted*: bool
     crossfadeNextPath*: string
@@ -168,6 +170,8 @@ proc parseDaemonCommand(line: string): DaemonCmd =
       result.kind = dckSetEqBand; result.intArg = j{"band"}.getInt(0); result.floatArg = j{"gain_db"}.getFloat(0.0)
     of "set_eq_preset":
       result.kind = dckSetEqPreset; result.strArg = j{"name"}.getStr("")
+    of "set_crossfade_curve":
+      result.kind = dckSetCrossfadeCurve; result.intArg = j{"curve_type"}.getInt(1)
     of "get_library": result.kind = dckGetLibrary
     of "add_track":
       result.kind = dckAddTrack; result.strArg = $j["data"]
@@ -278,6 +282,7 @@ proc savePlaybackState(d: Daemon) =
     d.lib.setPlaybackState("repeat", $(d.repeatMode))
     d.lib.setPlaybackState("sleep_timer", $(d.sleepTimerRemaining))
     d.lib.setPlaybackState("crossfade_duration", $(d.crossfadeDuration))
+    d.lib.setPlaybackState("crossfade_curve", $(d.crossfadeCurve))
     d.lib.setPlaybackState("yt_cookie_source", d.ytCookieSource)
     d.lib.setPlaybackState("yt_js_runtime", d.ytJsRuntime)
     d.lib.setPlaybackState("yt_download_dir", d.ytDownloadDir)
@@ -465,6 +470,7 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
   of dckNext:
     d.autoAdvancing = false
     discard d.advanceToNextTrack(true)
+    d.sendQueueEvent()
     when defined(useMpris):
       emitMprisPlayerChanged(d)
   of dckPrev:
@@ -484,7 +490,7 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
       d.pushTrackHistory(prevPath)
       if d.crossfadeDuration > 0 and d.player.state == 1:
         d.player.prepareNext(prevPath)
-        d.player.startCrossfade(float(d.crossfadeDuration))
+        d.player.startCrossfade(float(d.crossfadeDuration), reverse = true)
         d.currentTrackPath = prevPath
         d.currentTrackTitle = ""
         d.currentTrackChannel = ""
@@ -551,6 +557,9 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     d.player.setEqBand(cmd.intArg, cmd.floatArg)
   of dckSetEqPreset:
     d.player.setEqPreset(cmd.strArg)
+  of dckSetCrossfadeCurve:
+    d.crossfadeCurve = cmd.intArg
+    d.player.setCrossfadeCurve(cmd.intArg)
   of dckGetLibrary:
     if d.lib != nil:
       let dbTracks = d.lib.loadTracks()
@@ -766,6 +775,7 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
                 discard startStreamUrlFetch(path, d.ytStreamResolveProcess, d.ytCookieSource, d.ytJsRuntime)
                 d.ytStreamResolving = true
         result["queue_length"] = %d.playbackQueue.len
+        d.sendQueueEvent()
       except: stderr.writeLine("[gtm] queueAdd error: " & getCurrentExceptionMsg())
   of dckQueueRemove:
     if cmd.intArg >= 0 and cmd.intArg < d.playbackQueue.len:
@@ -822,6 +832,7 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     result["shuffleOrder"] = soArr
     result["shuffleIndex"] = %d.shuffleIndex
     result["crossfadeDuration"] = %d.crossfadeDuration
+    result["crossfadeCurve"] = %d.crossfadeCurve
     result["crossfadePrepared"] = %d.crossfadePrepared
     result["crossfadeStarted"] = %d.crossfadeStarted
     result["crossfadeNextPath"] = %d.crossfadeNextPath
@@ -1120,6 +1131,7 @@ proc runDaemon*() =
     shuffleOrder: @[],
     shuffleIndex: 0,
     crossfadeDuration: 0,
+    crossfadeCurve: 1,
     crossfadePrepared: false,
     crossfadeStarted: false,
     crossfadeNextPath: "",
@@ -1173,6 +1185,9 @@ proc runDaemon*() =
     let cfStr = daemon.lib.getPlaybackState("crossfade_duration")
     if cfStr.len > 0:
       try: daemon.crossfadeDuration = parseInt(cfStr) except: discard
+    let cfcStr = daemon.lib.getPlaybackState("crossfade_curve")
+    if cfcStr.len > 0:
+      try: daemon.crossfadeCurve = parseInt(cfcStr) except: discard
     let ytCookie = daemon.lib.getPlaybackState("yt_cookie_source")
     if ytCookie.len > 0: daemon.ytCookieSource = ytCookie
     let ytJs = daemon.lib.getPlaybackState("yt_js_runtime")
@@ -1279,6 +1294,11 @@ proc runDaemon*() =
             let cfId = daemon.lib.findTrackByPath(daemon.crossfadeNextPath)
             if cfId > 0:
               daemon.lib.updatePlayCount(cfId)
+          # Consume queue now that crossfade completed
+          if not daemon.shuffleEnabled and daemon.playbackQueue.len > 0:
+            daemon.playbackQueue.delete(0)
+            if daemon.repeatMode == 1:
+              daemon.playbackQueue.add(daemon.crossfadeNextPath)
           daemon.crossfadePrepared = false
           daemon.crossfadeStarted = false
           daemon.crossfadeConsumed = false
@@ -1391,17 +1411,11 @@ proc runDaemon*() =
               daemon.crossfadeNextPath = loadNextPath
             if daemon.crossfadePrepared and not daemon.crossfadeStarted and timeRemaining <= float(daemon.crossfadeDuration):
               daemon.upNextSent = true
-              if not daemon.crossfadeConsumed:
+              if daemon.shuffleEnabled and not daemon.crossfadeConsumed:
                 daemon.crossfadeConsumed = true
-                if daemon.shuffleEnabled:
-                  daemon.shuffleIndex.inc
-                elif daemon.playbackQueue.len > 0 and daemon.playbackQueue[0] == daemon.crossfadeNextPath:
-                  daemon.playbackQueue.delete(0)
-                  if daemon.repeatMode == 1:
-                    daemon.playbackQueue.add(daemon.crossfadeNextPath)
+                daemon.shuffleIndex.inc
               daemon.player.startCrossfade(float(daemon.crossfadeDuration))
               daemon.crossfadeStarted = true
-              daemon.sendQueueEvent()
     # Background scan: process up to 10 files per iteration
     if daemon.scanningDir.len > 0 and daemon.scanningFiles.len > 0:
       let batchEnd = min(daemon.scanningIdx + 10, daemon.scanningFiles.len)

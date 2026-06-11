@@ -217,6 +217,10 @@ method setEqPreset*(cli: DaemonClient, name: string) =
   cli.ensureDaemon()
   discard sendDaemonCmd(cli, %*{"cmd": "set_eq_preset", "name": name})
 
+method setCrossfadeCurve*(cli: DaemonClient, curveType: int) =
+  cli.ensureDaemon()
+  discard sendDaemonCmd(cli, %*{"cmd": "set_crossfade_curve", "curve_type": curveType})
+
 method togglePause*(cli: DaemonClient) =
   cli.ensureDaemon()
   discard daemonSimpleCmd(cli, "toggle_pause")

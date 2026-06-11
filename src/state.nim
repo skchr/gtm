@@ -1,5 +1,5 @@
 import illwave as iw
-import os, tables, sets, osproc, audio, theme, visualizer, math, json
+import os, tables, sets, osproc, audio, theme, visualizer, math, json, options, colors
 
 var debugMode*: bool
 
@@ -12,6 +12,63 @@ type
     ceSearchResults, ceSearchLoading, ceSettings,
     cePlaylists, ceQueueCursor, ceFeedback, ceDownloadProgress,
     ceReconnecting
+
+  HighlightAttr* = object
+    fg*, bg*: Option[colors.Color]
+    bold*, italic*, underline*: bool
+
+  HighlightGroups* = object
+    Normal*: HighlightAttr
+    TabBar*: HighlightAttr
+    TabBarActive*: HighlightAttr
+    TabBarInactive*: HighlightAttr
+    NowPlayingTitle*: HighlightAttr
+    NowPlayingArtist*: HighlightAttr
+    NowPlayingProgress*: HighlightAttr
+    NowPlayingProgressFill*: HighlightAttr
+    NowPlayingStatus*: HighlightAttr
+    NowPlayingUpNext*: HighlightAttr
+    NowPlayingUpNextCursor*: HighlightAttr
+    NowPlayingUpNextHeader*: HighlightAttr
+    LibrarySidebar*: HighlightAttr
+    LibrarySidebarActive*: HighlightAttr
+    LibrarySidebarSelected*: HighlightAttr
+    LibraryContentHeader*: HighlightAttr
+    LibraryContentRow*: HighlightAttr
+    LibraryContentRowSelected*: HighlightAttr
+    SettingsSidebar*: HighlightAttr
+    SettingsContentRow*: HighlightAttr
+    SettingsContentRowSelected*: HighlightAttr
+    SettingsSectionHeader*: HighlightAttr
+    StatusBar*: HighlightAttr
+    StatusBarHints*: HighlightAttr
+    StatusBarModule*: HighlightAttr
+    FilterBar*: HighlightAttr
+    ProgressBar*: HighlightAttr
+    ProgressBarTime*: HighlightAttr
+    VisualizerBar*: HighlightAttr
+    OverlayBorder*: HighlightAttr
+    OverlayTitle*: HighlightAttr
+    OverlayInput*: HighlightAttr
+    OverlayRow*: HighlightAttr
+    OverlayRowSelected*: HighlightAttr
+    OverlayFooter*: HighlightAttr
+    Scrollbar*: HighlightAttr
+    ErrorMsg*: HighlightAttr
+    WarningMsg*: HighlightAttr
+    InfoMsg*: HighlightAttr
+    SuccessMsg*: HighlightAttr
+    VolumeCue*: HighlightAttr
+    FeedbackCue*: HighlightAttr
+    NowPlayingCue*: HighlightAttr
+    UpNextCue*: HighlightAttr
+    EqualizerBar*: HighlightAttr
+
+  FooterPresetName* = enum
+    fpnMinimal, fpnCompact, fpnFull, fpnInfo, fpnNavigator, fpnDebug, fpnMusic, fpnClock
+
+  CrossfadeCurveType* = enum
+    cctEqualPower, cctQuadratic, cctCubic, cctAsymmetric
 
   InputMode* = enum
     imNormal, imFilter, imLeaderMode
@@ -100,6 +157,7 @@ type
     okThemePicker
     okCommandPalette
     okQueueOverlay
+    okFuzzyFinder
 
   YtSubTab* = enum ystAll, ystPlaylists
 
@@ -166,6 +224,9 @@ type
 
   AppState* = object
     theme*: Theme
+    highlightGroups*: HighlightGroups
+    userHighlightOverrides*: JsonNode
+    footerPreset*: FooterPresetName
     player*: AudioBackend
     status*: PlaybackStatus
     timePos*: float
@@ -269,6 +330,7 @@ type
     ytProgressCurrent*: int
     ytProgressTotal*: int
     crossfadeDuration*: int
+    crossfadeCurve*: CrossfadeCurveType
     crossfadePrepared*: bool
     crossfadeStarted*: bool
     crossfading*: bool
@@ -303,8 +365,19 @@ type
     cursorVisible*: bool
 
 const
-  GTM_VERSION* {.strdefine.} = "0.3.0"
+  GTM_VERSION* {.strdefine.} = "0.3.4"
   GTM_BUILD_TIME* {.strdefine.} = ""
+
+  FooterPresets*: Table[FooterPresetName, set[FooterModule]] = {
+    fpnMinimal:   {fmPlayStatus},
+    fpnCompact:   {fmPlayStatus, fmTime, fmBackend},
+    fpnFull:      {fmPlayStatus, fmVolume, fmBackend, fmNextTrack, fmSelectCount, fmTime, fmDate, fmRepeatShuffle, fmSleepTimer},
+    fpnInfo:      {fmPlayStatus, fmNextTrack, fmVolume, fmBackend},
+    fpnNavigator: {fmPlayStatus, fmRepeatShuffle, fmSelectCount, fmTime, fmDate},
+    fpnDebug:     {fmPlayStatus, fmTime, fmDate, fmSleepTimer, fmBackend, fmVolume},
+    fpnMusic:     {fmPlayStatus, fmNextTrack, fmRepeatShuffle, fmVolume},
+    fpnClock:     {fmPlayStatus, fmTime, fmDate}
+  }.toTable()
 
 
 proc stateDir*(): string =

@@ -1,7 +1,7 @@
 import illwave as iw
 import nimwave as nw
 from unicode import runeLen, toRunes, Rune
-import colors, sequtils, math, strutils, tables, sets, os, times, posix, osproc
+import colors, sequtils, math, strutils, tables, sets, os, times, posix, osproc, options
 import state, theme, audio, visualizer, library, icons, commands
 
 type State* = AppState
@@ -9,6 +9,59 @@ include nimwave/prelude
 
 var gTermCellW*: int = 8
 var gTermCellH*: int = 16
+
+proc initHighlightGroups*(theme: Theme): HighlightGroups =
+  result.Normal = HighlightAttr(fg: some(theme.text), bg: some(theme.base))
+  result.TabBar = HighlightAttr(fg: some(theme.subtext0), bg: some(theme.mantle))
+  result.TabBarActive = HighlightAttr(fg: some(theme.mauve), bg: some(theme.surface2))
+  result.TabBarInactive = HighlightAttr(fg: some(theme.subtext0), bg: some(theme.mantle))
+  result.NowPlayingTitle = HighlightAttr(fg: some(theme.text))
+  result.NowPlayingArtist = HighlightAttr(fg: some(theme.subtext0))
+  result.NowPlayingProgress = HighlightAttr(fg: some(theme.mauve))
+  result.NowPlayingProgressFill = HighlightAttr(fg: some(theme.mauve), bg: some(theme.surface2))
+  result.NowPlayingStatus = HighlightAttr(fg: some(theme.green))
+  result.NowPlayingUpNext = HighlightAttr(fg: some(theme.text))
+  result.NowPlayingUpNextCursor = HighlightAttr(fg: some(theme.yellow), bg: some(theme.surface2))
+  result.NowPlayingUpNextHeader = HighlightAttr(fg: some(theme.sky))
+  result.LibrarySidebar = HighlightAttr(fg: some(theme.subtext0), bg: some(theme.mantle))
+  result.LibrarySidebarActive = HighlightAttr(fg: some(theme.blue))
+  result.LibrarySidebarSelected = HighlightAttr(fg: some(theme.text), bg: some(theme.surface2))
+  result.LibraryContentHeader = HighlightAttr(fg: some(theme.subtext0), bg: some(theme.mantle))
+  result.LibraryContentRow = HighlightAttr(fg: some(theme.text))
+  result.LibraryContentRowSelected = HighlightAttr(fg: some(theme.blue), bg: some(theme.surface2))
+  result.SettingsSidebar = HighlightAttr(fg: some(theme.subtext0), bg: some(theme.mantle))
+  result.SettingsContentRow = HighlightAttr(fg: some(theme.subtext0))
+  result.SettingsContentRowSelected = HighlightAttr(fg: some(theme.text), bg: some(theme.surface0))
+  result.SettingsSectionHeader = HighlightAttr(fg: some(theme.mauve), bg: some(theme.crust))
+  result.StatusBar = HighlightAttr(fg: some(theme.subtext0), bg: some(theme.mantle))
+  result.StatusBarHints = HighlightAttr(fg: some(theme.subtext0))
+  result.StatusBarModule = HighlightAttr(fg: some(theme.subtext0))
+  result.FilterBar = HighlightAttr(fg: some(theme.text), bg: some(theme.surface1))
+  result.ProgressBar = HighlightAttr(fg: some(theme.mauve), bg: some(theme.crust))
+  result.ProgressBarTime = HighlightAttr(fg: some(theme.sky))
+  result.VisualizerBar = HighlightAttr(fg: some(theme.mauve))
+  result.OverlayBorder = HighlightAttr(fg: some(theme.mauve))
+  result.OverlayTitle = HighlightAttr(fg: some(theme.mauve))
+  result.OverlayInput = HighlightAttr(fg: some(theme.text), bg: some(theme.surface1))
+  result.OverlayRow = HighlightAttr(fg: some(theme.text))
+  result.OverlayRowSelected = HighlightAttr(fg: some(theme.blue), bg: some(theme.surface2))
+  result.OverlayFooter = HighlightAttr(fg: some(theme.subtext0))
+  result.Scrollbar = HighlightAttr(fg: some(theme.surface2))
+  result.ErrorMsg = HighlightAttr(fg: some(theme.red))
+  result.WarningMsg = HighlightAttr(fg: some(theme.peach))
+  result.InfoMsg = HighlightAttr(fg: some(theme.blue))
+  result.SuccessMsg = HighlightAttr(fg: some(theme.green))
+  result.VolumeCue = HighlightAttr(fg: some(theme.green), bg: some(theme.surface0))
+  result.FeedbackCue = HighlightAttr(fg: some(theme.blue), bg: some(theme.surface0))
+  result.NowPlayingCue = HighlightAttr(fg: some(theme.blue), bg: some(theme.surface0))
+  result.UpNextCue = HighlightAttr(fg: some(theme.peach), bg: some(theme.surface0))
+  result.EqualizerBar = HighlightAttr(fg: some(theme.blue))
+
+template hl*(state: AppState, group: untyped): colors.Color =
+  state.highlightGroups.`group`.fg.get(state.theme.text)
+
+template hlBg*(state: AppState, group: untyped): colors.Color =
+  state.highlightGroups.`group`.bg.get(state.theme.base)
 
 proc wordWrap*(text: string, maxWidth: int): seq[string] =
   if maxWidth <= 0 or text.len == 0: return @[text]
@@ -154,7 +207,7 @@ proc hsvToRgb(h, s, v: float): (int, int, int) =
 var gCursorX, gCursorY: int = -1
 
 proc showInputCursor*(state: var AppState, w, h: int) =
-  let shouldShow = state.overlay.kind in {okYtSearch, okCommandPalette, okThemePicker, okQueuePicker, okPlaylistSearch, okQueueOverlay} or
+  let shouldShow = state.overlay.kind in {okYtSearch, okCommandPalette, okThemePicker, okQueuePicker, okPlaylistSearch, okQueueOverlay, okFuzzyFinder} or
     (state.overlay.kind == okNone and (state.playlistInputActive or state.mode == imFilter or state.mode == imLeaderMode))
   if shouldShow == state.cursorVisible: return
   state.cursorVisible = shouldShow
@@ -200,6 +253,8 @@ method render*(node: NowPlayingView, ctx: var nw.Context[AppState]) =
   fillBg(ctx.tb, 0, 0, w - 1, h - 1, theme.base)
   let track = if state.ytStreamTitle.len > 0:
     Track(title: state.ytStreamTitle, artist: state.ytStreamChannel, duration: 0.0, path: state.currentPlayingPath)
+  elif state.currentPlayingPath.len > 0:
+    state.getPlayingTrack()
   elif state.libraryTracks.len > 0 and
     state.selectIndex >= 0 and state.selectIndex < state.libraryTracks.len:
     state.libraryTracks[state.selectIndex]
@@ -276,7 +331,7 @@ method render*(node: NowPlayingView, ctx: var nw.Context[AppState]) =
         let isCursor = qIdx == state.queueCursor
         let t = state.libraryTracks[tIdx]
         if isCursor:
-          fillBg(ctx.tb, 1, line, w - 1, line, theme.surface2)
+          fillBg(ctx.tb, 0, line, w - 1, line, theme.surface2)
         let prefix = if isNowPlaying: "\u25B6 " else: "  "
         writeStr(ctx.tb, 3, line, prefix & t.displayName(), if isCursor: theme.yellow elif isNowPlaying: theme.blue else: theme.text)
         line.inc
@@ -337,8 +392,7 @@ method render*(node: LibrarySidebar, ctx: var nw.Context[AppState]) =
   for i, entry in entries:
     if line >= h: break
     let actualCount = if entry.scope == fsFavourites: favCount else: entry.count
-    let isActive = state.filterScope == entry.scope or
-      (state.filterScope == fsTracks and entry.scope == fsAll)
+    let isActive = state.filterScope == entry.scope
     let isSelected = state.librarySidebarSelect == i and isFocused
     if isSelected:
       fillBg(ctx.tb, 0, line, w - 1, line, theme.surface2)
@@ -390,7 +444,6 @@ method render*(node: LibraryContentView, ctx: var nw.Context[AppState]) =
   block:
     let pt = state.getPlayingTrack()
     if pt.path.len > 0 and state.status != psStopped:
-      fillBg(ctx.tb, 0, line, w - 1, line, theme.surface0)
       let statusIcon = if state.status == psPlaying: "\u25B6 " else: "\u23F8 "
       let label = statusIcon & pt.displayName()
       writeStr(ctx.tb, 1, line, label, theme.green)
@@ -464,7 +517,7 @@ method render*(node: LibraryContentView, ctx: var nw.Context[AppState]) =
     let item = if realIdx >= 0 and realIdx < items.len: items[realIdx] else: LibraryItem()
     if isSelected:
       fillBg(ctx.tb, 0, line, w - 1, line, theme.surface2)
-    elif realIdx in state.selectedIndices:
+    elif state.selectMode and realIdx in state.selectedIndices:
       fillBg(ctx.tb, 0, line, w - 1, line, theme.surface0)
     if isTrackView:
       if item.trackIdx >= 0 and item.trackIdx < state.libraryTracks.len:
@@ -593,6 +646,12 @@ method render*(node: SettingsView, ctx: var nw.Context[AppState]) =
     sliderWidget(state.crossfadeDuration, 10, 14)
     writeStr(ctx.tb, contentX + contentW - 7, line, "s", theme.subtext0)
     line.inc
+    settingsRow("Crossfade Curve")
+    let curveNames = ["EqualPower", "Quadratic", "Cubic", "Asymmetric"]
+    let curveIdx = state.crossfadeCurve.ord
+    let curveLabel = if curveIdx >= 0 and curveIdx < curveNames.len: curveNames[curveIdx] else: "Quadratic"
+    writeStr(ctx.tb, contentX + contentW - curveLabel.runeLen - 11, line, "[ " & curveLabel & " ▸]", theme.subtext0)
+    line.inc
     settingsRow("Daemon")
     if state.daemonConnected:
       writeStr(ctx.tb, contentX + contentW - 10, line, "[●] Connected ", theme.green)
@@ -631,6 +690,11 @@ method render*(node: SettingsView, ctx: var nw.Context[AppState]) =
     line.inc
     settingsRow("Refresh Theme")
     toggleWidget(state.config.refreshTheme)
+    line.inc
+    settingsRow("Footer Preset")
+    let fpLabel = $state.footerPreset
+    let fpDisplay = if fpLabel.startsWith("fpn"): fpLabel[3..^1] else: fpLabel
+    writeStr(ctx.tb, contentX + contentW - fpDisplay.runeLen - 11, line, "[ " & fpDisplay & " ▸]", theme.subtext0)
     line.inc
   of scSystem:
     sectionHeader("═══ System ═══")
@@ -748,23 +812,24 @@ method render*(node: StatusBarComp, ctx: var nw.Context[AppState]) =
 
   let ic = currentIcons()
 
+  let activeModules = FooterPresets.getOrDefault(state.footerPreset, state.footerModules)
   # Render modules from right to left (Date/SleepTimer hide first, PlayStatus persists longest)
-  if fmDate in state.footerModules:
+  if fmDate in activeModules:
     addMod(" " & now().format("ddd dd, MMMM"), theme.subtext0)
-  if fmSleepTimer in state.footerModules and state.sleepTimerRemaining > 0:
+  if fmSleepTimer in activeModules and state.sleepTimerRemaining > 0:
     let s = " \u23F0 " & $(state.sleepTimerRemaining) & "m"
     addMod(s, theme.peach)
-  if fmTime in state.footerModules:
+  if fmTime in activeModules:
     addMod(" " & now().format("hh:mm tt"), theme.subtext0)
-  if fmRepeatShuffle in state.footerModules:
+  if fmRepeatShuffle in activeModules:
     if state.repeatMode > 0:
       let rptIc = if state.repeatMode == 2: ic.repeatOne else: ic.repeatAll
       addMod(rptIc, if state.repeatMode == 1: theme.green else: theme.blue)
     if state.shuffleEnabled:
       addMod(ic.shuffle, theme.peach)
-  if fmSelectCount in state.footerModules and state.selectedIndices.len > 0:
+  if fmSelectCount in activeModules and state.selectedIndices.len > 0:
     addMod(" [" & $state.selectedIndices.len & "] ", theme.peach)
-  if fmNextTrack in state.footerModules and state.playbackQueue.len > 0:
+  if fmNextTrack in activeModules and state.playbackQueue.len > 0:
     let qIdx = state.playbackQueue[0]
     if qIdx >= 0 and qIdx < state.libraryTracks.len:
       let nextTitle = state.libraryTracks[qIdx].title
@@ -772,7 +837,7 @@ method render*(node: StatusBarComp, ctx: var nw.Context[AppState]) =
         let maxLen = (rightX - 15) div 2
         let truncd = if nextTitle.runeLen > maxLen: nextTitle.substr(0, maxLen - 2) & ".." else: nextTitle
         addMod(" \u25B6 " & truncd, theme.subtext0)
-  if fmBackend in state.footerModules:
+  if fmBackend in activeModules:
     let backend = case state.player.backendType
       of abtDaemon: "SOCK"
       of abtMixer: "MIX"
@@ -780,9 +845,9 @@ method render*(node: StatusBarComp, ctx: var nw.Context[AppState]) =
       of abtProcess: "PROC"
       else: "?"
     addMod(" " & backend, theme.subtext0)
-  if fmVolume in state.footerModules:
+  if fmVolume in activeModules:
     addMod(" " & $state.volume & "%", theme.subtext0)
-  if fmPlayStatus in state.footerModules:
+  if fmPlayStatus in activeModules:
     let stIcon = case state.status
       of psPlaying: "\u25B6"
       of psPaused: "\u23F8"
@@ -854,6 +919,9 @@ method render*(node: GenericOverlay, ctx: var nw.Context[AppState]) =
   of okQueueOverlay:
     title = "Current Queue"
     queryLine = false
+  of okFuzzyFinder:
+    title = "Fuzzy Finder"
+    queryLine = true
   else: return
   let boxX = (w - boxW) div 2
   let boxY = (h - boxH) div 2
@@ -1026,6 +1094,27 @@ method render*(node: GenericOverlay, ctx: var nw.Context[AppState]) =
       writeStrBg(ctx.tb, boxX + 1, boxY + boxH - 1, "> " & ov.query, theme.text, theme.surface1)
     else:
       writeStr(ctx.tb, boxX + 1, boxY + boxH - 1, "> Type to search...", theme.subtext0)
+  #--- Fuzzy Finder ---
+  elif ov.kind == okFuzzyFinder:
+    let displayResults = min(20, ov.results.len)
+    for i in 0..<displayResults:
+      let idx = ov.results[i]
+      let lineY = curY + i
+      if lineY >= boxY + boxH - 1: break
+      let isSelected = (i == ov.cursor)
+      if isSelected:
+        fillBg(ctx.tb, boxX + 1, lineY, boxX + boxW - 2, lineY, theme.surface2)
+      let labelRaw = if i < ov.strResults.len and ov.strResults[i].len > 0: ov.strResults[i]
+                     else: "Track #" & $idx
+      let maxW = max(1, boxW - 4)
+      let label = if labelRaw.runeLen > maxW: labelRaw[0..<min(labelRaw.len, maxW - 2)] & "\u2026"
+                  else: labelRaw
+      writeStr(ctx.tb, boxX + 2, lineY, label, if isSelected: theme.blue else: theme.text)
+    if ov.results.len == 0 and ov.query.len > 0:
+      writeStr(ctx.tb, boxX + 2, curY, "No matches", theme.subtext0)
+    elif ov.results.len == 0:
+      writeStr(ctx.tb, boxX + 2, curY, "Type to search for tracks...", theme.subtext0)
+    writeStr(ctx.tb, boxX + 1, boxY + boxH - 1, "\u2191/\u2193:Nav  Enter:Play  Esc:Cancel", theme.subtext0)
 
 proc cmdKey(state: AppState, id: string): string =
   let idx = findCommandIdx(state, id)
@@ -1543,6 +1632,7 @@ proc initApp*(state: var AppState) =
   state.ytProgressCurrent = 0
   state.ytProgressTotal = 0
   state.crossfadeDuration = 5
+  state.crossfadeCurve = cctQuadratic
   state.earlyPreloaded = false
   state.spinnerFrame = 0
   state.reconnecting = false
