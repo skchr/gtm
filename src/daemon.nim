@@ -15,7 +15,7 @@ type
     dckPrepareNext, dckCrossfade,
     dckSetEqBand, dckSetEqPreset,
     dckGetLibrary, dckAddTrack, dckUpdateTrackPath,
-    dckQueueAdd, dckQueueRemove, dckQueueClear, dckQueueList, dckQueueSetCursor,
+    dckQueueAdd, dckQueueRemove, dckQueueRemovePath, dckQueueClear, dckQueueList, dckQueueSetCursor,
     dckAddFavourite, dckRemoveFavourite, dckGetFavourites, dckGetFullState,
     dckYtSearch, dckYtSearchPoll, dckYtSearchCancel,
     dckYtResolveStream, dckYtResolveStreamPoll,
@@ -42,6 +42,7 @@ type
     currentTrackPath: string
     currentTrackTitle: string
     currentTrackChannel: string
+    trackHistory: seq[string]
     idleFrames: int
     idleTimeout: int
     shuffleEnabled*: bool
@@ -161,6 +162,8 @@ proc parseDaemonCommand(line: string): DaemonCmd =
       result.kind = dckQueueAdd; result.strArg = $j["data"]
     of "queue_remove":
       result.kind = dckQueueRemove; result.intArg = j{"index"}.getInt(0)
+    of "queue_remove_path":
+      result.kind = dckQueueRemovePath; result.strArg = j{"path"}.getStr("")
     of "queue_clear":
       result.kind = dckQueueClear
     of "queue_list":
@@ -223,8 +226,20 @@ proc serializeEvents(events: seq[AudioEvent]): JsonNode =
     of aekPlaybackPaused: obj["state"] = %"paused"
     of aekPlaybackStopped: obj["state"] = %"stopped"
     of aekTrackEnded: obj["reason"] = %"eof"
+    of aekMetadataChanged:
+      if ev.strVal.len > 0: obj["event"] = %ev.strVal
     else: discard
     result.add(obj)
+
+proc sendQueueEvent(d: Daemon) =
+  if d.client == nil: return
+  var qArr = newJArray()
+  for p in d.playbackQueue: qArr.add(%p)
+  var soArr = newJArray()
+  for i in d.shuffleOrder: soArr.add(%i)
+  let ev = %*{"events": [%*{"kind": %aekCustomEvent.int, "event": "queue_changed",
+    "queue": qArr, "shuffleOrder": soArr, "shuffleIndex": %d.shuffleIndex}]}
+  discard trySend(d.client, $ev & "\n")
 
 proc savePlaybackState(d: Daemon) =
   if d.lib != nil:
@@ -278,10 +293,17 @@ proc nextTrackFromQueue(d: Daemon): string =
     if d.repeatMode == 1 and result.len > 0:
       d.playbackQueue.add(result)
 
+proc pushTrackHistory(d: Daemon, newPath: string) =
+  if d.currentTrackPath.len > 0 and d.currentTrackPath != newPath:
+    d.trackHistory.add(d.currentTrackPath)
+    if d.trackHistory.len > 50:
+      d.trackHistory.delete(0)
+
 proc advanceToNextTrack(d: Daemon, forward: bool = true): bool =
   if forward:
     let nextPath = d.nextTrackFromQueue()
     if nextPath.len > 0:
+      d.pushTrackHistory(nextPath)
       d.player.stop()
       d.player.loadFile(nextPath)
       d.currentTrackPath = nextPath
@@ -300,6 +322,11 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
   case cmd.kind
   of dckLoadFile:
     if cmd.strArg.len > 0:
+      # Push current track to history before switching
+      if d.currentTrackPath.len > 0 and d.currentTrackPath != cmd.strArg:
+        d.trackHistory.add(d.currentTrackPath)
+        if d.trackHistory.len > 50:
+          d.trackHistory.delete(0)
       d.player.stop()
       d.player.loadFile(cmd.strArg)
       d.currentTrackPath = cmd.strArg
@@ -307,6 +334,8 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
       d.currentTrackChannel = cmd.strArg3
       d.player.play()
       d.idleFrames = 0
+      # Poll events once so state reflects actual playback status
+      discard d.player.pollEvents()
       # Track play count for library tracks, or add YouTube streams to library
       var trackId = d.lib.findTrackByPath(d.currentTrackPath)
       if trackId == 0 and d.currentTrackTitle.len > 0:
@@ -335,8 +364,25 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
   of dckNext:
     discard d.advanceToNextTrack(true)
   of dckPrev:
-    d.player.stop()
-    d.idleFrames = 0
+    if d.trackHistory.len > 0:
+      let prevPath = d.trackHistory.pop()
+      d.pushTrackHistory(prevPath)
+      d.player.stop()
+      d.player.loadFile(prevPath)
+      d.currentTrackPath = prevPath
+      d.currentTrackTitle = ""
+      d.currentTrackChannel = ""
+      d.player.play()
+      d.idleFrames = 0
+      # Update play count for library tracks
+      if d.lib != nil:
+        var trackId = d.lib.findTrackByPath(prevPath)
+        if trackId > 0:
+          d.lib.updatePlayCount(trackId)
+          result["track_id"] = %trackId
+    else:
+      d.player.stop()
+      d.idleFrames = 0
   of dckSetVolume:
     d.player.setVolume(cmd.intArg)
   of dckGetVolume:
@@ -553,6 +599,11 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
   of dckQueueRemove:
     if cmd.intArg >= 0 and cmd.intArg < d.playbackQueue.len:
       d.playbackQueue.delete(cmd.intArg)
+  of dckQueueRemovePath:
+    if cmd.strArg.len > 0:
+      let idx = d.playbackQueue.find(cmd.strArg)
+      if idx >= 0:
+        d.playbackQueue.delete(idx)
   of dckQueueClear:
     d.playbackQueue = @[]
     d.shuffleOrder = @[]
@@ -792,6 +843,23 @@ proc trySend(client: Socket, data: string): bool =
     return false
   return true
 
+proc cleanupClientState(d: Daemon) =
+  if d.ytSearchActive:
+    try: d.ytSearchProcess.terminate() except: discard
+    close(d.ytSearchProcess)
+  if d.ytStreamActive:
+    try: d.ytStreamProcess.terminate() except: discard
+    close(d.ytStreamProcess)
+  d.ytSearchActive = false
+  d.ytSearchBuf = ""
+  d.ytSearchResults = @[]
+  d.ytStreamActive = false
+  d.ytStreamBuf = ""
+  d.ytStreamResultUrl = ""
+  d.ytStreamPendingTitle = ""
+  d.ytStreamPendingChannel = ""
+  d.ytStreamPendingDuration = ""
+
 proc runDaemon*() =
   let debugMode = "--debug" in os.commandLineParams()
   let dir = stateDir()
@@ -819,7 +887,7 @@ proc runDaemon*() =
   if player == nil or not player.working:
     stderr.writeLine("[gtm] FFmpeg unavailable, trying process backend (mpv/ffplay)")
     player = newProcessBackend()
-  let defaultDownloadDir = dataDir() & "/downloads"
+  let defaultDownloadDir = dataDir() & "/audio"
   var daemon = Daemon(
     player: player,
     viz: newVisualizer(),
@@ -831,6 +899,7 @@ proc runDaemon*() =
     sleepTimerFrames: 0,
     persistFrames: 0,
     playbackQueue: @[],
+    trackHistory: @[],
     shuffleOrder: @[],
     shuffleIndex: 0,
     crossfadeDuration: 0,
@@ -902,6 +971,13 @@ proc runDaemon*() =
         for p in qj:
           daemon.playbackQueue.add(p.getStr(""))
       except: discard
+    # Auto-scan download directory for files not yet in library
+    if dirExists(daemon.ytDownloadDir):
+      let existing = scanDirectoryRecursive(daemon.ytDownloadDir)
+      for p in existing:
+        if daemon.lib.findTrackByPath(p) == 0:
+          let (_, name, _) = p.splitFile()
+          discard daemon.lib.addTrack(p, name, "", "", 0.0, 0, 0, "")
   removeFile(sockPath())
   let srvFd = posix.socket(posix.AF_UNIX, posix.SOCK_STREAM, 0)
   daemon.server = newSocket(srvFd, Domain.AF_UNIX, SockType.SOCK_STREAM)
@@ -921,9 +997,11 @@ proc runDaemon*() =
         if cliFd.int >= 0:
           if daemon.client != nil:
             daemon.client.close()
+          daemon.cleanupClientState()
           daemon.client = newSocket(cliFd, Domain.AF_UNIX, SockType.SOCK_STREAM)
           setBlocking(daemon.client.getFd, false)
           buf = ""
+          daemon.idleFrames = 0
       if daemon.client != nil and daemon.client.getFd in readFds:
         var tmp: array[4096, char]
         let n = posix.recv(daemon.client.getFd, addr tmp[0], tmp.len.cint, 0)
@@ -931,10 +1009,12 @@ proc runDaemon*() =
           let err = osLastError()
           if err.int32 != 11 and err.int32 != 10035:
             daemon.client.close()
+            daemon.cleanupClientState()
             daemon.client = nil
             buf = ""
         elif n == 0:
           daemon.client.close()
+          daemon.cleanupClientState()
           daemon.client = nil
           buf = ""
         else:
@@ -955,6 +1035,7 @@ proc runDaemon*() =
               let respStr = $resp & "\n"
               if debugMode: stderr.writeLine("[gtm] daemon resp: " & respStr.strip())
               if not trySend(daemon.client, respStr):
+                daemon.cleanupClientState()
                 daemon.client = nil
                 buf = ""
               if not daemon.running: break
@@ -962,6 +1043,7 @@ proc runDaemon*() =
     if daemonEvents.len > 0 and daemon.client != nil:
       let evJson = %*{"events": serializeEvents(daemonEvents)}
       if not trySend(daemon.client, $evJson & "\n"):
+        daemon.cleanupClientState()
         daemon.client = nil
     # Auto-advance on track ended
     for ev in daemonEvents:
@@ -971,8 +1053,10 @@ proc runDaemon*() =
           daemon.crossfadePrepared = false
           daemon.crossfadeStarted = false
           daemon.crossfadeNextPath = ""
+          daemon.sendQueueEvent()
         elif daemon.playbackQueue.len > 0:
           discard daemon.advanceToNextTrack(true)
+          daemon.sendQueueEvent()
 
     # Crossfade scheduling (uses nextTrackFromQueue to get next path without consuming it)
     if daemon.player.state == 1 and daemon.crossfadeDuration > 0:
@@ -1005,6 +1089,7 @@ proc runDaemon*() =
                   daemon.playbackQueue.add(daemon.crossfadeNextPath)
               daemon.player.startCrossfade(float(daemon.crossfadeDuration))
               daemon.crossfadeStarted = true
+              daemon.sendQueueEvent()
 
     # yt-dlp download task management
     let dlTimeout = 600.0
@@ -1031,9 +1116,15 @@ proc runDaemon*() =
             if daemon.lib != nil:
               daemon.lib.addDownload(dlUrl, path, daemon.ytDownloadTasks[i].title, daemon.ytDownloadTasks[i].channel)
               daemon.lib.updateTrackPath(dlUrl, path, daemon.ytDownloadTasks[i].title)
+              # Add as a new library track if not already present
+              let existingId = daemon.lib.findTrackByPath(path)
+              if existingId == 0:
+                discard daemon.lib.addTrack(path, daemon.ytDownloadTasks[i].title,
+                  daemon.ytDownloadTasks[i].channel, "", 0.0, 0, 0, "")
             if daemon.client != nil:
-              let ev = %*{"events": [%*{"kind": %10, "event": "yt_download_done", "url": %dlUrl, "path": %path, "title": %daemon.ytDownloadTasks[i].title}]}
+              let ev = %*{"events": [%*{"kind": %aekCustomEvent.int, "event": "yt_download_done", "url": %dlUrl, "path": %path, "title": %daemon.ytDownloadTasks[i].title}]}
               if not trySend(daemon.client, $ev & "\n"):
+                daemon.cleanupClientState()
                 daemon.client = nil
       else:
         dlDone.add(i)
@@ -1054,7 +1145,7 @@ proc runDaemon*() =
         daemon.scanningFiles = @[]
         daemon.scanningIdx = 0
         if daemon.client != nil:
-          let ev = %*{"events": [%*{"kind": %10, "event": "scan_done"}]}
+          let ev = %*{"events": [%*{"kind": %aekCustomEvent.int, "event": "scan_done"}]}
           discard trySend(daemon.client, $ev & "\n")
 
     daemon.viz.readPcm()

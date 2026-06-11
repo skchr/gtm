@@ -215,13 +215,31 @@ proc playSelected(state: var AppState) =
     state.status = psPlaying
     state.currentPlayingPath = track.path
     state.currentPlayingId = track.id
+    if state.player of DaemonClient:
+      let tid = DaemonClient(state.player).lastTrackId
+      if tid > 0:
+        state.currentPlayingId = tid
     state.markDirtyBatch(cePlayState, ceTrack)
     if state.duration == 0.0 and track.duration > 0:
       state.duration = track.duration
 
 proc nextTrack(state: var AppState) =
+  # Sync TUI queue to daemon before advancing, so daemon knows what's queued
+  if state.player of DaemonClient:
+    let cli = DaemonClient(state.player)
+    if cli.connected:
+      let resp = cli.queueList()
+      var daemonQueueEmpty = true
+      if resp.hasKey("queue") and resp["queue"].len > 0:
+        daemonQueueEmpty = false
+      if daemonQueueEmpty and state.playbackQueue.len > 0:
+        var paths: seq[string] = @[]
+        for idx in state.playbackQueue:
+          if idx >= 0 and idx < state.libraryTracks.len:
+            paths.add(state.libraryTracks[idx].path)
+        if paths.len > 0:
+          discard cli.queueAdd(paths)
   state.player.stop()
-  state.player.loadFile("")
   discard daemonSimpleCmd(DaemonClient(state.player), "next")
   state.markDirty(cePlayState)
 
@@ -408,9 +426,12 @@ proc addToPlaylist(state: var AppState) =
     if realIdx >= 0 and realIdx < state.libraryTracks.len:
       let track = state.libraryTracks[realIdx]
       if track.id notin state.libraryPlaylists[idx].trackIds:
-        state.libraryPlaylists[idx].trackIds.add(track.id)
         if state.player of DaemonClient:
-          discard DaemonClient(state.player).addToPlaylist(state.libraryPlaylists[idx].id, track.id, state.libraryPlaylists[idx].trackIds.len - 1)
+          let resp = DaemonClient(state.player).addToPlaylist(state.libraryPlaylists[idx].id, track.id, state.libraryPlaylists[idx].trackIds.len - 1)
+          if resp{"ok"}.getBool(false):
+            state.libraryPlaylists[idx].trackIds.add(track.id)
+        else:
+          state.libraryPlaylists[idx].trackIds.add(track.id)
   state.selectedIndices = initHashSet[int]()
   state.rebuildItems()
 
@@ -434,10 +455,14 @@ proc addTracksToPl(state: var AppState, playlistId: int64) =
     if realIdx >= 0 and realIdx < state.libraryTracks.len:
       let track = state.libraryTracks[realIdx]
       if track.id notin state.libraryPlaylists[plIdx].trackIds:
-        state.libraryPlaylists[plIdx].trackIds.add(track.id)
         if state.player of DaemonClient:
-          discard DaemonClient(state.player).addToPlaylist(playlistId, track.id, state.libraryPlaylists[plIdx].trackIds.len - 1)
-        added += 1
+          let resp = DaemonClient(state.player).addToPlaylist(playlistId, track.id, state.libraryPlaylists[plIdx].trackIds.len - 1)
+          if resp{"ok"}.getBool(false):
+            state.libraryPlaylists[plIdx].trackIds.add(track.id)
+            added += 1
+        else:
+          state.libraryPlaylists[plIdx].trackIds.add(track.id)
+          added += 1
   state.selectedIndices = initHashSet[int]()
   state.addingToPlaylistId = -1
   state.addingToPlaylistName = ""
@@ -608,9 +633,13 @@ proc initCommands(state: var AppState) =
         if tid > 0:
           if tid in s.favouriteIds:
             s.favouriteIds.excl(tid)
+            if s.player of DaemonClient:
+              discard DaemonClient(s.player).removeFavourite(tid)
             s.showNotification("Removed from favourites", nkInfo)
           else:
             s.favouriteIds.incl(tid)
+            if s.player of DaemonClient:
+              discard DaemonClient(s.player).addFavourite(tid)
             s.showNotification("Added to favourites", nkSuccess)
           s.markDirty(ceTrack))
   state.registerCommand("import_m3u", "Import M3U",
@@ -1099,9 +1128,14 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         if state.overlay.cursor > 0:
           state.overlay.cursor.dec
       of iw.Key.Enter:
+        var paths: seq[string] = @[]
         for idx in state.overlay.selected:
           if idx >= 0 and idx < state.libraryTracks.len:
             state.playbackQueue.add(idx)
+            paths.add(state.libraryTracks[idx].path)
+        # Sync queue to daemon for auto-advance/crossfade
+        if paths.len > 0 and state.player of DaemonClient:
+          discard DaemonClient(state.player).queueAdd(paths)
         state.markDirty(ceQueue)
         if state.status == psStopped and state.playbackQueue.len > 0:
           state.overlay.clear()
@@ -1159,6 +1193,9 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           state.overlay.clear()
           if tIdx >= 0 and tIdx < state.libraryTracks.len:
             let track = state.libraryTracks[tIdx]
+            # Remove from daemon queue before playing
+            if state.player of DaemonClient:
+              discard DaemonClient(state.player).queueRemovePath(track.path)
             state.playbackQueue.delete(qIdx)
             if state.queueCursor >= qIdx and state.queueCursor > 0:
               state.queueCursor.dec
@@ -1176,6 +1213,9 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           let qIdx = state.overlay.cursor
           let t = state.libraryTracks[state.playbackQueue[qIdx]]
           state.showNotification("Removed '" & t.displayName() & "' from queue")
+          # Remove from daemon queue too
+          if state.player of DaemonClient:
+            discard DaemonClient(state.player).queueRemovePath(t.path)
           state.playbackQueue.delete(qIdx)
           state.queueCursor = min(state.queueCursor, state.playbackQueue.len - 1)
           if state.playbackQueue.len == 0:
@@ -1888,6 +1928,21 @@ proc processEvents(state: var AppState) =
       state.duration = 0.0
       state.timePos = 0.0
       state.markDirtyBatch(cePlayState, cePosition)
+    of aekMetadataChanged:
+      if ev.strVal == "crossfade_started":
+        state.crossfadeStarted = true
+        state.crossfading = true
+      elif ev.strVal == "crossfade_ended":
+        state.crossfadeStarted = false
+        state.crossfading = false
+        state.crossfadePrepared = false
+    of aekCustomEvent:
+      if ev.strVal == "queue_changed" and state.player of DaemonClient:
+        let cli = DaemonClient(state.player)
+        let fullState = cli.getFullState()
+        if fullState.hasKey("shuffleIndex"):
+          state.shuffleIndex = fullState["shuffleIndex"].getInt(0)
+          state.markDirty(ceQueue)
     else: discard
   if state.player.timePos != state.timePos and state.status == psPlaying:
     state.timePos = state.player.timePos
@@ -2018,6 +2073,12 @@ proc runTui(args: seq[string]) =
                   if t.path.startsWith(dlDir):
                     ctx.data.ytDownloaded[t.path] = t.path
                 ctx.data.downloadCount = ctx.data.ytDownloaded.len
+              # Re-sync favourites from daemon
+              let favResp = cli.getFavouritesFromDaemon()
+              if favResp.hasKey("favourites"):
+                ctx.data.favouriteIds = initHashSet[int64]()
+                for fid in favResp["favourites"]:
+                  ctx.data.favouriteIds.incl(fid.getInt(0).int64)
               if ctx.data.currentPlayingPath.len > 0:
                 for i, t in ctx.data.libraryTracks:
                   if t.path == ctx.data.currentPlayingPath:

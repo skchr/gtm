@@ -6,7 +6,8 @@ type
   AudioEventKind* = enum
     aekNone, aekPlaybackStarted, aekPlaybackPaused, aekPlaybackStopped,
     aekTrackEnded, aekPositionChanged, aekDurationChanged,
-    aekVolumeChanged, aekMetadataChanged, aekError
+    aekVolumeChanged, aekMetadataChanged, aekError,
+    aekCustomEvent
 
   AudioEvent* = object
     kind*: AudioEventKind
@@ -378,6 +379,8 @@ when defined(useFFmpeg):
       b.lastTime = nowTime
     if nowCrossfading and not b.lastCrossfading:
       result.add(AudioEvent(kind: aekMetadataChanged, strVal: "crossfade_started"))
+    elif not nowCrossfading and b.lastCrossfading:
+      result.add(AudioEvent(kind: aekMetadataChanged, strVal: "crossfade_ended"))
     if ffmpeg_mixer_master_ended(b.ctx) != 0 and b.lastPlaying:
       result.add(AudioEvent(kind: aekTrackEnded))
     b.lastPlaying = nowPlaying

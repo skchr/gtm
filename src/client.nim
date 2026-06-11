@@ -85,6 +85,11 @@ proc drainEventLines(cli: DaemonClient, buf: var string) =
         of aekPositionChanged: ev.floatVal = evJson{"time_pos"}.getFloat(0.0)
         of aekDurationChanged: ev.floatVal = evJson{"duration"}.getFloat(0.0)
         of aekVolumeChanged: ev.intVal = evJson{"volume"}.getInt(0)
+        of aekMetadataChanged: ev.strVal = evJson{"event"}.getStr("")
+        of aekCustomEvent:
+          ev.strVal = evJson{"event"}.getStr("")
+          if evJson.hasKey("shuffleIndex"):
+            ev.intVal = evJson["shuffleIndex"].getInt(0)
         else: discard
         cli.drainedEvents.add(ev)
     except:
@@ -226,6 +231,11 @@ method pollEvents*(cli: DaemonClient): seq[AudioEvent] =
             cli.timePos = ev.floatVal
           of aekDurationChanged: ev.floatVal = evJson{"duration"}.getFloat(0.0)
           of aekVolumeChanged: ev.intVal = evJson{"volume"}.getInt(0)
+          of aekMetadataChanged: ev.strVal = evJson{"event"}.getStr("")
+          of aekCustomEvent:
+            ev.strVal = evJson{"event"}.getStr("")
+            if evJson.hasKey("shuffleIndex"):
+              ev.intVal = evJson["shuffleIndex"].getInt(0)
           else: discard
           result.add(ev)
       elif json.hasKey("state"):
@@ -335,6 +345,10 @@ proc queueAdd*(cli: DaemonClient, paths: seq[string]): JsonNode =
 proc queueRemove*(cli: DaemonClient, index: int): JsonNode =
   cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "queue_remove", "index": index})
+
+proc queueRemovePath*(cli: DaemonClient, path: string): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "queue_remove_path", "path": path})
 
 proc queueClear*(cli: DaemonClient): JsonNode =
   cli.ensureDaemon()
