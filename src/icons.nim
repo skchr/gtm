@@ -1,4 +1,4 @@
-import terminal, os, strutils
+import os, strutils
 
 type
   IconPack* = object

@@ -3,6 +3,10 @@ from nativesockets import setBlocking
 import state, audio
 
 type
+  PendingRequest* = object
+    seqNo: int
+    callback: proc(resp: JsonNode) {.closure.}
+
   DaemonClient* = ref object of AudioBackend
     sock: Socket
     connected*: bool
@@ -13,6 +17,8 @@ type
     ipcTimeoutSec*: float
     pingMissed*: int
     reconnectCooldown*: int
+    nextSeq: int
+    pending: seq[PendingRequest]
 
 proc daemonIsRunning*(): bool =
   let p = pidPath()
@@ -112,6 +118,8 @@ proc drainEventLines(cli: DaemonClient, buf: var string) =
             ev.metadata["path"] = evJson["path"].getStr("")
           if evJson.hasKey("title"):
             ev.metadata["title"] = evJson["title"].getStr("")
+          if evJson.hasKey("channel"):
+            ev.metadata["channel"] = evJson["channel"].getStr("")
           if evJson.hasKey("next_path"):
             ev.metadata["next_path"] = evJson["next_path"].getStr("")
           if evJson.hasKey("next_title"):
@@ -120,6 +128,10 @@ proc drainEventLines(cli: DaemonClient, buf: var string) =
             ev.metadata["next_channel"] = evJson["next_channel"].getStr("")
           if evJson.hasKey("queue"):
             ev.metadata["queue"] = $evJson["queue"]
+          if evJson.hasKey("results"):
+            ev.metadata["results"] = $evJson["results"]
+          if evJson.hasKey("tracks"):
+            ev.metadata["tracks"] = $evJson["tracks"]
         else: discard
         cli.drainedEvents.add(ev)
     except:
@@ -130,6 +142,9 @@ proc sendDaemonCmd*(cli: DaemonClient, cmd: JsonNode): JsonNode =
   if cli == nil or cli.sock == nil or not cli.connected: return %*{"ok": false, "error": "not connected"}
   try:
     drainEventLines(cli, cli.buf)
+    let seqNo = cli.nextSeq
+    cli.nextSeq.inc
+    cmd["seq"] = %seqNo
     let data = $cmd & "\n"
     cli.sock.send(data)
     var tmp: array[16384, char]
@@ -149,6 +164,7 @@ proc sendDaemonCmd*(cli: DaemonClient, cmd: JsonNode): JsonNode =
           let old = cli.buf.len; cli.buf.setLen(old + n); copyMem(addr cli.buf[old], addr tmp[0], n)
         elif n == 0:
           cli.connected = false
+          cli.clearPending()
           return %*{"ok": false, "error": "connection closed"}
       while true:
         let nli = cli.buf.find('\n')
@@ -157,15 +173,43 @@ proc sendDaemonCmd*(cli: DaemonClient, cmd: JsonNode): JsonNode =
         cli.buf = cli.buf[nli+1..^1]
         if line.len == 0: continue
         let j = parseJson(line)
-        if not j.hasKey("events"):
+        if j.hasKey("seq") and j["seq"].getInt(-1) == seqNo:
           return j
+        if j.hasKey("events"): continue
+        if j.hasKey("state"): continue
       totalWait += 0.1
+    except:
+      cli.connected = false
+      cli.clearPending()
+    return %*{"ok": false, "error": "no response"}
+
+proc sendOnly*(cli: DaemonClient, cmd: JsonNode) =
+  if cli == nil or cli.sock == nil or not cli.connected: return
+  try:
+    drainEventLines(cli, cli.buf)
+    cmd["seq"] = %cli.nextSeq
+    cli.nextSeq.inc
+    let data = $cmd & "\n"
+    cli.sock.send(data)
   except:
     cli.connected = false
-  return %*{"ok": false, "error": "no response"}
+    cli.clearPending()
 
 proc daemonSimpleCmd*(cli: DaemonClient, cmd: string): JsonNode =
   sendDaemonCmd(cli, %*{"cmd": cmd})
+
+proc sendAsync*(cli: DaemonClient, cmd: JsonNode, callback: proc(resp: JsonNode) {.closure.}) =
+  if cli == nil or cli.sock == nil or not cli.connected: return
+  try:
+    drainEventLines(cli, cli.buf)
+    let seqNo = cli.nextSeq
+    cli.nextSeq.inc
+    cmd["seq"] = %seqNo
+    cli.pending.add(PendingRequest(seqNo: seqNo, callback: callback))
+    let data = $cmd & "\n"
+    cli.sock.send(data)
+  except:
+    discard
 
 method loadFile*(cli: DaemonClient, path: string, title: string = "", channel: string = "") =
   cli.ensureDaemon()
@@ -183,28 +227,28 @@ method loadFile*(cli: DaemonClient, path: string, title: string = "", channel: s
 
 method play*(cli: DaemonClient) =
   cli.ensureDaemon()
-  discard daemonSimpleCmd(cli, "play")
+  cli.sendOnly(%*{"cmd": "play"})
 
 method pause*(cli: DaemonClient) =
   cli.ensureDaemon()
-  discard daemonSimpleCmd(cli, "pause")
+  cli.sendOnly(%*{"cmd": "pause"})
 
 method stop*(cli: DaemonClient) =
   cli.ensureDaemon()
-  discard daemonSimpleCmd(cli, "stop")
+  cli.sendOnly(%*{"cmd": "stop"})
 
 method seek*(cli: DaemonClient, seconds: float) =
   cli.ensureDaemon()
-  discard sendDaemonCmd(cli, %*{"cmd": "seek", "seconds": seconds})
+  cli.sendOnly(%*{"cmd": "seek", "seconds": seconds})
 
 method setVolume*(cli: DaemonClient, vol: int) =
   cli.ensureDaemon()
   if cli.sock == nil: return
-  discard sendDaemonCmd(cli, %*{"cmd": "set_volume", "volume": vol})
+  cli.sendOnly(%*{"cmd": "set_volume", "volume": vol})
 
 method prepareNext*(cli: DaemonClient, path: string) =
   cli.ensureDaemon()
-  discard sendDaemonCmd(cli, %*{"cmd": "prepare_next", "path": path})
+  cli.sendOnly(%*{"cmd": "prepare_next", "path": path})
 
 method getStatusFlags*(cli: DaemonClient): tuple[crossfading, masterEnded: bool] =
   cli.ensureDaemon()
@@ -213,23 +257,23 @@ method getStatusFlags*(cli: DaemonClient): tuple[crossfading, masterEnded: bool]
 
 method startCrossfade*(cli: DaemonClient, durationSeconds: float) =
   cli.ensureDaemon()
-  discard sendDaemonCmd(cli, %*{"cmd": "crossfade", "duration": durationSeconds})
+  cli.sendOnly(%*{"cmd": "crossfade", "duration": durationSeconds})
 
 method setEqBand*(cli: DaemonClient, band: int, gainDb: float) =
   cli.ensureDaemon()
-  discard sendDaemonCmd(cli, %*{"cmd": "set_eq_band", "band": band, "gain_db": gainDb})
+  cli.sendOnly(%*{"cmd": "set_eq_band", "band": band, "gain_db": gainDb})
 
 method setEqPreset*(cli: DaemonClient, name: string) =
   cli.ensureDaemon()
-  discard sendDaemonCmd(cli, %*{"cmd": "set_eq_preset", "name": name})
+  cli.sendOnly(%*{"cmd": "set_eq_preset", "name": name})
 
 method setCrossfadeCurve*(cli: DaemonClient, curveType: int) =
   cli.ensureDaemon()
-  discard sendDaemonCmd(cli, %*{"cmd": "set_crossfade_curve", "curve_type": curveType})
+  cli.sendOnly(%*{"cmd": "set_crossfade_curve", "curve_type": curveType})
 
 method togglePause*(cli: DaemonClient) =
   cli.ensureDaemon()
-  discard daemonSimpleCmd(cli, "toggle_pause")
+  cli.sendOnly(%*{"cmd": "toggle_pause"})
 
 method pollEvents*(cli: DaemonClient): seq[AudioEvent] =
   result = cli.drainedEvents
@@ -282,6 +326,12 @@ method pollEvents*(cli: DaemonClient): seq[AudioEvent] =
               ev.metadata["path"] = evJson["path"].getStr("")
             if evJson.hasKey("title"):
               ev.metadata["title"] = evJson["title"].getStr("")
+            if evJson.hasKey("channel"):
+              ev.metadata["channel"] = evJson["channel"].getStr("")
+            if evJson.hasKey("results"):
+              ev.metadata["results"] = $evJson["results"]
+            if evJson.hasKey("tracks"):
+              ev.metadata["tracks"] = $evJson["tracks"]
           else: discard
           result.add(ev)
       elif json.hasKey("state"):
@@ -297,11 +347,22 @@ method pollEvents*(cli: DaemonClient): seq[AudioEvent] =
           cli.working = json["audio_working"].getBool(true)
         if json.hasKey("sleep_timer"):
           cli.sleepTimerRemaining = json["sleep_timer"].getInt(0)
+      elif json.hasKey("seq"):
+        let seqNo = json["seq"].getInt(-1)
+        var i = 0
+        while i < cli.pending.len:
+          if cli.pending[i].seqNo == seqNo:
+            let cb = cli.pending[i].callback
+            cli.pending.delete(i)
+            cb(json)
+            break
+          i.inc
       else:
         # Skip stray command response lines (leftover from timed-out commands)
         discard
   except:
     cli.connected = false
+    cli.clearPending()
 
 method getVolume*(cli: DaemonClient): int =
   cli.ensureDaemon()
@@ -310,7 +371,11 @@ method getVolume*(cli: DaemonClient): int =
     return resp["volume"].getInt(80)
   return 80
 
+proc clearPending*(cli: DaemonClient) =
+  cli.pending = @[]
+
 method shutdown*(cli: DaemonClient) =
+  cli.clearPending()
   discard daemonSimpleCmd(cli, "quit")
   if cli.sock != nil:
     try: cli.sock.close() except: stderr.writeLine("[gtm] shutdown close: " & getCurrentExceptionMsg())
@@ -497,5 +562,6 @@ proc newDaemonClient*(): DaemonClient =
     volume: 80, state: 0, running: false,
     connected: false, buf: "", backendType: abtDaemon,
     working: true, sleepTimerRemaining: 0,
-    ipcTimeoutSec: 3.0, pingMissed: 0, reconnectCooldown: 0
+    ipcTimeoutSec: 3.0, pingMissed: 0, reconnectCooldown: 0,
+    nextSeq: 0, pending: @[]
   )

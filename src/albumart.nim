@@ -64,8 +64,11 @@ proc getArtForTrack*(audioPath: string; ytThumbnail: string = ""; artist: string
       if dl.len > 0:
         artFile = dl
   if artFile.len == 0 or not fileExists(artFile): return
-  var cmd = "chafa --format kitty --size " & $width & "x" & $height & " " & artFile.quoteShell & " 2>/dev/null"
+  var cmd = "viu -w " & $width & " -h " & $height & " " & artFile.quoteShell & " 2>/dev/null"
   var (outp, code) = execCmdEx(cmd)
+  if code != 0 or outp.len == 0:
+    cmd = "viu -b -w " & $width & " -h " & $height & " " & artFile.quoteShell & " 2>/dev/null"
+    (outp, code) = execCmdEx(cmd)
   if code != 0 or outp.len == 0:
     cmd = "chafa --format symbols --symbols vhalf --size " & $width & "x" & $height & " " & artFile.quoteShell & " 2>/dev/null"
     (outp, code) = execCmdEx(cmd)

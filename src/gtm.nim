@@ -1,6 +1,6 @@
-import os, terminal, strutils, unicode, json, sets, math, sequtils, algorithm, times, random, posix, tables
+import os, terminal, strutils, unicode, json, sets, math, sequtils, algorithm, times, posix, tables
 from illwave as iw import nil
-from nimwave as nw import nil
+from ../vendor/nimwave/nimwave as nw import nil
 import state, ui, audio, library, theme, commands, client, visualizer, cli, ytdlp, albumart
 
 proc loadConfig(state: var AppState) =
@@ -558,10 +558,10 @@ proc initCommands(state: var AppState) =
     "Go to previous track", "\u23EE", @["CtrlP", "p"],
     proc(s: var AppState) = s.prevTrack())
   state.registerCommand("nav_up", "Move Up",
-    "Move selection up in the list", "\u2B06", @["CtrlK", "k", "Up"],
+    "Move selection up in the list", "\u2B06", @["Up"],
     proc(s: var AppState) = s.moveSelection(-1))
   state.registerCommand("nav_down", "Move Down",
-    "Move selection down in the list", "\u2B07", @["CtrlJ", "j", "Down"],
+    "Move selection down in the list", "\u2B07", @["Down"],
     proc(s: var AppState) = s.moveSelection(1))
   state.registerCommand("enter_filter", "Filter/Search",
     "Enter filter mode to search", "\U0001F50D", @["CtrlF", "Slash"],
@@ -814,6 +814,483 @@ proc adjustSetting(state: var AppState, delta: int) =
   state.rebuildItems()
   state.markDirty(ceSettings)
 
+proc handleThemePickerOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
+  case key
+  of iw.Key.Escape: state.overlay.clear()
+  of iw.Key.Enter:
+    if state.overlay.strResults.len > 0 and state.overlay.cursor >= 0 and
+       state.overlay.cursor < state.overlay.strResults.len:
+      let seed = state.overlay.strResults[state.overlay.cursor]
+      state.applyTheme(seed)
+    state.overlay.clear()
+  of iw.Key.Backspace:
+    if state.overlay.query.len > 0:
+      state.overlay.query = state.overlay.query[0..^2]
+      state.updateThemePickerResults()
+  of iw.Key.Down:
+    if state.overlay.cursor < state.overlay.strResults.len - 1:
+      state.overlay.cursor.inc
+      let seed = state.overlay.strResults[state.overlay.cursor]
+      state.applyTheme(seed)
+  of iw.Key.Up:
+    if state.overlay.cursor > 0:
+      state.overlay.cursor.dec
+      let seed = state.overlay.strResults[state.overlay.cursor]
+      state.applyTheme(seed)
+  else:
+    for ch in chars:
+      let code = ch.int
+      if code >= 32 and code < 127:
+        state.overlay.query &= $ch
+        state.updateThemePickerResults()
+    state.overlay.cursor = 0
+  if state.overlay.strResults.len > 0:
+    state.overlay.cursor = min(state.overlay.cursor, state.overlay.strResults.len - 1)
+
+proc handleYtSearchOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
+  case key
+  of iw.Key.Escape:
+    state.overlay.clear()
+    state.ytDebounceAt = 0
+    state.ytSearchQuery = ""
+    state.ytSearchLoading = false
+  of iw.Key.Tab:
+    if state.overlay.ytSubTab == ystAll:
+      state.overlay.ytSubTab = ystPlaylists
+    else:
+      state.overlay.ytSubTab = ystAll
+    state.overlay.cursor = 0
+    state.overlay.ytResults = @[]
+    state.ytSearchQuery = ""
+    state.ytDebounceAt = epochTime() + 0.3
+    state.markDirty(ceSearchResults)
+  of iw.Key.CtrlS:
+    if state.overlay.multiMode:
+      state.overlay.multiMode = false
+      state.overlay.selected = initHashSet[int]()
+    else:
+      state.overlay.multiMode = true
+      if state.overlay.ytResults.len > 0:
+        state.overlay.selected.incl(state.overlay.cursor)
+  of iw.Key.Down, iw.Key.CtrlN:
+    if state.overlay.ytAutocompleteVisible and state.overlay.ytAutocompleteSuggestions.len > 0:
+      if state.overlay.ytAutocompleteCursor < state.overlay.ytAutocompleteSuggestions.len - 1:
+        state.overlay.ytAutocompleteCursor.inc
+    elif state.overlay.cursor < state.overlay.ytResults.len - 1:
+      state.overlay.cursor.inc
+    elif state.overlay.ytResults.len > 0:
+      state.ytSearchPage.inc
+      state.ytDebounceAt = epochTime() + 0.3
+      state.markDirty(ceSearchResults)
+  of iw.Key.Up, iw.Key.CtrlP:
+    if state.overlay.ytAutocompleteVisible and state.overlay.ytAutocompleteSuggestions.len > 0:
+      if state.overlay.ytAutocompleteCursor > 0:
+        state.overlay.ytAutocompleteCursor.dec
+    elif state.overlay.cursor > 0:
+      state.overlay.cursor.dec
+  of iw.Key.Enter:
+    if state.overlay.ytAutocompleteVisible and state.overlay.ytAutocompleteSuggestions.len > 0:
+      state.overlay.query = state.overlay.ytAutocompleteSuggestions[state.overlay.ytAutocompleteCursor]
+      state.overlay.ytAutocompleteVisible = false
+      state.overlay.ytAutocompleteSuggestions = @[]
+      state.ytDebounceAt = epochTime() + 0.3
+    elif state.overlay.ytResults.len > 0:
+      if state.overlay.multiMode:
+        let idx = state.overlay.cursor
+        if idx in state.overlay.selected: state.overlay.selected.excl(idx)
+        else: state.overlay.selected.incl(idx)
+      else:
+        let r = state.overlay.ytResults[state.overlay.cursor]
+        if r.kind == srkPlaylist and state.player of DaemonClient:
+          let cli = DaemonClient(state.player)
+          if state.ytPlaylistFetching:
+            state.setFeedback("Playlist fetch already in progress")
+          else:
+            let plResp = cli.ytFetchPlaylist(r.url)
+            if plResp.hasKey("pending") and plResp["pending"].getBool():
+              state.ytPlaylistFetching = true
+              state.ytSearchLoading = true
+              state.setFeedback("Fetching playlist tracks...")
+            else:
+              state.setFeedback("Failed to start playlist fetch")
+        else:
+          state.overlay.clear()
+          state.ytStreamPendingItem = r
+          if state.player of DaemonClient:
+            let cli = DaemonClient(state.player)
+            if state.ytBatchDownloadMode:
+              discard cli.ytDownload(r.url, r.title, r.channel)
+              state.ytDownloadActive = true
+              state.setFeedback("Downloading: " & r.title)
+            else:
+              discard cli.ytResolveStream(r.url)
+              state.ytStreamResolving = true
+              state.setFeedback("Resolving stream URL...")
+  of iw.Key.CtrlD:
+    proc addToBothQueues(state: var AppState, items: seq[YtSearchResult]) =
+      for item in items:
+        let track = Track(
+          path: item.url, title: item.title, artist: item.channel,
+          album: "YouTube", duration: 0.0,
+          id: int64(state.libraryTracks.len + 1)
+        )
+        state.libraryTracks.add(track)
+        state.playbackQueue.add(state.libraryTracks.len - 1)
+      state.rebuildItems()
+      state.markDirty(ceQueue)
+      if state.player of DaemonClient:
+        let cli = DaemonClient(state.player)
+        if cli.connected:
+          var syncItems: seq[tuple[path, title, channel: string]] = @[]
+          for idx in state.playbackQueue:
+            if idx >= 0 and idx < state.libraryTracks.len:
+              let t = state.libraryTracks[idx]
+              syncItems.add((t.path, t.title, t.artist))
+          if syncItems.len > 0:
+            discard cli.queueAdd(syncItems)
+    if state.overlay.multiMode:
+      if state.overlay.selected.len > 0:
+        var items: seq[YtSearchResult] = @[]
+        for idx in state.overlay.selected:
+          if idx >= 0 and idx < state.overlay.ytResults.len:
+            items.add(state.overlay.ytResults[idx])
+        state.addToBothQueues(items)
+        state.showNotification("Queued " & $state.overlay.selected.len & " items")
+    elif state.overlay.ytResults.len > 0 and
+       state.overlay.cursor >= 0 and state.overlay.cursor < state.overlay.ytResults.len:
+      let r = state.overlay.ytResults[state.overlay.cursor]
+      state.addToBothQueues(@[r])
+      state.showNotification("Queued: " & r.title)
+  of iw.Key.Backspace:
+    if state.overlay.query.len > 0:
+      state.overlay.query = state.overlay.query[0..^2]
+      state.ytDebounceAt = epochTime() + 0.3
+      state.overlay.ytAutocompleteSuggestions = @[]
+      state.overlay.ytAutocompleteVisible = false
+  else:
+    for ch in chars:
+      let code = ch.int
+      if code >= 32 and code < 127:
+        state.overlay.query &= $ch
+        state.ytDebounceAt = epochTime() + 0.3
+        checkAutocomplete(state)
+
+proc handleYtBatchOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
+  if state.overlay.batchShowPls:
+    case key
+    of iw.Key.Escape:
+      state.overlay.batchShowPls = false
+      state.overlay.cursor = 0
+    of iw.Key.Down:
+      if state.overlay.cursor < state.libraryPlaylists.len - 1:
+        state.overlay.cursor.inc
+    of iw.Key.Up:
+      if state.overlay.cursor > 0:
+        state.overlay.cursor.dec
+    of iw.Key.Enter:
+      let plIdx = state.overlay.cursor
+      let items = state.overlay.batchItems
+      state.overlay.clear()
+      if plIdx >= 0 and plIdx < state.libraryPlaylists.len:
+        for item in items:
+          let track = Track(
+            path: item.url, title: item.title, artist: item.channel,
+            album: "YouTube", duration: 0.0,
+            id: int64(state.libraryTracks.len + 1)
+          )
+          state.libraryTracks.add(track)
+          state.libraryPlaylists[plIdx].trackIds.add(track.id)
+        state.rebuildItems()
+        state.showNotification("Added " & $items.len & " items to playlist")
+    else: discard
+  else:
+    case key
+    of iw.Key.Escape: state.overlay.clear()
+    of iw.Key.Down:
+      if state.overlay.cursor < 2: state.overlay.cursor.inc
+    of iw.Key.Up:
+      if state.overlay.cursor > 0: state.overlay.cursor.dec
+    of iw.Key.Enter:
+      let sel = state.overlay.cursor
+      let items = state.overlay.batchItems
+      state.overlay.clear()
+      case sel
+      of 0:
+        for item in items:
+          let track = Track(
+            path: item.url, title: item.title, artist: item.channel,
+            album: "YouTube", duration: 0.0,
+            id: int64(state.libraryTracks.len + 1)
+          )
+          state.libraryTracks.add(track)
+          state.playbackQueue.add(state.libraryTracks.len - 1)
+        state.rebuildItems()
+        state.markDirty(ceQueue)
+        state.showNotification("Added " & $items.len & " items to queue")
+      of 1:
+        state.overlay = OverlayState(kind: okYtBatch, batchItems: items, batchShowPls: true)
+        if state.libraryPlaylists.len > 0:
+          state.overlay.batchShowPls = true
+          state.overlay.cursor = 0
+        else:
+          state.setFeedback("No playlists exist. Create one first.")
+      of 2:
+        state.overlay = OverlayState(kind: okYtBatch, batchItems: items)
+        state.playlistInputActive = true
+        state.playlistInputPrompt = "New Playlist Name:"
+        state.playlistInputBuffer = ""
+      else: discard
+    else: discard
+
+proc handleQueuePickerOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
+  case key
+  of iw.Key.Escape: state.overlay.clear()
+  of iw.Key.Down:
+    if state.overlay.cursor < state.overlay.results.len - 1:
+      state.overlay.cursor.inc
+  of iw.Key.Up:
+    if state.overlay.cursor > 0:
+      state.overlay.cursor.dec
+  of iw.Key.Enter:
+    var items: seq[(string, string, string)] = @[]
+    for idx in state.overlay.selected:
+      if idx >= 0 and idx < state.libraryTracks.len:
+        state.playbackQueue.add(idx)
+        let t = state.libraryTracks[idx]
+        items.add((t.path, t.title, t.artist))
+    if items.len > 0 and state.player of DaemonClient:
+      discard DaemonClient(state.player).queueAdd(items)
+    state.markDirty(ceQueue)
+    if state.status == psStopped and state.playbackQueue.len > 0:
+      state.overlay.clear()
+      state.nextTrack()
+      return
+    state.showNotification("Added " & $state.overlay.selected.len & " tracks to queue")
+    state.overlay.clear()
+  of iw.Key.Space:
+    if state.overlay.results.len > 0 and state.overlay.cursor >= 0 and
+       state.overlay.cursor < state.overlay.results.len:
+      let idx = state.overlay.results[state.overlay.cursor]
+      if idx in state.overlay.selected: state.overlay.selected.excl(idx)
+      else: state.overlay.selected.incl(idx)
+  of iw.Key.Backspace:
+    if state.overlay.query.len > 0:
+      state.overlay.query = state.overlay.query[0..^2]
+  else:
+    for ch in chars:
+      let code = ch.int
+      if code >= 32 and code < 127:
+        state.overlay.query &= $ch
+  state.overlay.results = @[]
+  if state.overlay.query.len > 0:
+    let q = state.overlay.query.toLowerAscii()
+    for i, t in state.libraryTracks:
+      if fuzzyMatch(q, t.displayName().toLowerAscii()) or
+         fuzzyMatch(q, t.displayArtist().toLowerAscii()):
+        state.overlay.results.add(i)
+  else:
+    for i in 0..<state.libraryTracks.len:
+      state.overlay.results.add(i)
+  if state.overlay.results.len > 0:
+    state.overlay.cursor = min(state.overlay.cursor, state.overlay.results.len - 1)
+  else:
+    state.overlay.cursor = 0
+
+proc handleQueueOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
+  case key
+  of iw.Key.Escape: state.overlay.clear()
+  of iw.Key.Down:
+    if state.overlay.cursor < state.playbackQueue.len - 1:
+      state.overlay.cursor.inc
+      state.overlay = OverlayState(kind: okQueueOverlay, cursor: state.overlay.cursor)
+  of iw.Key.Up:
+    if state.overlay.cursor > 0:
+      state.overlay.cursor.dec
+      state.overlay = OverlayState(kind: okQueueOverlay, cursor: state.overlay.cursor)
+  of iw.Key.Enter:
+    if state.playbackQueue.len > 0 and state.overlay.cursor >= 0 and
+       state.overlay.cursor < state.playbackQueue.len:
+      let qIdx = state.overlay.cursor
+      let tIdx = state.playbackQueue[qIdx]
+      state.overlay.clear()
+      if tIdx >= 0 and tIdx < state.libraryTracks.len:
+        let track = state.libraryTracks[tIdx]
+        if state.player of DaemonClient:
+          discard DaemonClient(state.player).queueRemovePath(track.path)
+        state.playbackQueue.delete(qIdx)
+        if state.queueCursor >= qIdx and state.queueCursor > 0:
+          state.queueCursor.dec
+        state.player.loadFile(track.path)
+        state.player.play()
+        state.status = psPlaying
+        state.currentPlayingPath = track.path
+        state.currentPlayingId = track.id
+        state.currentThumbnail = ""
+        state.markDirtyBatch(cePlayState, ceTrack, ceQueue)
+        if state.duration == 0.0 and track.duration > 0:
+          state.duration = track.duration
+  of iw.Key.D:
+    if state.playbackQueue.len > 0 and state.overlay.cursor >= 0 and
+       state.overlay.cursor < state.playbackQueue.len:
+      let qIdx = state.overlay.cursor
+      let t = state.libraryTracks[state.playbackQueue[qIdx]]
+      state.showNotification("Removed '" & t.displayName() & "' from queue")
+      if state.player of DaemonClient:
+        discard DaemonClient(state.player).queueRemovePath(t.path)
+      state.playbackQueue.delete(qIdx)
+      state.queueCursor = min(state.queueCursor, state.playbackQueue.len - 1)
+      if state.playbackQueue.len == 0:
+        state.overlay.clear()
+      else:
+        state.overlay = OverlayState(kind: okQueueOverlay, cursor: min(state.overlay.cursor, state.playbackQueue.len - 1))
+  else: discard
+
+proc handlePlaylistSearchOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
+  case key
+  of iw.Key.Escape: state.overlay.clear()
+  of iw.Key.Down:
+    if state.overlay.cursor < state.overlay.results.len - 1:
+      state.overlay.cursor.inc
+  of iw.Key.Up:
+    if state.overlay.cursor > 0:
+      state.overlay.cursor.dec
+  of iw.Key.Enter:
+    if state.overlay.results.len > 0 and state.overlay.cursor >= 0 and
+       state.overlay.cursor < state.overlay.results.len:
+      let idx = state.overlay.results[state.overlay.cursor]
+      if idx in state.overlay.selected: state.overlay.selected.excl(idx)
+      else: state.overlay.selected.incl(idx)
+  of iw.Key.Backspace:
+    if state.overlay.query.len > 0:
+      state.overlay.query = state.overlay.query[0..^2]
+  of iw.Key.A:
+    if state.overlay.plMode == 1 and state.overlay.selected.len > 0:
+      let plIdx = state.playlistContentsIdx
+      if plIdx >= 0 and plIdx < state.libraryPlaylists.len:
+        for idx in state.overlay.selected:
+          if idx >= 0 and idx < state.libraryTracks.len:
+            let track = state.libraryTracks[idx]
+            if track.id notin state.libraryPlaylists[plIdx].trackIds:
+              state.libraryPlaylists[plIdx].trackIds.add(track.id)
+              if state.player of DaemonClient:
+                discard DaemonClient(state.player).addToPlaylist(state.libraryPlaylists[plIdx].id, track.id, state.libraryPlaylists[plIdx].trackIds.len - 1)
+        state.rebuildItems()
+      state.overlay.clear()
+  of iw.Key.X:
+    if state.overlay.plMode == 2 and state.overlay.selected.len > 0:
+      let plIdx = state.playlistContentsIdx
+      if plIdx >= 0 and plIdx < state.libraryPlaylists.len:
+        for idx in state.overlay.selected:
+          if idx >= 0 and idx < state.libraryTracks.len:
+            let trackId = state.libraryTracks[idx].id
+            let removeIdx = state.libraryPlaylists[plIdx].trackIds.find(trackId)
+            if removeIdx >= 0:
+              state.libraryPlaylists[plIdx].trackIds.delete(removeIdx)
+              if state.player of DaemonClient:
+                discard DaemonClient(state.player).removeFromPlaylist(state.libraryPlaylists[plIdx].id, trackId)
+        state.rebuildItems()
+      state.overlay.clear()
+  else:
+    for ch in chars:
+      let code = ch.int
+      if code >= 32 and code < 127:
+        state.overlay.query &= $ch
+  state.overlay.results = @[]
+  if state.overlay.query.len > 0:
+    let q = state.overlay.query.toLowerAscii()
+    for i, t in state.libraryTracks:
+      if fuzzyMatch(q, t.displayName().toLowerAscii()) or
+         fuzzyMatch(q, t.displayArtist().toLowerAscii()):
+        state.overlay.results.add(i)
+  else:
+    for i in 0..<state.libraryTracks.len:
+      state.overlay.results.add(i)
+  if state.overlay.results.len > 0:
+    state.overlay.cursor = min(state.overlay.cursor, state.overlay.results.len - 1)
+  else:
+    state.overlay.cursor = 0
+
+proc handleCommandPaletteOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
+  case key
+  of iw.Key.Escape: state.overlay.clear()
+  of iw.Key.Enter:
+    if state.overlay.results.len > 0 and state.overlay.cursor >= 0 and
+       state.overlay.cursor < state.overlay.results.len:
+      let cmdIdx = state.overlay.results[state.overlay.cursor]
+      if cmdIdx >= 0 and cmdIdx < state.commands.len:
+        let cmdId = state.commands[cmdIdx].id
+        state.overlay.clear()
+        execCmd(state, cmdId)
+        return
+    state.overlay.clear()
+  of iw.Key.Slash: state.overlay.query = ""
+  of iw.Key.Down:
+    state.overlay.cursor = (state.overlay.cursor + 1) mod max(state.overlay.results.len, 1)
+  of iw.Key.Up:
+    state.overlay.cursor = (state.overlay.cursor - 1 + state.overlay.results.len) mod max(state.overlay.results.len, 1)
+  of iw.Key.Backspace:
+    if state.overlay.query.len > 0:
+      state.overlay.query = state.overlay.query[0..^2]
+  else:
+    for ch in chars:
+      let code = ch.int
+      if code >= 32 and code < 127:
+        state.overlay.query &= $ch
+  if state.overlay.query.len > 0:
+    state.overlay.results = @[]
+    for i, cmd in state.commands:
+      if fuzzyMatch(state.overlay.query, cmd.name) or
+         fuzzyMatch(state.overlay.query, cmd.description):
+        state.overlay.results.add(i)
+    state.overlay.cursor = 0
+  elif true:
+    state.overlay.results = @[]
+    for i in 0..<state.commands.len:
+      state.overlay.results.add(i)
+
+proc handleFuzzyFinderOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
+  case key
+  of iw.Key.Escape: state.overlay.clear()
+  of iw.Key.Enter:
+    if state.overlay.results.len > 0 and state.overlay.cursor >= 0 and
+       state.overlay.cursor < state.overlay.results.len:
+      let idx = state.overlay.results[state.overlay.cursor]
+      state.overlay.clear()
+      if idx >= 0 and idx < state.libraryTracks.len:
+        state.selectIndex = idx
+        state.playSelected()
+  of iw.Key.Down:
+    if state.overlay.cursor < state.overlay.results.len - 1:
+      state.overlay.cursor.inc
+  of iw.Key.Up:
+    if state.overlay.cursor > 0:
+      state.overlay.cursor.dec
+  of iw.Key.Backspace:
+    if state.overlay.query.len > 0:
+      state.overlay.query = state.overlay.query[0..^2]
+  else:
+    for ch in chars:
+      let code = ch.int
+      if code >= 32 and code < 127:
+        state.overlay.query &= $ch
+  state.overlay.results = @[]
+  state.overlay.strResults = @[]
+  if state.overlay.query.len > 0:
+    let q = state.overlay.query.toLowerAscii()
+    for i, t in state.libraryTracks:
+      if fuzzyMatch(q, t.displayName().toLowerAscii()) or
+         fuzzyMatch(q, t.displayArtist().toLowerAscii()):
+        state.overlay.results.add(i)
+        state.overlay.strResults.add(t.displayName() & "  \u2014  " & t.displayArtist())
+  else:
+    for i, t in state.libraryTracks:
+      state.overlay.results.add(i)
+      state.overlay.strResults.add(t.displayName() & "  \u2014  " & t.displayArtist())
+  if state.overlay.results.len > 0:
+    state.overlay.cursor = min(state.overlay.cursor, state.overlay.results.len - 1)
+  else:
+    state.overlay.cursor = 0
+
 proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
   if key != iw.Key.None:
     state.lastKeyDisplay = keyDisplayName(key)
@@ -838,9 +1315,9 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
       state.eqPreset = ""
       if state.player of DaemonClient:
         DaemonClient(state.player).setEqBand(b, state.eqBands[b])
-    of iw.Key.J, iw.Key.Down:
+    of iw.Key.Down:
       state.eqBandSelect = min(9, state.eqBandSelect + 1)
-    of iw.Key.K, iw.Key.Up:
+    of iw.Key.Up:
       state.eqBandSelect = max(0, state.eqBandSelect - 1)
     of iw.Key.P, iw.Key.ShiftP:
       cycleEqPreset(state)
@@ -940,510 +1417,27 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     return
   if state.overlay.kind != okNone:
     case state.overlay.kind
-    of okThemePicker:
-      case key
-      of iw.Key.Escape:
-        state.overlay.clear()
-      of iw.Key.Enter:
-        if state.overlay.strResults.len > 0 and state.overlay.cursor >= 0 and
-           state.overlay.cursor < state.overlay.strResults.len:
-          let seed = state.overlay.strResults[state.overlay.cursor]
-          state.applyTheme(seed)
-        state.overlay.clear()
-      of iw.Key.Backspace:
-        if state.overlay.query.len > 0:
-          state.overlay.query = state.overlay.query[0..^2]
-          state.updateThemePickerResults()
-      of iw.Key.Down:
-        if state.overlay.cursor < state.overlay.strResults.len - 1:
-          state.overlay.cursor.inc
-          let seed = state.overlay.strResults[state.overlay.cursor]
-          state.applyTheme(seed)
-      of iw.Key.Up:
-        if state.overlay.cursor > 0:
-          state.overlay.cursor.dec
-          let seed = state.overlay.strResults[state.overlay.cursor]
-          state.applyTheme(seed)
-      else:
-        for ch in chars:
-          let code = ch.int
-          if code >= 32 and code < 127:
-            state.overlay.query &= $ch
-            state.updateThemePickerResults()
-        state.overlay.cursor = 0
-      if state.overlay.strResults.len > 0:
-        state.overlay.cursor = min(state.overlay.cursor, state.overlay.strResults.len - 1)
-    of okYtSearch:
-      case key
-      of iw.Key.Escape:
-        state.overlay.clear()
-        state.ytDebounceAt = 0
-        state.ytSearchQuery = ""
-        state.ytSearchLoading = false
-      of iw.Key.Tab:
-        # Cycle sub-tab: All ↔ Playlists
-        if state.overlay.ytSubTab == ystAll:
-          state.overlay.ytSubTab = ystPlaylists
-        else:
-          state.overlay.ytSubTab = ystAll
-        state.overlay.cursor = 0
-        state.overlay.ytResults = @[]
-        state.ytSearchQuery = ""
-        state.ytDebounceAt = epochTime() + 0.3
-        state.markDirty(ceSearchResults)
-      of iw.Key.CtrlS:
-        if state.overlay.multiMode:
-          state.overlay.multiMode = false
-          state.overlay.selected = initHashSet[int]()
-        else:
-          state.overlay.multiMode = true
-          if state.overlay.ytResults.len > 0:
-            let idx = state.overlay.cursor
-            state.overlay.selected.incl(idx)
-      of iw.Key.Down, iw.Key.CtrlN:
-        if state.overlay.ytAutocompleteVisible and state.overlay.ytAutocompleteSuggestions.len > 0:
-          if state.overlay.ytAutocompleteCursor < state.overlay.ytAutocompleteSuggestions.len - 1:
-            state.overlay.ytAutocompleteCursor.inc
-        elif state.overlay.cursor < state.overlay.ytResults.len - 1:
-          state.overlay.cursor.inc
-        elif state.overlay.ytResults.len > 0:
-          # Pagination: scroll past end → fetch next page
-          state.ytSearchPage.inc
-          state.ytDebounceAt = epochTime() + 0.3
-          state.markDirty(ceSearchResults)
-      of iw.Key.Up, iw.Key.CtrlP:
-        if state.overlay.ytAutocompleteVisible and state.overlay.ytAutocompleteSuggestions.len > 0:
-          if state.overlay.ytAutocompleteCursor > 0:
-            state.overlay.ytAutocompleteCursor.dec
-        elif state.overlay.cursor > 0:
-          state.overlay.cursor.dec
-      of iw.Key.Enter:
-        if state.overlay.ytAutocompleteVisible and state.overlay.ytAutocompleteSuggestions.len > 0:
-          state.overlay.query = state.overlay.ytAutocompleteSuggestions[state.overlay.ytAutocompleteCursor]
-          state.overlay.ytAutocompleteVisible = false
-          state.overlay.ytAutocompleteSuggestions = @[]
-          state.ytDebounceAt = epochTime() + 0.3
-        elif state.overlay.ytResults.len > 0:
-          if state.overlay.multiMode:
-            let idx = state.overlay.cursor
-            if idx in state.overlay.selected:
-              state.overlay.selected.excl(idx)
-            else:
-              state.overlay.selected.incl(idx)
-          else:
-            let r = state.overlay.ytResults[state.overlay.cursor]
-            if r.kind == srkPlaylist and state.player of DaemonClient:
-              let cli = DaemonClient(state.player)
-              if state.ytPlaylistFetching:
-                state.setFeedback("Playlist fetch already in progress")
-              else:
-                let plResp = cli.ytFetchPlaylist(r.url)
-                if plResp.hasKey("pending") and plResp["pending"].getBool():
-                  state.ytPlaylistFetching = true
-                  state.ytSearchLoading = true
-                  state.setFeedback("Fetching playlist tracks...")
-                else:
-                  state.setFeedback("Failed to start playlist fetch")
-            else:
-              state.overlay.clear()
-              state.ytStreamPendingItem = r
-              if state.player of DaemonClient:
-                let cli = DaemonClient(state.player)
-                if state.ytBatchDownloadMode:
-                  discard cli.ytDownload(r.url, r.title, r.channel)
-                  state.ytDownloadActive = true
-                  state.setFeedback("Downloading: " & r.title)
-                else:
-                  discard cli.ytResolveStream(r.url)
-                  state.ytStreamResolving = true
-                  state.setFeedback("Resolving stream URL...")
-      of iw.Key.CtrlD:
-        proc addToBothQueues(state: var AppState, items: seq[YtSearchResult]) =
-          for item in items:
-            let track = Track(
-              path: item.url, title: item.title, artist: item.channel,
-              album: "YouTube", duration: 0.0,
-              id: int64(state.libraryTracks.len + 1)
-            )
-            state.libraryTracks.add(track)
-            state.playbackQueue.add(state.libraryTracks.len - 1)
-          state.rebuildItems()
-          state.markDirty(ceQueue)
-          if state.player of DaemonClient:
-            let cli = DaemonClient(state.player)
-            if cli.connected:
-              var syncItems: seq[tuple[path, title, channel: string]] = @[]
-              for idx in state.playbackQueue:
-                if idx >= 0 and idx < state.libraryTracks.len:
-                  let t = state.libraryTracks[idx]
-                  syncItems.add((t.path, t.title, t.artist))
-              if syncItems.len > 0:
-                discard cli.queueAdd(syncItems)
-        if state.overlay.multiMode:
-          if state.overlay.selected.len > 0:
-            var items: seq[YtSearchResult] = @[]
-            for idx in state.overlay.selected:
-              if idx >= 0 and idx < state.overlay.ytResults.len:
-                items.add(state.overlay.ytResults[idx])
-            state.addToBothQueues(items)
-            state.showNotification("Queued " & $state.overlay.selected.len & " items")
-        elif state.overlay.ytResults.len > 0 and
-           state.overlay.cursor >= 0 and state.overlay.cursor < state.overlay.ytResults.len:
-          let r = state.overlay.ytResults[state.overlay.cursor]
-          state.addToBothQueues(@[r])
-          state.showNotification("Queued: " & r.title)
-      of iw.Key.Backspace:
-        if state.overlay.query.len > 0:
-          state.overlay.query = state.overlay.query[0..^2]
-          state.ytDebounceAt = epochTime() + 0.3
-          state.overlay.ytAutocompleteSuggestions = @[]
-          state.overlay.ytAutocompleteVisible = false
-      else:
-        for ch in chars:
-          let code = ch.int
-          if code >= 32 and code < 127:
-            state.overlay.query &= $ch
-            state.ytDebounceAt = epochTime() + 0.3
-            # Trigger autocomplete lookup
-            checkAutocomplete(state)
-    of okYtBatch:
-      if state.overlay.batchShowPls:
-        case key
-        of iw.Key.Escape:
-          state.overlay.batchShowPls = false
-          state.overlay.cursor = 0
-        of iw.Key.Down:
-          if state.overlay.cursor < state.libraryPlaylists.len - 1:
-            state.overlay.cursor.inc
-        of iw.Key.Up:
-          if state.overlay.cursor > 0:
-            state.overlay.cursor.dec
-        of iw.Key.Enter:
-          let plIdx = state.overlay.cursor
-          let items = state.overlay.batchItems
-          state.overlay.clear()
-          if plIdx >= 0 and plIdx < state.libraryPlaylists.len:
-            for item in items:
-              let track = Track(
-                path: item.url, title: item.title, artist: item.channel,
-                album: "YouTube", duration: 0.0,
-                id: int64(state.libraryTracks.len + 1)
-              )
-              state.libraryTracks.add(track)
-              state.libraryPlaylists[plIdx].trackIds.add(track.id)
-            state.rebuildItems()
-            state.showNotification("Added " & $items.len & " items to playlist")
-        else: discard
-      else:
-        case key
-        of iw.Key.Escape:
-          state.overlay.clear()
-        of iw.Key.Down:
-          if state.overlay.cursor < 2: state.overlay.cursor.inc
-        of iw.Key.Up:
-          if state.overlay.cursor > 0: state.overlay.cursor.dec
-        of iw.Key.Enter:
-          let sel = state.overlay.cursor
-          let items = state.overlay.batchItems
-          state.overlay.clear()
-          case sel
-          of 0:
-            for item in items:
-              let track = Track(
-                path: item.url, title: item.title, artist: item.channel,
-                album: "YouTube", duration: 0.0,
-                id: int64(state.libraryTracks.len + 1)
-              )
-              state.libraryTracks.add(track)
-              state.playbackQueue.add(state.libraryTracks.len - 1)
-            state.rebuildItems()
-            state.markDirty(ceQueue)
-            state.showNotification("Added " & $items.len & " items to queue")
-          of 1:
-            state.overlay = OverlayState(kind: okYtBatch, batchItems: items, batchShowPls: true)
-            if state.libraryPlaylists.len > 0:
-              state.overlay.batchShowPls = true
-              state.overlay.cursor = 0
-            else:
-              state.setFeedback("No playlists exist. Create one first.")
-          of 2:
-            state.overlay = OverlayState(kind: okYtBatch, batchItems: items)
-            state.playlistInputActive = true
-            state.playlistInputPrompt = "New Playlist Name:"
-            state.playlistInputBuffer = ""
-          else: discard
-        else: discard
-    of okQueuePicker:
-      case key
-      of iw.Key.Escape:
-        state.overlay.clear()
-      of iw.Key.Down:
-        if state.overlay.cursor < state.overlay.results.len - 1:
-          state.overlay.cursor.inc
-      of iw.Key.Up:
-        if state.overlay.cursor > 0:
-          state.overlay.cursor.dec
-      of iw.Key.Enter:
-        var items: seq[(string, string, string)] = @[]
-        for idx in state.overlay.selected:
-          if idx >= 0 and idx < state.libraryTracks.len:
-            state.playbackQueue.add(idx)
-            let t = state.libraryTracks[idx]
-            items.add((t.path, t.title, t.artist))
-        # Sync queue to daemon for auto-advance/crossfade
-        if items.len > 0 and state.player of DaemonClient:
-          discard DaemonClient(state.player).queueAdd(items)
-        state.markDirty(ceQueue)
-        if state.status == psStopped and state.playbackQueue.len > 0:
-          state.overlay.clear()
-          state.nextTrack()
-          return
-        state.showNotification("Added " & $state.overlay.selected.len & " tracks to queue")
-        state.overlay.clear()
-      of iw.Key.Space:
-        if state.overlay.results.len > 0 and state.overlay.cursor >= 0 and
-           state.overlay.cursor < state.overlay.results.len:
-          let idx = state.overlay.results[state.overlay.cursor]
-          if idx in state.overlay.selected:
-            state.overlay.selected.excl(idx)
-          else:
-            state.overlay.selected.incl(idx)
-      of iw.Key.Backspace:
-        if state.overlay.query.len > 0:
-          state.overlay.query = state.overlay.query[0..^2]
-      else:
-        for ch in chars:
-          let code = ch.int
-          if code >= 32 and code < 127:
-            state.overlay.query &= $ch
-      state.overlay.results = @[]
-      if state.overlay.query.len > 0:
-        let q = state.overlay.query.toLowerAscii()
-        for i, t in state.libraryTracks:
-          if fuzzyMatch(q, t.displayName().toLowerAscii()) or
-             fuzzyMatch(q, t.displayArtist().toLowerAscii()):
-            state.overlay.results.add(i)
-      else:
-        for i in 0..<state.libraryTracks.len:
-          state.overlay.results.add(i)
-      if state.overlay.results.len > 0:
-        state.overlay.cursor = min(state.overlay.cursor, state.overlay.results.len - 1)
-      else:
-        state.overlay.cursor = 0
-    of okQueueOverlay:
-      case key
-      of iw.Key.Escape:
-        state.overlay.clear()
-      of iw.Key.Down:
-        if state.overlay.cursor < state.playbackQueue.len - 1:
-          state.overlay.cursor.inc
-          state.overlay = OverlayState(kind: okQueueOverlay, cursor: state.overlay.cursor)
-      of iw.Key.Up:
-        if state.overlay.cursor > 0:
-          state.overlay.cursor.dec
-          state.overlay = OverlayState(kind: okQueueOverlay, cursor: state.overlay.cursor)
-      of iw.Key.Enter:
-        if state.playbackQueue.len > 0 and state.overlay.cursor >= 0 and
-           state.overlay.cursor < state.playbackQueue.len:
-          let qIdx = state.overlay.cursor
-          let tIdx = state.playbackQueue[qIdx]
-          state.overlay.clear()
-          if tIdx >= 0 and tIdx < state.libraryTracks.len:
-            let track = state.libraryTracks[tIdx]
-            # Remove from daemon queue before playing
-            if state.player of DaemonClient:
-              discard DaemonClient(state.player).queueRemovePath(track.path)
-            state.playbackQueue.delete(qIdx)
-            if state.queueCursor >= qIdx and state.queueCursor > 0:
-              state.queueCursor.dec
-            state.player.loadFile(track.path)
-            state.player.play()
-            state.status = psPlaying
-            state.currentPlayingPath = track.path
-            state.currentPlayingId = track.id
-            state.currentThumbnail = ""
-            state.markDirtyBatch(cePlayState, ceTrack, ceQueue)
-            if state.duration == 0.0 and track.duration > 0:
-              state.duration = track.duration
-      of iw.Key.D:
-        if state.playbackQueue.len > 0 and state.overlay.cursor >= 0 and
-           state.overlay.cursor < state.playbackQueue.len:
-          let qIdx = state.overlay.cursor
-          let t = state.libraryTracks[state.playbackQueue[qIdx]]
-          state.showNotification("Removed '" & t.displayName() & "' from queue")
-          # Remove from daemon queue too
-          if state.player of DaemonClient:
-            discard DaemonClient(state.player).queueRemovePath(t.path)
-          state.playbackQueue.delete(qIdx)
-          state.queueCursor = min(state.queueCursor, state.playbackQueue.len - 1)
-          if state.playbackQueue.len == 0:
-            state.overlay.clear()
-          else:
-            state.overlay = OverlayState(kind: okQueueOverlay, cursor: min(state.overlay.cursor, state.playbackQueue.len - 1))
-      else: discard
-    of okPlaylistSearch:
-      case key
-      of iw.Key.Escape:
-        state.overlay.clear()
-      of iw.Key.Down:
-        if state.overlay.cursor < state.overlay.results.len - 1:
-          state.overlay.cursor.inc
-      of iw.Key.Up:
-        if state.overlay.cursor > 0:
-          state.overlay.cursor.dec
-      of iw.Key.Enter:
-        if state.overlay.results.len > 0 and state.overlay.cursor >= 0 and
-           state.overlay.cursor < state.overlay.results.len:
-          let idx = state.overlay.results[state.overlay.cursor]
-          if idx in state.overlay.selected:
-            state.overlay.selected.excl(idx)
-          else:
-            state.overlay.selected.incl(idx)
-      of iw.Key.Backspace:
-        if state.overlay.query.len > 0:
-          state.overlay.query = state.overlay.query[0..^2]
-      of iw.Key.A:
-        if state.overlay.plMode == 1 and state.overlay.selected.len > 0:
-          let plIdx = state.playlistContentsIdx
-          if plIdx >= 0 and plIdx < state.libraryPlaylists.len:
-            for idx in state.overlay.selected:
-              if idx >= 0 and idx < state.libraryTracks.len:
-                let track = state.libraryTracks[idx]
-                if track.id notin state.libraryPlaylists[plIdx].trackIds:
-                  state.libraryPlaylists[plIdx].trackIds.add(track.id)
-                  if state.player of DaemonClient:
-                    discard DaemonClient(state.player).addToPlaylist(state.libraryPlaylists[plIdx].id, track.id, state.libraryPlaylists[plIdx].trackIds.len - 1)
-            state.rebuildItems()
-          state.overlay.clear()
-      of iw.Key.X:
-        if state.overlay.plMode == 2 and state.overlay.selected.len > 0:
-          let plIdx = state.playlistContentsIdx
-          if plIdx >= 0 and plIdx < state.libraryPlaylists.len:
-            for idx in state.overlay.selected:
-              if idx >= 0 and idx < state.libraryTracks.len:
-                let trackId = state.libraryTracks[idx].id
-                let removeIdx = state.libraryPlaylists[plIdx].trackIds.find(trackId)
-                if removeIdx >= 0:
-                  state.libraryPlaylists[plIdx].trackIds.delete(removeIdx)
-                  if state.player of DaemonClient:
-                    discard DaemonClient(state.player).removeFromPlaylist(state.libraryPlaylists[plIdx].id, trackId)
-            state.rebuildItems()
-          state.overlay.clear()
-      else:
-        for ch in chars:
-          let code = ch.int
-          if code >= 32 and code < 127:
-            state.overlay.query &= $ch
-      state.overlay.results = @[]
-      if state.overlay.query.len > 0:
-        let q = state.overlay.query.toLowerAscii()
-        for i, t in state.libraryTracks:
-          if fuzzyMatch(q, t.displayName().toLowerAscii()) or
-             fuzzyMatch(q, t.displayArtist().toLowerAscii()):
-            state.overlay.results.add(i)
-      else:
-        for i in 0..<state.libraryTracks.len:
-          state.overlay.results.add(i)
-      if state.overlay.results.len > 0:
-        state.overlay.cursor = min(state.overlay.cursor, state.overlay.results.len - 1)
-      else:
-        state.overlay.cursor = 0
-    of okCommandPalette:
-      case key
-      of iw.Key.Escape:
-        state.overlay.clear()
-      of iw.Key.Enter:
-        if state.overlay.results.len > 0 and state.overlay.cursor >= 0 and
-           state.overlay.cursor < state.overlay.results.len:
-          let cmdIdx = state.overlay.results[state.overlay.cursor]
-          if cmdIdx >= 0 and cmdIdx < state.commands.len:
-            let cmdId = state.commands[cmdIdx].id
-            state.overlay.clear()
-            execCmd(state, cmdId)
-            return
-        state.overlay.clear()
-      of iw.Key.Slash:
-        state.overlay.query = ""
-      of iw.Key.Down:
-        state.overlay.cursor = (state.overlay.cursor + 1) mod max(state.overlay.results.len, 1)
-      of iw.Key.Up:
-        state.overlay.cursor = (state.overlay.cursor - 1 + state.overlay.results.len) mod max(state.overlay.results.len, 1)
-      of iw.Key.Backspace:
-        if state.overlay.query.len > 0:
-          state.overlay.query = state.overlay.query[0..^2]
-      else:
-        for ch in chars:
-          let code = ch.int
-          if code >= 32 and code < 127:
-            state.overlay.query &= $ch
-      if state.overlay.query.len > 0:
-        state.overlay.results = @[]
-        for i, cmd in state.commands:
-          if fuzzyMatch(state.overlay.query, cmd.name) or
-             fuzzyMatch(state.overlay.query, cmd.description):
-            state.overlay.results.add(i)
-        state.overlay.cursor = 0
-      elif true:
-        state.overlay.results = @[]
-        for i in 0..<state.commands.len:
-          state.overlay.results.add(i)
-    of okFuzzyFinder:
-      case key
-      of iw.Key.Escape:
-        state.overlay.clear()
-      of iw.Key.Enter:
-        if state.overlay.results.len > 0 and state.overlay.cursor >= 0 and
-           state.overlay.cursor < state.overlay.results.len:
-          let idx = state.overlay.results[state.overlay.cursor]
-          state.overlay.clear()
-          if idx >= 0 and idx < state.libraryTracks.len:
-            state.selectIndex = idx
-            state.playSelected()
-      of iw.Key.Down:
-        if state.overlay.cursor < state.overlay.results.len - 1:
-          state.overlay.cursor.inc
-      of iw.Key.Up:
-        if state.overlay.cursor > 0:
-          state.overlay.cursor.dec
-      of iw.Key.Backspace:
-        if state.overlay.query.len > 0:
-          state.overlay.query = state.overlay.query[0..^2]
-      else:
-        for ch in chars:
-          let code = ch.int
-          if code >= 32 and code < 127:
-            state.overlay.query &= $ch
-      state.overlay.results = @[]
-      state.overlay.strResults = @[]
-      if state.overlay.query.len > 0:
-        let q = state.overlay.query.toLowerAscii()
-        for i, t in state.libraryTracks:
-          if fuzzyMatch(q, t.displayName().toLowerAscii()) or
-             fuzzyMatch(q, t.displayArtist().toLowerAscii()):
-            state.overlay.results.add(i)
-            state.overlay.strResults.add(t.displayName() & "  \u2014  " & t.displayArtist())
-      else:
-        for i, t in state.libraryTracks:
-          state.overlay.results.add(i)
-          state.overlay.strResults.add(t.displayName() & "  \u2014  " & t.displayArtist())
-      if state.overlay.results.len > 0:
-        state.overlay.cursor = min(state.overlay.cursor, state.overlay.results.len - 1)
-      else:
-        state.overlay.cursor = 0
-    of okNone:
-      discard
+    of okThemePicker: state.handleThemePickerOverlay(key, chars)
+    of okYtSearch: state.handleYtSearchOverlay(key, chars)
+    of okYtBatch: state.handleYtBatchOverlay(key, chars)
+    of okQueuePicker: state.handleQueuePickerOverlay(key, chars)
+    of okQueueOverlay: state.handleQueueOverlay(key, chars)
+    of okPlaylistSearch: state.handlePlaylistSearchOverlay(key, chars)
+    of okCommandPalette: state.handleCommandPaletteOverlay(key, chars)
+    of okFuzzyFinder: state.handleFuzzyFinderOverlay(key, chars)
+    of okNone: discard
     return
   const sidebarScopes = [fsAll, fsArtists, fsAlbums, fsPlaylists, fsRecent, fsFavourites, fsLastPlayed, fsMostPlayed, fsLeastPlayed, fsDownloads]
   if state.tab == tabLibrary and state.libraryFocusPanel == lpSidebar and state.mode == imNormal:
     case key
-    of iw.Key.J, iw.Key.Down:
+    of iw.Key.Down:
       state.librarySidebarSelect = min(sidebarScopes.high, state.librarySidebarSelect + 1)
       state.filterScope = sidebarScopes[state.librarySidebarSelect]
       state.selectIndex = 0
       state.rebuildItems()
       state.markDirty(ceSearchResults)
       state.needsRedraw = true; return
-    of iw.Key.K, iw.Key.Up:
+    of iw.Key.Up:
       state.librarySidebarSelect = max(0, state.librarySidebarSelect - 1)
       state.filterScope = sidebarScopes[state.librarySidebarSelect]
       state.selectIndex = 0
@@ -1545,10 +1539,10 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
       if state.isPlaylistView() and state.playlistContentsIdx < 0:
         execCmd(state, "rename_playlist")
       state.mode = imNormal
-    of iw.Key.J, iw.Key.Down:
+    of iw.Key.Down:
       state.moveSelection(1)
       state.mode = imNormal
-    of iw.Key.K, iw.Key.Up:
+    of iw.Key.Up:
       state.moveSelection(-1)
       state.mode = imNormal
     of iw.Key.One: state.tab = tabNowPlaying; state.rebuildItems(); state.mode = imNormal
@@ -1598,6 +1592,20 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     state.markDirty(ceQueue)
     state.setFeedback("")
     return
+
+  # Data-driven dispatch: multi-key sequences (e.g. g+g -> goToFirst)
+  if state.pendingSeq.len > 0:
+    state.pendingSeq.add(key)
+    if state.multiKeyDispatch.hasKey(state.pendingSeq):
+      let idx = state.multiKeyDispatch[state.pendingSeq]
+      if idx >= 0 and idx < state.commands.len:
+        state.commands[idx].handler(state)
+      state.pendingSeq = @[]
+      state.pendingSeqTimer = 0
+      return
+    else:
+      state.pendingSeq = @[]
+      state.pendingSeqTimer = 0
 
   case key
   of iw.Key.Colon:
@@ -1668,17 +1676,22 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
   of iw.Key.AltR:
     if state.isPlaylistView() and state.playlistContentsIdx < 0:
       execCmd(state, "rename_playlist")
-  of iw.Key.J, iw.Key.Down:
+  of iw.Key.Down:
     if state.tab == tabNowPlaying and state.overlay.kind == okNone:
       if state.playbackQueue.len > 0:
         if state.queueCursor < state.playbackQueue.len - 1: state.queueCursor.inc
+        let maxVisible = 8
+        if state.queueCursor >= state.upNextScrollOffset + maxVisible:
+          state.upNextScrollOffset = state.queueCursor - maxVisible + 1
       else:
         state.setFeedback("Queue is empty — press i to add tracks")
     else: state.moveSelection(1)
-  of iw.Key.K, iw.Key.Up:
+  of iw.Key.Up:
     if state.tab == tabNowPlaying and state.overlay.kind == okNone:
       if state.playbackQueue.len > 0:
         if state.queueCursor > 0: state.queueCursor.dec
+        if state.queueCursor < state.upNextScrollOffset:
+          state.upNextScrollOffset = state.queueCursor
       else:
         state.setFeedback("Queue is empty — press i to add tracks")
     else: state.moveSelection(-1)
@@ -1745,7 +1758,6 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           state.shuffleEnabled = false
           state.repeatMode = 0
           state.sleepTimerRemaining = 0
-          state.sleepTimerFrames = 0
           state.ytMaxConcurrentDownloads = 4
           state.ytBatchDownloadMode = false
           state.ytJsRuntime = "node"
@@ -1951,7 +1963,11 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
       state.playlistContentsIdx = -1
       state.selectIndex = 0
       state.rebuildItems()
-  else: discard
+  else:
+    if state.keyDispatch.hasKey(key):
+      for idx in state.keyDispatch[key]:
+        if idx >= 0 and idx < state.commands.len:
+          state.commands[idx].handler(state)
 
 proc getNextTrackInfo(state: var AppState): tuple[path: string, id: int64] =
   let items = state.displayItems
@@ -2088,15 +2104,91 @@ proc processEvents(state: var AppState) =
             state.markDirty(ceQueue)
           except: discard
       elif ev.strVal == "yt_download_done":
-        # Update libraryTracks entries that still point to the download URL
+        state.ytDownloadActive = false
         let dlUrl = ev.metadata.getOrDefault("url", "")
         let dlPath = ev.metadata.getOrDefault("path", "")
+        let dlTitle = ev.metadata.getOrDefault("title", "")
         if dlUrl.len > 0 and dlPath.len > 0:
+          state.ytDownloaded[dlUrl] = dlPath
+          state.downloadCount = state.ytDownloaded.len
           for i in 0..<state.libraryTracks.len:
             if state.libraryTracks[i].path == dlUrl:
               state.libraryTracks[i].path = dlPath
+              if dlTitle.len > 0: state.libraryTracks[i].title = dlTitle
+              if state.currentPlayingPath == dlUrl:
+                state.currentPlayingPath = dlPath
               break
-          state.markDirty(ceQueue)
+          state.rebuildItems()
+          state.showNotification("Downloaded: " & (if dlTitle.len > 0: dlTitle else: splitFile(dlPath).name), nkSuccess)
+      elif ev.strVal == "yt_search_partial" or ev.strVal == "yt_search_done":
+        if ev.metadata.hasKey("results"):
+          try:
+            let resultsArr = parseJson(ev.metadata["results"])
+            var results: seq[YtSearchResult] = @[]
+            for jr in resultsArr.items:
+              results.add(YtSearchResult(
+                title: jr{"title"}.getStr(""),
+                url: jr{"url"}.getStr(""),
+                duration: jr{"duration"}.getStr(""),
+                channel: jr{"channel"}.getStr(""),
+                kind: YtSearchResultKind(jr{"kind"}.getInt(0))
+              ))
+            if results.len > 0:
+              state.overlay.ytResults = results
+              if state.overlay.cursor >= results.len:
+                state.overlay.cursor = 0
+              state.markDirty(ceSearchResults)
+            if ev.strVal == "yt_search_done":
+              state.ytSearchActive = false
+              state.ytSearchLoading = false
+              state.markDirty(ceSearchResults)
+          except: discard
+      elif ev.strVal == "yt_stream_resolved":
+        let url = ev.metadata.getOrDefault("url", "")
+        let title = ev.metadata.getOrDefault("title", "")
+        let channel = ev.metadata.getOrDefault("channel", "")
+        if url.len > 0:
+          state.ytStreamResolving = false
+          state.player.loadFile(url, title, channel)
+          state.player.play()
+          state.status = psPlaying
+          state.currentPlayingPath = url
+          state.currentPlayingTitle = title
+          state.currentPlayingChannel = channel
+          state.currentThumbnail = ""
+          state.markDirtyBatch(cePlayState, ceTrack)
+          state.showNotification("Streaming: " & title)
+        else:
+          state.setFeedback("Failed to resolve stream URL")
+          state.ytStreamResolving = false
+      elif ev.strVal == "yt_playlist_fetched":
+        state.ytPlaylistFetching = false
+        state.ytSearchLoading = false
+        if ev.metadata.hasKey("tracks"):
+          try:
+            let tracksArr = parseJson(ev.metadata["tracks"])
+            var tracks: seq[YtSearchResult] = @[]
+            for jt in tracksArr.items:
+              tracks.add(YtSearchResult(
+                kind: srkVideo,
+                title: jt{"title"}.getStr(""),
+                url: jt{"url"}.getStr(""),
+                duration: jt{"duration"}.getStr(""),
+                channel: jt{"channel"}.getStr("")
+              ))
+            let plTitle = ev.metadata.getOrDefault("title", "Playlist")
+            state.overlay.ytPlaylistDetail = YtPlaylistDetail(
+              title: plTitle,
+              trackCount: tracks.len,
+              tracks: tracks
+            )
+            state.overlay.ytResults = tracks
+            state.overlay.cursor = 0
+            state.overlay.multiMode = false
+            state.overlay.selected = initHashSet[int]()
+            state.setFeedback("Playlist: " & plTitle & " (" & $tracks.len & " tracks)")
+            state.markDirty(ceSearchResults)
+          except: discard
     else: discard
   if state.player.timePos != state.timePos and state.status == psPlaying:
     state.timePos = state.player.timePos
@@ -2285,106 +2377,9 @@ proc runTui(args: seq[string]) =
               ctx.data.ytSearchActive = true
               ctx.data.ytSearchLoading = true
               ctx.data.markDirty(ceSearchLoading)
-        ctx.data.ytSearchFrameCounter += 1
-        if ctx.data.ytSearchActive and ctx.data.ytSearchFrameCounter mod 4 == 0:
-          let pollResp = cli.ytSearchPoll()
-          if pollResp.hasKey("results"):
-            var results: seq[YtSearchResult] = @[]
-            for jr in pollResp["results"].items:
-              results.add(YtSearchResult(
-                title: jr{"title"}.getStr(""),
-                url: jr{"url"}.getStr(""),
-                duration: jr{"duration"}.getStr(""),
-                channel: jr{"channel"}.getStr(""),
-                kind: YtSearchResultKind(jr{"kind"}.getInt(0))
-              ))
-            if results.len > 0:
-              if ctx.data.overlay.ytResults.len == 0:
-                ctx.data.overlay.ytResults = results
-                ctx.data.overlay.cursor = 0
-                ctx.data.ytSearchSeenUrls = initHashSet[string]()
-                for r in results: ctx.data.ytSearchSeenUrls.incl(r.url)
-              else:
-                for r in results:
-                  if r.url notin ctx.data.ytSearchSeenUrls:
-                    ctx.data.overlay.ytResults.add(r)
-                    ctx.data.ytSearchSeenUrls.incl(r.url)
-              ctx.data.markDirty(ceSearchResults)
-            if pollResp.hasKey("done") and pollResp["done"].getBool():
-              ctx.data.ytSearchActive = false
-              ctx.data.ytSearchLoading = false
-              ctx.data.markDirty(ceSearchResults)
       if ctx.data.ytStreamResolving and ctx.data.player of DaemonClient:
-        let cli = DaemonClient(ctx.data.player)
-        let pollResp = cli.ytResolveStreamPoll()
-        if pollResp.hasKey("url"):
-          ctx.data.ytStreamResolving = false
-          let url = pollResp["url"].getStr("")
-          if url.len > 0 and ctx.data.ytStreamPendingItem.title.len > 0:
-            ctx.data.player.loadFile(url, ctx.data.ytStreamPendingItem.title, ctx.data.ytStreamPendingItem.channel)
-            ctx.data.player.play()
-            ctx.data.status = psPlaying
-            ctx.data.currentPlayingPath = url
-            ctx.data.currentThumbnail = ctx.data.ytStreamPendingItem.thumbnail
-            ctx.data.markDirtyBatch(cePlayState, ceTrack)
-            ctx.data.showNotification("Streaming: " & ctx.data.ytStreamPendingItem.title, nkInfo)
-          else:
-            ctx.data.setFeedback("Failed to resolve stream URL")
-        elif pollResp.hasKey("done") and pollResp["done"].getBool():
-          ctx.data.ytStreamResolving = false
-          ctx.data.setFeedback("Failed to resolve stream URL")
-      if ctx.data.ytDownloadActive and ctx.data.player of DaemonClient:
-        let cli = DaemonClient(ctx.data.player)
-        let pollResp = cli.ytDownloadPoll()
-        if pollResp.hasKey("done") and pollResp["done"].getBool():
-          ctx.data.ytDownloadActive = false
-          if pollResp.hasKey("path") and pollResp["path"].getStr("").len > 0:
-            let path = pollResp["path"].getStr("")
-            let (_, name, _) = splitFile(path)
-            let origUrl = if pollResp.hasKey("url"): pollResp["url"].getStr("") else: ""
-            ctx.data.ytDownloaded[origUrl] = path
-            ctx.data.downloadCount = ctx.data.ytDownloaded.len
-            for j in 0..<ctx.data.libraryTracks.len:
-              if ctx.data.libraryTracks[j].path == origUrl:
-                ctx.data.libraryTracks[j].path = path
-                ctx.data.libraryTracks[j].title = name
-                if ctx.data.currentPlayingPath == origUrl:
-                  ctx.data.currentPlayingPath = path
-                break
-            ctx.data.rebuildItems()
-            ctx.data.showNotification("Downloaded: " & name, nkSuccess)
-          else:
-            ctx.data.showNotification("Download failed", nkError)
-      if ctx.data.ytPlaylistFetching and ctx.data.player of DaemonClient:
-        let cli = DaemonClient(ctx.data.player)
-        let pollResp = cli.ytFetchPlaylistPoll()
-        if pollResp.hasKey("done") and pollResp["done"].getBool():
-          ctx.data.ytPlaylistFetching = false
-          ctx.data.ytSearchLoading = false
-          if pollResp.hasKey("tracks") and pollResp["tracks"].len > 0:
-            var tracks: seq[YtSearchResult] = @[]
-            for jt in pollResp["tracks"].items:
-              tracks.add(YtSearchResult(
-                kind: srkVideo,
-                title: jt{"title"}.getStr(""),
-                url: jt{"url"}.getStr(""),
-                duration: jt{"duration"}.getStr(""),
-                channel: jt{"channel"}.getStr("")
-              ))
-            let plTitle = pollResp{"title"}.getStr("Playlist")
-            ctx.data.overlay.ytPlaylistDetail = YtPlaylistDetail(
-              title: plTitle,
-              trackCount: tracks.len,
-              tracks: tracks
-            )
-            ctx.data.overlay.ytResults = tracks
-            ctx.data.overlay.cursor = 0
-            ctx.data.overlay.multiMode = false
-            ctx.data.overlay.selected = initHashSet[int]()
-            ctx.data.setFeedback("Playlist: " & plTitle & " (" & $tracks.len & " tracks)")
-            ctx.data.markDirty(ceSearchResults)
-          else:
-            ctx.data.setFeedback("Failed to fetch playlist tracks")
+        # Stream resolution handled via yt_stream_resolved event in processEvents
+        discard
       if ctx.data.feedbackTimer > 0:
         ctx.data.feedbackTimer.dec
       if ctx.data.ytSearchLoading and ctx.data.overlay.kind == okYtSearch and ctx.data.overlay.ytResults.len == 0:
@@ -2395,7 +2390,7 @@ proc runTui(args: seq[string]) =
         ctx.data.notificationTimer.dec
       if ctx.data.nowPlayingCueTimer > 0:
         ctx.data.nowPlayingCueTimer.dec
-      if ctx.data.lastKeyTimer > 0:
+      if ctx.data.lastKeyTimer > 0 and ctx.data.overlay.kind == okNone and not ctx.data.helpVisible and not ctx.data.aboutVisible and not ctx.data.eqVisible and ctx.data.mode != imLeaderMode:
         ctx.data.lastKeyTimer.dec
       if ctx.data.upNextTimer > 0:
         ctx.data.upNextTimer.dec
@@ -2439,8 +2434,8 @@ proc runTui(args: seq[string]) =
       if shouldDraw and tbReady:
         iw.display(ctx.tb, prevTb)
         prevTb = ctx.tb
-        if ctx.data.tab == tabNowPlaying and ctx.data.artAnsi.len > 0:
-          writeCachedArt(ctx.data.artAnsi, 1, 0)
+        if ctx.data.tab == tabNowPlaying and ctx.data.artAnsi.len > 0 and ctx.data.artBoxW > 0:
+          writeCachedArt(ctx.data.artAnsi, ctx.data.artBoxX, ctx.data.artBoxY)
       if key != iw.Key.None:
         showInputCursor(ctx.data, curW, curH)
       ctx.data.clearDirty()

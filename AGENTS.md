@@ -52,3 +52,16 @@ NIMWAVE_PATH="$HOME/.nimble/pkgs/nimwave-1.2.1" ILLWAVE_PATH="$HOME/.nimble/pkgs
 - Deps: Nim, GCC, FFmpeg, yt-dlp, JS runtimes (node/bun/deno)
 - Binary path (from /proc/self/exe), Download dir, Storage used (du -sh)
 - Audio backend type, Playback state (Playing/Paused/Stopped)
+
+## Optimization Progress
+### Completed
+- Push-based YT events (daemon auto-polls, TUI never polls)
+- Async IPC with `sendOnly` + `PendingRequest` (non-blocking commands)
+- State cleanup: removed 14 dead fields from AppState
+- ProcessBackend deletion (dead audio backend)
+- handleKey decomposition: 8 overlay handlers extracted into procs
+- KeyDispatch-based dispatch: multi-key sequence matching + keyDispatch fallback in `else` branch
+- Seq-based async callback matching: daemon echoes `seq` in responses; `sendAsync` + `pollEvents` dispatch to pending callbacks; `sendDaemonCmd` matches by seq
+- Removed unused imports (`random` from gtm.nim, `terminal` from icons.nim)
+
+### All tasks complete — no remaining blockers

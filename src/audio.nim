@@ -1,7 +1,7 @@
 import os, math, strutils, posix, tables, osproc
 
 type
-  AudioBackendType* = enum abtNone, abtFFmpeg, abtDaemon, abtProcess, abtMixer
+  AudioBackendType* = enum abtNone, abtFFmpeg, abtDaemon, abtMixer
 
   AudioEventKind* = enum
     aekNone, aekPlaybackStarted, aekPlaybackPaused, aekPlaybackStopped,
@@ -51,74 +51,6 @@ method getStatusFlags*(b: AudioBackend): tuple[crossfading, masterEnded: bool] {
 method setEqBand*(b: AudioBackend, band: int, gainDb: float) {.base.} = discard
 method setEqPreset*(b: AudioBackend, name: string) {.base.} = discard
 method setCrossfadeCurve*(b: AudioBackend, curveType: int) {.base.} = discard
-
-type
-  ProcessBackend* = ref object of AudioBackend
-    procHandle: Process
-    lastPath: string
-    paused: bool
-
-method loadFile*(b: ProcessBackend, path: string, title: string = "", channel: string = "") =
-  b.stop()
-  b.timePos = 0.0
-  b.duration = 0.0
-  b.lastPath = path
-  b.state = 0
-
-method play*(b: ProcessBackend) =
-  if b.lastPath.len == 0: return
-  b.stop()
-  let vol = max(0, min(100, b.volume))
-  if fileExists(findExe("mpv")):
-    b.procHandle = startProcess("mpv", args = @["--no-video", "--volume=" & $vol, b.lastPath],
-      options = {poUsePath, poParentStreams})
-    b.state = 1; b.running = true; b.paused = false
-  elif fileExists(findExe("ffplay")):
-    b.procHandle = startProcess("ffplay", args = @["-nodisp", "-autoexit", "-volume=" & $vol, b.lastPath],
-      options = {poUsePath, poParentStreams})
-    b.state = 1; b.running = true; b.paused = false
-  else:
-    stderr.writeLine("[gtm] no external player found (mpv or ffplay)")
-
-method pause*(b: ProcessBackend) =
-  if b.procHandle != nil:
-    discard posix.kill(b.procHandle.processID.cint, posix.SIGSTOP)
-    b.paused = true
-    if b.state == 1: b.state = 2
-
-method stop*(b: ProcessBackend) =
-  if b.procHandle != nil:
-    b.procHandle.kill()
-    b.procHandle.close()
-    b.procHandle = nil
-  b.state = 0; b.timePos = 0.0; b.running = false; b.paused = false
-
-method setVolume*(b: ProcessBackend, vol: int) =
-  b.volume = max(0, min(100, vol))
-
-method togglePause*(b: ProcessBackend) =
-  if b.paused:
-    if b.procHandle != nil:
-      discard posix.kill(b.procHandle.processID.cint, posix.SIGCONT)
-    b.paused = false; b.state = 1
-  else:
-    b.pause()
-
-method pollEvents*(b: ProcessBackend): seq[AudioEvent] =
-  result = @[]
-  if b.running and b.procHandle != nil:
-    let status = b.procHandle.peekExitCode()
-    if status != -1:
-      result.add(AudioEvent(kind: aekTrackEnded))
-      b.running = false; b.state = 0
-
-method shutdown*(b: ProcessBackend) = b.stop()
-
-proc newProcessBackend*(): ProcessBackend =
-  result = ProcessBackend(
-    volume: 80, state: 0, running: false,
-    backendType: abtProcess, working: true
-  )
 
 when defined(useFFmpeg):
   {.compile: "vendor/ffmpeg/ffmpeg_impl.c".}

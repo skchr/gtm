@@ -65,6 +65,7 @@ when isMainModule:
   discard checkCmd("nim", "nim --version 2>/dev/null | head -1")
   discard checkCmd("gcc", "gcc --version 2>/dev/null | head -1")
   discard checkCmd("dbus-1", "pkg-config --modversion dbus-1 2>/dev/null")
+  discard checkCmd("viu", "viu --version 2>/dev/null")
   echo ""
 
   # Stage 2: manpage

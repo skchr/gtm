@@ -747,6 +747,7 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
       else: "unknown"
     result["state"] = %st2
     result["volume"] = %d.player.volume
+    result["backend_type"] = %(if d.player of MixerBackend: "Mixer" elif d.player of FfmpegBackend: "FFmpeg" else: "ALSA")
   of dckResume:
     if d.currentTrackPath.len > 0:
       d.idleFrames = 0
@@ -881,24 +882,12 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
       d.lib.addSearchQuery(cmd.strArg)
     result["active"] = %d.ytSearchActive
   of dckYtSearchPoll:
-    if d.ytSearchActive:
-      let newResults = pollYoutubeSearch(d.ytSearchProcess, d.ytSearchBuf)
-      for r in newResults:
-        d.ytSearchResults.add(r)
-      if not d.ytSearchProcess.running():
-        let finalResults = finishYoutubeSearch(d.ytSearchProcess, d.ytSearchBuf)
-        for r in finalResults:
-          d.ytSearchResults.add(r)
-        d.ytSearchActive = false
-        d.ytSearchBuf = ""
-      var arr = newJArray()
-      for r in d.ytSearchResults:
-        arr.add(%*{"title": %r.title, "url": %r.url, "duration": %r.duration, "channel": %r.channel, "kind": %r.kind.int})
-      result["results"] = arr
-      result["done"] = %(not d.ytSearchActive)
-    else:
-      result["done"] = %true
-      result["results"] = newJArray()
+    # Main loop auto-polls; just return current accumulated results
+    var arr = newJArray()
+    for r in d.ytSearchResults:
+      arr.add(%*{"title": %r.title, "url": %r.url, "duration": %r.duration, "channel": %r.channel, "kind": %r.kind.int})
+    result["results"] = arr
+    result["done"] = %(not d.ytSearchActive)
   of dckYtSearchCancel:
     if d.ytSearchActive:
       try: d.ytSearchProcess.terminate() except: discard
@@ -914,18 +903,11 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     d.ytStreamActive = startStreamUrlFetch(cmd.strArg, d.ytStreamProcess, d.ytCookieSource, d.ytJsRuntime)
     result["active"] = %d.ytStreamActive
   of dckYtResolveStreamPoll:
-    if d.ytStreamActive:
-      if not d.ytStreamProcess.running():
-        d.ytStreamResultUrl = pollStreamUrlFetch(d.ytStreamProcess, d.ytStreamBuf)
-        d.ytStreamActive = false
-        d.ytStreamBuf = ""
-      result["url"] = %d.ytStreamResultUrl
-      result["title"] = %d.ytStreamPendingTitle
-      result["channel"] = %d.ytStreamPendingChannel
-      result["done"] = %(not d.ytStreamActive)
-    else:
-      result["done"] = %true
-      result["url"] = %""
+    # Main loop auto-polls; just return current state
+    result["url"] = %d.ytStreamResultUrl
+    result["title"] = %d.ytStreamPendingTitle
+    result["channel"] = %d.ytStreamPendingChannel
+    result["done"] = %(not d.ytStreamActive)
   of dckYtDownload:
     if cmd.strArg.len > 0:
       var task: DownloadTask
@@ -943,33 +925,7 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     else:
       result["started"] = %false
   of dckYtDownloadPoll:
-    let timeout = 600.0
-    var done: seq[int] = @[]
-    for i in 0..<d.ytDownloadTasks.len:
-      if not d.ytDownloadTasks[i].completed:
-        let p = d.ytDownloadTasks[i].process
-        if epochTime() - d.ytDownloadTasks[i].startedAt > timeout:
-          try: p.terminate() except: discard
-          close(p)
-          d.ytDownloadTasks[i].completed = true
-          done.add(i)
-        elif not p.running():
-          var path = ""
-          try: path = pollDownload(d.ytDownloadTasks[i].process, d.ytDownloadTasks[i].buf)
-          except: discard
-          d.ytDownloadTasks[i].completed = true
-          done.add(i)
-          if path.len > 0:
-            d.ytDownloaded[d.ytDownloadTasks[i].url] = path
-            d.ytLastCompletedPath = path
-            d.ytLastCompletedUrl = d.ytDownloadTasks[i].url
-            if d.lib != nil:
-              d.lib.addDownload(d.ytDownloadTasks[i].url, path, d.ytDownloadTasks[i].title, d.ytDownloadTasks[i].channel)
-              d.lib.updateTrackPath(d.ytDownloadTasks[i].url, path, d.ytDownloadTasks[i].title)
-      else:
-        done.add(i)
-    for i in countdown(done.len - 1, 0):
-      d.ytDownloadTasks.delete(done[i])
+    # Main loop auto-polls; just return current accumulated state
     result["done"] = %(d.ytDownloadTasks.len == 0)
     if d.ytLastCompletedPath.len > 0:
       result["path"] = %d.ytLastCompletedPath
@@ -1013,40 +969,21 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
         result["ok"] = %false
         result["error"] = %"failed to start playlist fetch"
   of dckYtFetchPlaylistPoll:
-    if not d.ytPlaylistActive:
+    # Main loop auto-polls; just return current state
+    if not d.ytPlaylistActive and d.ytPlaylistResult.tracks.len == 0:
       result["ok"] = %false
       result["error"] = %"no active playlist fetch"
+    elif d.ytPlaylistActive:
+      result["ok"] = %true
+      result["pending"] = %true
     else:
-      let p = d.ytPlaylistProcess
-      let tracks = pollPlaylistFetch(d.ytPlaylistProcess, d.ytPlaylistBuf)
-      for t in tracks:
-        d.ytPlaylistResult.tracks.add(t)
-      if not p.running():
-        # Drain remaining output
-        let finalTracks = finishPlaylistFetch(d.ytPlaylistProcess, d.ytPlaylistBuf)
-        for t in finalTracks:
-          d.ytPlaylistResult.tracks.add(t)
-        # Parse title/channel from first result
-        if d.ytPlaylistResult.tracks.len > 0:
-          let first = d.ytPlaylistResult.tracks[0]
-          if d.ytPlaylistResult.title.len == 0:
-            # Try to get playlist title from first result metadata or URL
-            d.ytPlaylistResult.title = "Playlist"
-            d.ytPlaylistResult.channel = first.channel
-        # Build response with all accumulated tracks
-        var tracksArr = newJArray()
-        for t in d.ytPlaylistResult.tracks:
-          tracksArr.add(%*{"title": %t.title, "url": %t.url, "duration": %t.duration, "channel": %t.channel, "kind": %t.kind.int})
-        result["title"] = %d.ytPlaylistResult.title
-        result["channel"] = %d.ytPlaylistResult.channel
-        result["tracks"] = tracksArr
-        result["track_count"] = %d.ytPlaylistResult.trackCount
-        result["done"] = %true
-        d.ytPlaylistActive = false
-        d.ytPlaylistBuf = ""
-      else:
-        result["ok"] = %true
-        result["pending"] = %true
+      var tracksArr = newJArray()
+      for t in d.ytPlaylistResult.tracks:
+        tracksArr.add(%*{"title": %t.title, "url": %t.url, "duration": %t.duration, "channel": %t.channel, "kind": %t.kind.int})
+      result["title"] = %d.ytPlaylistResult.title
+      result["tracks"] = tracksArr
+      result["track_count"] = %d.ytPlaylistResult.tracks.len
+      result["done"] = %true
   of dckYtSetConfig:
     d.ytCookieSource = cmd.strArg
     d.ytJsRuntime = cmd.strArg2
@@ -1136,8 +1073,7 @@ proc runDaemon*() =
       echo "[gtm] Mixer backend unavailable (ALSA?), trying FFmpeg fallback"
       player = newFfmpegBackend()
     if not player.working:
-      echo "[gtm] FFmpeg backend unavailable, trying process backend (mpv/ffplay)"
-      player = newProcessBackend()
+      echo "[gtm] FFmpeg backend unavailable"
   else:
     player = nil
   if player == nil or not player.working:
@@ -1298,12 +1234,15 @@ proc runDaemon*() =
               daemon.clients[ci].buf = daemon.clients[ci].buf[nli+1..^1]
               if line.len > 0:
                 if debugMode: stderr.writeLine("[gtm] daemon recv: " & line)
+                let cmdJson = parseJson(line)
                 let cmd = parseDaemonCommand(line)
                 let resp = try:
                   executeCommand(daemon, cmd)
                 except Exception as ex:
                   if debugMode: stderr.writeLine("[gtm] command error: " & ex.msg)
                   %*{"ok": false, "error": ex.msg}
+                if cmdJson.hasKey("seq"):
+                  resp["seq"] = cmdJson["seq"]
                 let respStr = $resp & "\n"
                 if debugMode: stderr.writeLine("[gtm] daemon resp: " & respStr.strip())
                 if not trySend(daemon.clients[ci].sock, respStr):
@@ -1389,6 +1328,67 @@ proc runDaemon*() =
         if url.len > 0:
           daemon.ytStreamUrls[daemon.ytStreamResolveUrl] = url
           daemon.ytStreamResolveUrl = ""
+
+    # Auto-poll yt-dlp search results & broadcast via events (no client polling needed)
+    if daemon.ytSearchActive:
+      let newResults = pollYoutubeSearch(daemon.ytSearchProcess, daemon.ytSearchBuf)
+      for r in newResults:
+        daemon.ytSearchResults.add(r)
+      if newResults.len > 0 and daemon.ytSearchResults.len > 0:
+        var arr = newJArray()
+        for r in daemon.ytSearchResults:
+          arr.add(%*{"title": %r.title, "url": %r.url, "duration": %r.duration, "channel": %r.channel, "kind": %r.kind.int})
+        let ev = %*{"events": [%*{"kind": %aekCustomEvent.int, "event": "yt_search_partial", "results": arr}]}
+        daemon.broadcastAll($ev & "\n")
+      if not daemon.ytSearchProcess.running():
+        let finalResults = finishYoutubeSearch(daemon.ytSearchProcess, daemon.ytSearchBuf)
+        for r in finalResults:
+          daemon.ytSearchResults.add(r)
+        daemon.ytSearchActive = false
+        daemon.ytSearchBuf = ""
+        if daemon.ytSearchResults.len > 0:
+          var arr = newJArray()
+          for r in daemon.ytSearchResults:
+            arr.add(%*{"title": %r.title, "url": %r.url, "duration": %r.duration, "channel": %r.channel, "kind": %r.kind.int})
+          let ev = %*{"events": [%*{"kind": %aekCustomEvent.int, "event": "yt_search_done", "results": arr}]}
+          daemon.broadcastAll($ev & "\n")
+
+    # Auto-poll yt-dlp playlist fetch results & broadcast via events
+    if daemon.ytPlaylistActive:
+      let newTracks = pollPlaylistFetch(daemon.ytPlaylistProcess, daemon.ytPlaylistBuf)
+      for t in newTracks:
+        daemon.ytPlaylistResult.tracks.add(t)
+      if not daemon.ytPlaylistProcess.running():
+        let finalTracks = finishPlaylistFetch(daemon.ytPlaylistProcess, daemon.ytPlaylistBuf)
+        for t in finalTracks:
+          daemon.ytPlaylistResult.tracks.add(t)
+        # Parse title/channel from first result
+        if daemon.ytPlaylistResult.tracks.len > 0:
+          let first = daemon.ytPlaylistResult.tracks[0]
+          if daemon.ytPlaylistResult.title.len == 0:
+            daemon.ytPlaylistResult.title = "Playlist"
+            daemon.ytPlaylistResult.channel = first.channel
+        daemon.ytPlaylistActive = false
+        daemon.ytPlaylistBuf = ""
+        # Broadcast playlist fetched event
+        var tracksArr = newJArray()
+        for t in daemon.ytPlaylistResult.tracks:
+          tracksArr.add(%*{"title": %t.title, "url": %t.url, "duration": %t.duration, "channel": %t.channel, "kind": %t.kind.int})
+        let ev = %*{"events": [%*{"kind": %aekCustomEvent.int, "event": "yt_playlist_fetched",
+          "title": %daemon.ytPlaylistResult.title, "tracks": tracksArr}]}
+        daemon.broadcastAll($ev & "\n")
+
+    # Auto-poll explicit stream URL resolution (for user-initiated "Play" on search result)
+    if daemon.ytStreamActive:
+      if not daemon.ytStreamProcess.running():
+        daemon.ytStreamResultUrl = pollStreamUrlFetch(daemon.ytStreamProcess, daemon.ytStreamBuf)
+        daemon.ytStreamActive = false
+        daemon.ytStreamBuf = ""
+        let ev = %*{"events": [%*{"kind": %aekCustomEvent.int, "event": "yt_stream_resolved",
+          "url": %daemon.ytStreamResultUrl,
+          "title": %daemon.ytStreamPendingTitle,
+          "channel": %daemon.ytStreamPendingChannel}]}
+        daemon.broadcastAll($ev & "\n")
 
     # Retry advancing if player stopped with items pending (e.g. waiting for YT download)
     if daemon.player.state == 0 and daemon.playbackQueue.len > 0:

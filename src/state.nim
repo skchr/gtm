@@ -291,7 +291,6 @@ type
     shuffleIndex*: int
     repeatMode*: int
     sleepTimerRemaining*: int
-    sleepTimerFrames*: int
     playlistContentsIdx*: int
     playlistInputActive*: bool
     playlistInputPrompt*: string
@@ -304,17 +303,9 @@ type
     feedbackTimer*: int
     playbackQueue*: seq[int]
     ytDebounceAt*: float
-    ytSearchProcess*: Process
-    ytSearchProcessActive*: bool
-    ytSearchOutputBuf*: string
-    ytStreamProcess*: Process
-    ytStreamActive*: bool
-    ytStreamBuf*: string
     ytStreamPendingItem*: YtSearchResult
     ytStreamTitle*: string
     ytStreamChannel*: string
-    ytStreamDuration*: string
-    ytStreamUrl*: string
     ytDownloadDir*: string
     ytDownloadQueue*: seq[YtSearchResult]
     ytDownloadTasks*: seq[DownloadTask]
@@ -331,10 +322,7 @@ type
     ytSearchQuery*: string
     ytSearchPage*: int
     ytSearchPageSize*: int
-    ytSearchSeenUrls*: HashSet[string]
-    ytSearchFrameCounter*: int
     ytSearchLoading*: bool
-    ytSearchResultsAll*: seq[YtSearchResult]
     ytProgressCurrent*: int
     ytProgressTotal*: int
     crossfadeDuration*: int
@@ -342,10 +330,7 @@ type
     crossfadePrepared*: bool
     crossfadeStarted*: bool
     crossfading*: bool
-    masterEnded*: bool
-    earlyPreloaded*: bool
     crossfadeNextPath*: string
-    crossfadeNextId*: int64
     aboutVisible*: bool
     reconnecting*: bool
     reconnectAttempts*: int
@@ -372,10 +357,12 @@ type
     currentThumbnail*: string
     upNextMsg*: string
     upNextTimer*: int
+    upNextScrollOffset*: int
     cursorVisible*: bool
     artAnsi*: string
     artAnsiLines*: int
     artAnsiKey*: string
+    artBoxX*, artBoxY*, artBoxW*, artBoxH*: int
 
 const
   GTM_VERSION* {.strdefine.} = "0.3.4"

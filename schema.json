@@ -21,6 +21,13 @@
       "maximum": 100,
       "default": 80
     },
+    "last_tab": {
+      "description": "Last active tab on quit (1=NowPlaying, 2=Library, 3=Settings)",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3,
+      "default": 1
+    },
     "idle_timeout": {
       "description": "Seconds of idle playback before daemon auto-exits",
       "type": "integer",
@@ -28,12 +35,61 @@
       "maximum": 3600,
       "default": 300
     },
-    "last_tab": {
-      "description": "Last active tab on quit",
+    "ipc_timeout": {
+      "description": "Seconds before IPC command times out",
       "type": "integer",
       "minimum": 1,
-      "maximum": 4,
-      "default": 1
+      "maximum": 30,
+      "default": 3
+    },
+    "footer_preset": {
+      "description": "Footer status bar preset",
+      "type": "string",
+      "enum": ["minimal", "compact", "full", "info", "navigator", "debug", "music", "clock"],
+      "default": "compact"
+    },
+    "crossfade_duration": {
+      "description": "Crossfade transition duration in seconds",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10,
+      "default": 5
+    },
+    "crossfade_curve": {
+      "description": "Crossfade curve type",
+      "type": "string",
+      "enum": ["equalPower", "quadratic", "cubic", "asymmetric"],
+      "default": "quadratic"
+    },
+    "yt_cookie_source": {
+      "description": "Browser cookie source for YouTube authentication",
+      "type": "string",
+      "default": ""
+    },
+    "yt_js_runtime": {
+      "description": "JavaScript runtime for yt-dlp (node, bun, deno)",
+      "type": "string",
+      "enum": ["node", "bun", "deno"],
+      "default": "node"
+    },
+    "yt_search_page_size": {
+      "description": "Number of YouTube search results per page",
+      "type": "integer",
+      "minimum": 10,
+      "maximum": 100,
+      "default": 10
+    },
+    "yt_max_concurrent_downloads": {
+      "description": "Maximum concurrent YouTube downloads",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10,
+      "default": 4
+    },
+    "yt_batch_download_mode": {
+      "description": "Enable batch download mode for YouTube",
+      "type": "boolean",
+      "default": false
     },
     "visualizer": {
       "type": "object",
