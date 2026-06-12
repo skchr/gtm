@@ -132,13 +132,44 @@ void ffmpeg_audio_uninit(FfmpegAudioCtx* ctx) {
 
 static void extract_metadata(FfmpegAudioCtx* ctx) {
   if (!ctx->fmt_ctx) return;
+  AVDictionary* md = NULL;
   AVDictionaryEntry* t;
+
+  /* Try format-level metadata first */
   t = av_dict_get(ctx->fmt_ctx->metadata, "title", NULL, 0);
-  if (t) strncpy(ctx->title, t->value, sizeof(ctx->title) - 1);
+  if (!t || !t->value[0]) {
+    /* Fall back to stream-level metadata */
+    if (ctx->audio_stream_idx >= 0) {
+      AVStream* st = ctx->fmt_ctx->streams[ctx->audio_stream_idx];
+      if (st->metadata) {
+        t = av_dict_get(st->metadata, "title", NULL, 0);
+      }
+    }
+  }
+  if (t && t->value[0]) strncpy(ctx->title, t->value, sizeof(ctx->title) - 1);
+
   t = av_dict_get(ctx->fmt_ctx->metadata, "artist", NULL, 0);
-  if (t) strncpy(ctx->artist, t->value, sizeof(ctx->artist) - 1);
+  if (!t || !t->value[0]) {
+    if (ctx->audio_stream_idx >= 0) {
+      AVStream* st = ctx->fmt_ctx->streams[ctx->audio_stream_idx];
+      if (st->metadata) {
+        t = av_dict_get(st->metadata, "artist", NULL, 0);
+      }
+    }
+  }
+  if (t && t->value[0]) strncpy(ctx->artist, t->value, sizeof(ctx->artist) - 1);
+
   t = av_dict_get(ctx->fmt_ctx->metadata, "album", NULL, 0);
-  if (t) strncpy(ctx->album, t->value, sizeof(ctx->album) - 1);
+  if (!t || !t->value[0]) {
+    if (ctx->audio_stream_idx >= 0) {
+      AVStream* st = ctx->fmt_ctx->streams[ctx->audio_stream_idx];
+      if (st->metadata) {
+        t = av_dict_get(st->metadata, "album", NULL, 0);
+      }
+    }
+  }
+  if (t && t->value[0]) strncpy(ctx->album, t->value, sizeof(ctx->album) - 1);
+
   if (ctx->fmt_ctx->duration != AV_NOPTS_VALUE)
     ctx->duration = (double)ctx->fmt_ctx->duration / AV_TIME_BASE;
   if (ctx->duration <= 0.0 && ctx->audio_stream_idx >= 0) {
@@ -966,3 +997,5 @@ int ffmpeg_mixer_set_eq_preset(MixerCtx* mx, const char* name) {
   eq_rebuild(&mx->eq);
   return 0;
 }
+
+

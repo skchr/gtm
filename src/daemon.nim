@@ -1,7 +1,21 @@
-import os, json, strutils, net, posix, random, osproc, streams, times, tables
+import os, json, strutils, net, posix, random, osproc, times, tables
 from nativesockets import setBlocking, selectRead, SocketHandle
 proc prctl(option: cint, arg2: cstring): cint {.importc, header: "<sys/prctl.h>".}
 import audio, state, visualizer, library, ytdlp
+
+proc parseFilenameForMetadata(path: string): tuple[title, artist: string] =
+  let (_, stem, _) = path.splitFile()
+  result = (stem, "")
+  let dashPos = stem.find(" - ")
+  if dashPos > 0:
+    let left = stem[0..<dashPos].strip()
+    var isTrackNum = left.len in {2, 3}
+    if isTrackNum:
+      for c in left:
+        if c notin {'0'..'9'}: isTrackNum = false; break
+    if not isTrackNum:
+      result.artist = left
+      result.title = stem[dashPos+3..^1].strip()
 
 type
   DaemonCmdKind* = enum
@@ -34,13 +48,17 @@ type
     strArg2*: string
     strArg3*: string
 
+  ClientState* = object
+    sock*: Socket
+    buf*: string
+
   Daemon* = ref object
     player: AudioBackend
     lib: LibraryDb
     viz: Visualizer
     running: bool
     server: Socket
-    client: Socket
+    clients*: seq[ClientState]
     currentTrackPath: string
     currentTrackTitle: string
     currentTrackChannel: string
@@ -260,15 +278,24 @@ proc serializeEvents(events: seq[AudioEvent]; d: Daemon = nil): JsonNode =
     else: discard
     result.add(obj)
 
+proc broadcastAll(d: Daemon, data: string) =
+  var alive: seq[ClientState]
+  for c in d.clients:
+    if trySend(c.sock, data):
+      alive.add(c)
+    else:
+      try: c.sock.close() except: discard
+  d.clients = alive
+
 proc sendQueueEvent(d: Daemon) =
-  if d.client == nil: return
+  if d.clients.len == 0: return
   var qArr = newJArray()
   for p in d.playbackQueue: qArr.add(%p)
   var soArr = newJArray()
   for i in d.shuffleOrder: soArr.add(%i)
   let ev = %*{"events": [%*{"kind": %aekCustomEvent.int, "event": "queue_changed",
     "queue": qArr, "shuffleOrder": soArr, "shuffleIndex": %d.shuffleIndex}]}
-  discard trySend(d.client, $ev & "\n")
+  d.broadcastAll($ev & "\n")
 
 proc savePlaybackState(d: Daemon) =
   if d.lib != nil:
@@ -1121,6 +1148,7 @@ proc runDaemon*() =
     viz: newVisualizer(),
     running: true,
     idleTimeout: 300,
+    clients: @[],
     shuffleEnabled: false,
     repeatMode: 0,
     sleepTimerRemaining: 0,
@@ -1213,20 +1241,19 @@ proc runDaemon*() =
       let existing = scanDirectoryRecursive(daemon.ytDownloadDir)
       for p in existing:
         if daemon.lib.findTrackByPath(p) == 0:
-          let (_, name, _) = p.splitFile()
-          discard daemon.lib.addTrack(p, name, "", "", 0.0, 0, 0, "")
+          let (ftitle, fartist) = parseFilenameForMetadata(p)
+          discard daemon.lib.addTrack(p, ftitle, fartist, "", 0.0, 0, 0, "")
   removeFile(sockPath())
   let srvFd = posix.socket(posix.AF_UNIX, posix.SOCK_STREAM, 0)
   daemon.server = newSocket(srvFd, Domain.AF_UNIX, SockType.SOCK_STREAM)
   daemon.server.bindUnix(sockPath())
   daemon.server.listen()
-  var buf = ""
   while daemon.running:
     when defined(useMpris):
       pollMpris()
     var readFds: seq[SocketHandle] = @[daemon.server.getFd]
-    if daemon.client != nil:
-      readFds.add(daemon.client.getFd)
+    for c in daemon.clients:
+      readFds.add(c.sock.getFd)
     if selectRead(readFds, 16) > 0:
       if daemon.server.getFd in readFds:
         var clientAddr: posix.Sockaddr_un
@@ -1234,56 +1261,61 @@ proc runDaemon*() =
         let cliFd = posix.accept(daemon.server.getFd,
           cast[ptr posix.SockAddr](addr(clientAddr)), addr(addrLen))
         if cliFd.int >= 0:
-          if daemon.client != nil:
-            daemon.client.close()
-          daemon.cleanupClientState()
-          daemon.client = newSocket(cliFd, Domain.AF_UNIX, SockType.SOCK_STREAM)
-          setBlocking(daemon.client.getFd, false)
-          buf = ""
+          var newClient = ClientState(
+            sock: newSocket(cliFd, Domain.AF_UNIX, SockType.SOCK_STREAM),
+            buf: ""
+          )
+          setBlocking(newClient.sock.getFd, false)
+          daemon.clients.add(newClient)
           daemon.idleFrames = 0
-      if daemon.client != nil and daemon.client.getFd in readFds:
-        var tmp: array[4096, char]
-        let n = posix.recv(daemon.client.getFd, addr tmp[0], tmp.len.cint, 0)
-        if n < 0:
-          let err = osLastError()
-          if err.int32 != 11 and err.int32 != 10035:
-            daemon.client.close()
-            daemon.cleanupClientState()
-            daemon.client = nil
-            buf = ""
-        elif n == 0:
-          daemon.client.close()
-          daemon.cleanupClientState()
-          daemon.client = nil
-          buf = ""
-        else:
-          let old = buf.len; buf.setLen(old + n); copyMem(addr buf[old], addr tmp[0], n)
-          while true:
-            let nli = buf.find('\n')
-            if nli < 0: break
-            let line = buf[0..<nli]
-            buf = buf[nli+1..^1]
-            if line.len > 0:
-              if debugMode: stderr.writeLine("[gtm] daemon recv: " & line)
-              let cmd = parseDaemonCommand(line)
-              let resp = try:
-                executeCommand(daemon, cmd)
-              except Exception as ex:
-                if debugMode: stderr.writeLine("[gtm] command error: " & ex.msg)
-                %*{"ok": false, "error": ex.msg}
-              let respStr = $resp & "\n"
-              if debugMode: stderr.writeLine("[gtm] daemon resp: " & respStr.strip())
-              if not trySend(daemon.client, respStr):
-                daemon.cleanupClientState()
-                daemon.client = nil
-                buf = ""
-              if not daemon.running: break
+      # Read from all clients
+      var ci = 0
+      while ci < daemon.clients.len:
+        if daemon.clients[ci].sock.getFd in readFds:
+          var tmp: array[4096, char]
+          let n = posix.recv(daemon.clients[ci].sock.getFd, addr tmp[0], tmp.len.cint, 0)
+          if n < 0:
+            let err = osLastError()
+            if err.int32 != 11 and err.int32 != 10035:
+              daemon.clients[ci].sock.close()
+              daemon.clients.delete(ci)
+              continue
+            else:
+              ci.inc
+              continue
+          elif n == 0:
+            daemon.clients[ci].sock.close()
+            daemon.clients.delete(ci)
+            continue
+          else:
+            let old = daemon.clients[ci].buf.len
+            daemon.clients[ci].buf.setLen(old + n)
+            copyMem(addr daemon.clients[ci].buf[old], addr tmp[0], n)
+            while true:
+              let nli = daemon.clients[ci].buf.find('\n')
+              if nli < 0: break
+              let line = daemon.clients[ci].buf[0..<nli]
+              daemon.clients[ci].buf = daemon.clients[ci].buf[nli+1..^1]
+              if line.len > 0:
+                if debugMode: stderr.writeLine("[gtm] daemon recv: " & line)
+                let cmd = parseDaemonCommand(line)
+                let resp = try:
+                  executeCommand(daemon, cmd)
+                except Exception as ex:
+                  if debugMode: stderr.writeLine("[gtm] command error: " & ex.msg)
+                  %*{"ok": false, "error": ex.msg}
+                let respStr = $resp & "\n"
+                if debugMode: stderr.writeLine("[gtm] daemon resp: " & respStr.strip())
+                if not trySend(daemon.clients[ci].sock, respStr):
+                  daemon.clients[ci].sock.close()
+                  daemon.clients.delete(ci)
+                  break
+                if not daemon.running: break
+        ci.inc
     let daemonEvents = daemon.player.pollEvents()
-    if daemonEvents.len > 0 and daemon.client != nil:
+    if daemonEvents.len > 0 and daemon.clients.len > 0:
       let evJson = %*{"events": serializeEvents(daemonEvents, daemon)}
-      if not trySend(daemon.client, $evJson & "\n"):
-        daemon.cleanupClientState()
-        daemon.client = nil
+      daemon.broadcastAll($evJson & "\n")
     # Auto-advance on track ended
     for ev in daemonEvents:
       if ev.kind == aekTrackEnded:
@@ -1341,11 +1373,8 @@ proc runDaemon*() =
               if existingId == 0:
                 discard daemon.lib.addTrack(path, daemon.ytDownloadTasks[i].title,
                   daemon.ytDownloadTasks[i].channel, "", 0.0, 0, 0, "")
-            if daemon.client != nil:
-              let ev = %*{"events": [%*{"kind": %aekCustomEvent.int, "event": "yt_download_done", "url": %dlUrl, "path": %path, "title": %daemon.ytDownloadTasks[i].title}]}
-              if not trySend(daemon.client, $ev & "\n"):
-                daemon.cleanupClientState()
-                daemon.client = nil
+            let ev = %*{"events": [%*{"kind": %aekCustomEvent.int, "event": "yt_download_done", "url": %dlUrl, "path": %path, "title": %daemon.ytDownloadTasks[i].title}]}
+            daemon.broadcastAll($ev & "\n")
       else:
         dlDone.add(i)
     for i in countdown(dlDone.len - 1, 0):
@@ -1386,10 +1415,9 @@ proc runDaemon*() =
           if isYtWatchUrl(nextQueuedPath) and nextQueuedPath in daemon.ytDownloadedMeta:
             nextTitle = daemon.ytDownloadedMeta[nextQueuedPath].title
             nextChannel = daemon.ytDownloadedMeta[nextQueuedPath].channel
-          if daemon.client != nil:
-            let ev = %*{"events": [%*{"kind": %aekCustomEvent.int, "event": "up_next",
-              "next_path": %nextQueuedPath, "next_title": %nextTitle, "next_channel": %nextChannel}]}
-            discard trySend(daemon.client, $ev & "\n")
+          let ev = %*{"events": [%*{"kind": %aekCustomEvent.int, "event": "up_next",
+            "next_path": %nextQueuedPath, "next_title": %nextTitle, "next_channel": %nextChannel}]}
+          daemon.broadcastAll($ev & "\n")
 
     # Crossfade scheduling
     if daemon.player.state == 1 and daemon.crossfadeDuration > 0:
@@ -1421,17 +1449,16 @@ proc runDaemon*() =
       let batchEnd = min(daemon.scanningIdx + 10, daemon.scanningFiles.len)
       while daemon.scanningIdx < batchEnd:
         let p = daemon.scanningFiles[daemon.scanningIdx]
-        let (_, name, _) = p.splitFile()
         if daemon.lib != nil:
-          discard daemon.lib.addTrack(p, name, "", "", 0.0, 0, 0, "")
+          let (ftitle, fartist) = parseFilenameForMetadata(p)
+          discard daemon.lib.addTrack(p, ftitle, fartist, "", 0.0, 0, 0, "")
         daemon.scanningIdx.inc
       if daemon.scanningIdx >= daemon.scanningFiles.len:
         daemon.scanningDir = ""
         daemon.scanningFiles = @[]
         daemon.scanningIdx = 0
-        if daemon.client != nil:
-          let ev = %*{"events": [%*{"kind": %aekCustomEvent.int, "event": "scan_done"}]}
-          discard trySend(daemon.client, $ev & "\n")
+        let ev = %*{"events": [%*{"kind": %aekCustomEvent.int, "event": "scan_done"}]}
+        daemon.broadcastAll($ev & "\n")
 
     daemon.viz.readPcm()
     var pcmBuf: seq[float32] = @[]
@@ -1467,7 +1494,8 @@ proc runDaemon*() =
       daemon.viz.stopCapture()
       daemon.player.shutdown()
       break
-  if daemon.client != nil: daemon.client.close()
+  for c in daemon.clients:
+    try: c.sock.close() except: discard
   daemon.server.close()
   removeFile(sockPath())
   removePidFile()

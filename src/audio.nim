@@ -1,4 +1,4 @@
-import os, math, posix, tables, osproc
+import os, math, strutils, posix, tables, osproc
 
 type
   AudioBackendType* = enum abtNone, abtFFmpeg, abtDaemon, abtProcess, abtMixer
@@ -142,6 +142,7 @@ when defined(useFFmpeg):
   proc ffmpeg_audio_read_pcm(ctx: FfmpegCtx, output: ptr float32, count: cint): cint {.importc.}
   proc ffmpeg_audio_get_metadata(ctx: FfmpegCtx, title, artist, album: ptr cstring, duration: ptr cdouble) {.importc.}
 
+
   proc ffmpeg_mixer_init(): FfmpegCtx {.importc.}
   proc ffmpeg_mixer_uninit(ctx: FfmpegCtx) {.importc.}
   proc ffmpeg_mixer_load_master(ctx: FfmpegCtx, path: cstring): cint {.importc.}
@@ -254,7 +255,8 @@ when defined(useFFmpeg):
       b.ctx = nil
 
   method getMetadata*(b: FfmpegBackend, path: string): TrackMetadata =
-    result = TrackMetadata(title: path.splitPath().tail)
+    let (_, stem, _) = path.splitFile()
+    result = TrackMetadata(title: stem)
     if b.ctx == nil: return
     var ctitle, cartist, calbum: cstring
     var cduration: cdouble
@@ -263,6 +265,17 @@ when defined(useFFmpeg):
     if cartist != nil: result.artist = $cartist
     if calbum != nil: result.album = $calbum
     if cduration > 0: result.duration = cduration
+    if result.artist.len == 0 and result.album.len == 0:
+      let dashPos = stem.find(" - ")
+      if dashPos > 0:
+        let left = stem[0..<dashPos].strip()
+        var isTrackNum = left.len in {2, 3}
+        if isTrackNum:
+          for c in left:
+            if c notin {'0'..'9'}: isTrackNum = false; break
+        if not isTrackNum:
+          result.artist = left
+          result.title = stem[dashPos+3..^1].strip()
 
   proc newFfmpegBackend*(): FfmpegBackend =
     result = FfmpegBackend(
@@ -401,7 +414,8 @@ when defined(useFFmpeg):
       b.ctx = nil
 
   method getMetadata*(b: MixerBackend, path: string): TrackMetadata =
-    result = TrackMetadata(title: path.splitPath().tail)
+    let (_, stem, _) = path.splitFile()
+    result = TrackMetadata(title: stem)
     if b.ctx == nil: return
     var ctitle, cartist, calbum: cstring
     var cduration: cdouble
@@ -410,6 +424,17 @@ when defined(useFFmpeg):
     if cartist != nil: result.artist = $cartist
     if calbum != nil: result.album = $calbum
     if cduration > 0: result.duration = cduration
+    if result.artist.len == 0 and result.album.len == 0:
+      let dashPos = stem.find(" - ")
+      if dashPos > 0:
+        let left = stem[0..<dashPos].strip()
+        var isTrackNum = left.len in {2, 3}
+        if isTrackNum:
+          for c in left:
+            if c notin {'0'..'9'}: isTrackNum = false; break
+        if not isTrackNum:
+          result.artist = left
+          result.title = stem[dashPos+3..^1].strip()
 
   proc newMixerBackend*(): MixerBackend =
     result = MixerBackend(

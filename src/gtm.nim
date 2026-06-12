@@ -1,7 +1,7 @@
 import os, terminal, strutils, unicode, json, sets, math, sequtils, algorithm, times, random, posix, tables
 from illwave as iw import nil
 from nimwave as nw import nil
-import state, ui, audio, library, theme, commands, client, visualizer, cli, ytdlp
+import state, ui, audio, library, theme, commands, client, visualizer, cli, ytdlp, albumart
 
 proc loadConfig(state: var AppState) =
   let path = state.configPath
@@ -231,6 +231,7 @@ proc playSelected(state: var AppState) =
     state.status = psPlaying
     state.currentPlayingPath = track.path
     state.currentPlayingId = track.id
+    state.currentThumbnail = ""
     if state.player of DaemonClient:
       let tid = DaemonClient(state.player).lastTrackId
       if tid > 0:
@@ -365,14 +366,18 @@ proc checkAutocomplete(state: var AppState) =
     state.overlay.ytAutocompleteVisible = false
     state.overlay.ytAutocompleteSuggestions = @[]
     return
-  # Local search history fuzzy match
+  if state.ytSearchHistoryLower.len != state.ytSearchHistory.len:
+    state.ytSearchHistoryLower = @[]
+    for h in state.ytSearchHistory:
+      state.ytSearchHistoryLower.add(h.toLowerAscii())
   var matches: seq[string] = @[]
   let lowerQuery = query.toLowerAscii()
-  for h in state.ytSearchHistory:
-    if lowerQuery in h.toLowerAscii():
-      matches.add(h)
+  for i, hLower in state.ytSearchHistoryLower:
+    if lowerQuery in hLower:
+      matches.add(state.ytSearchHistory[i])
+      if matches.len >= 5: break
   if matches.len > 0:
-    state.overlay.ytAutocompleteSuggestions = matches[0..<min(matches.len, 5)]
+    state.overlay.ytAutocompleteSuggestions = matches
     state.overlay.ytAutocompleteCursor = 0
     state.overlay.ytAutocompleteVisible = true
   else:
@@ -810,6 +815,9 @@ proc adjustSetting(state: var AppState, delta: int) =
   state.markDirty(ceSettings)
 
 proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
+  if key != iw.Key.None:
+    state.lastKeyDisplay = keyDisplayName(key)
+    state.lastKeyTimer = 120
   if state.aboutVisible:
     if key notin {iw.Key.None}:
       state.aboutVisible = false
@@ -836,6 +844,10 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
       state.eqBandSelect = max(0, state.eqBandSelect - 1)
     of iw.Key.P, iw.Key.ShiftP:
       cycleEqPreset(state)
+    of iw.Key.H, iw.Key.LeftBracket:
+      state.eqScrollOffset = max(0, state.eqScrollOffset - 1)
+    of iw.Key.L, iw.Key.RightBracket:
+      state.eqScrollOffset = min(9, state.eqScrollOffset + 1)
     else:
       discard
     return
@@ -878,10 +890,9 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           if fileExists(p):
             let paths = parseM3u(p)
             for path in paths:
-              let (_, name, _) = splitFile(path)
-              let title = name.replace(".", " ")
+              let (title, artist, album) = parseFilenameMetadata(path)
               state.libraryTracks.add(Track(
-                path: path, title: title, artist: "", album: "",
+                path: path, title: title, artist: artist, album: album,
                 duration: 0.0, id: int64(state.libraryTracks.len + 1)
               ))
             state.rebuildItems()
@@ -978,7 +989,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         state.overlay.cursor = 0
         state.overlay.ytResults = @[]
         state.ytSearchQuery = ""
-        state.ytDebounceAt = epochTime() + 0.25
+        state.ytDebounceAt = epochTime() + 0.3
         state.markDirty(ceSearchResults)
       of iw.Key.CtrlS:
         if state.overlay.multiMode:
@@ -998,7 +1009,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         elif state.overlay.ytResults.len > 0:
           # Pagination: scroll past end → fetch next page
           state.ytSearchPage.inc
-          state.ytDebounceAt = epochTime() + 0.25
+          state.ytDebounceAt = epochTime() + 0.3
           state.markDirty(ceSearchResults)
       of iw.Key.Up, iw.Key.CtrlP:
         if state.overlay.ytAutocompleteVisible and state.overlay.ytAutocompleteSuggestions.len > 0:
@@ -1011,7 +1022,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           state.overlay.query = state.overlay.ytAutocompleteSuggestions[state.overlay.ytAutocompleteCursor]
           state.overlay.ytAutocompleteVisible = false
           state.overlay.ytAutocompleteSuggestions = @[]
-          state.ytDebounceAt = epochTime() + 0.25
+          state.ytDebounceAt = epochTime() + 0.3
         elif state.overlay.ytResults.len > 0:
           if state.overlay.multiMode:
             let idx = state.overlay.cursor
@@ -1084,7 +1095,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
       of iw.Key.Backspace:
         if state.overlay.query.len > 0:
           state.overlay.query = state.overlay.query[0..^2]
-          state.ytDebounceAt = epochTime() + 0.25
+          state.ytDebounceAt = epochTime() + 0.3
           state.overlay.ytAutocompleteSuggestions = @[]
           state.overlay.ytAutocompleteVisible = false
       else:
@@ -1092,7 +1103,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           let code = ch.int
           if code >= 32 and code < 127:
             state.overlay.query &= $ch
-            state.ytDebounceAt = epochTime() + 0.25
+            state.ytDebounceAt = epochTime() + 0.3
             # Trigger autocomplete lookup
             checkAutocomplete(state)
     of okYtBatch:
@@ -1250,6 +1261,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
             state.status = psPlaying
             state.currentPlayingPath = track.path
             state.currentPlayingId = track.id
+            state.currentThumbnail = ""
             state.markDirtyBatch(cePlayState, ceTrack, ceQueue)
             if state.duration == 0.0 and track.duration > 0:
               state.duration = track.duration
@@ -1711,6 +1723,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           state.setFeedback("Search history: " & $state.ytSearchHistory.len & " entries")
         of 6: # Clear Search History
           state.ytSearchHistory = @[]
+          state.ytSearchHistoryLower = @[]
           state.saveConfig()
           state.showNotification("Search history cleared")
         else: discard
@@ -1746,7 +1759,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         else: discard
       state.rebuildItems()
       state.markDirty(ceSettings)
-    else:
+    elif state.tab != tabNowPlaying:
       state.playSelected()
   of iw.Key.S: state.player.stop(); state.status = psStopped
   of iw.Key.Y:
@@ -1995,6 +2008,7 @@ proc processEvents(state: var AppState) =
         state.currentPlayingPath = ev.metadata["track_path"]
         state.currentPlayingTitle = ev.metadata.getOrDefault("track_title", "")
         state.currentPlayingChannel = ev.metadata.getOrDefault("track_channel", "")
+        state.currentThumbnail = ""
       state.markDirtyBatch(cePlayState, ceTrack)
       # Show Now Playing notification (skip if auto-advanced — "Up Next" was already shown)
       if not autoAdvanced:
@@ -2116,6 +2130,8 @@ proc fullStateSync(state: var AppState, daemonState: JsonNode) =
     state.crossfadeDuration = daemonState["crossfadeDuration"].getInt(0)
   if daemonState.hasKey("crossfadeCurve"):
     state.crossfadeCurve = CrossfadeCurveType(daemonState["crossfadeCurve"].getInt(1))
+  if daemonState.hasKey("shuffleIndex"):
+    state.shuffleIndex = daemonState["shuffleIndex"].getInt(0)
 
 proc runTui(args: seq[string]) =
   terminal.enableTrueColors()
@@ -2136,8 +2152,21 @@ proc runTui(args: seq[string]) =
   if ctx.data.ytCookieSource.len == 0:
     ctx.data.ytCookieSource = detectBrowserCookieSource()
   if dClient.connected:
-    let daemonState = dClient.getDaemonState()
+    let daemonState = dClient.getFullState()
     fullStateSync(ctx.data, daemonState)
+    if daemonState.hasKey("queue"):
+      try:
+        let qArr = daemonState["queue"]
+        var queue: seq[int] = @[]
+        for qItem in qArr.items:
+          let qPath = qItem.getStr("")
+          for i, t in ctx.data.libraryTracks:
+            if t.path == qPath:
+              queue.add(i)
+              break
+        ctx.data.playbackQueue = queue
+        ctx.data.markDirtyBatch(ceQueue, cePlayState)
+      except: discard
   ctx.data.player.setVolume(ctx.data.volume)
   ctx.data.initCommands()
   ctx.data.applyKeybindings()
@@ -2189,7 +2218,10 @@ proc runTui(args: seq[string]) =
         discard
       elif key != iw.Key.None:
         handleKey(ctx.data, key, chars)
-        ctx.data.needsRedraw = true
+        if ctx.data.overlay.kind != okNone:
+          ctx.data.markDirty(ceSearchResults)
+        else:
+          ctx.data.needsRedraw = true
       processEvents(ctx.data)
       # Daemon reconnection watchdog
       if ctx.data.player of DaemonClient:
@@ -2253,7 +2285,8 @@ proc runTui(args: seq[string]) =
               ctx.data.ytSearchActive = true
               ctx.data.ytSearchLoading = true
               ctx.data.markDirty(ceSearchLoading)
-        if ctx.data.ytSearchActive:
+        ctx.data.ytSearchFrameCounter += 1
+        if ctx.data.ytSearchActive and ctx.data.ytSearchFrameCounter mod 4 == 0:
           let pollResp = cli.ytSearchPoll()
           if pollResp.hasKey("results"):
             var results: seq[YtSearchResult] = @[]
@@ -2269,13 +2302,13 @@ proc runTui(args: seq[string]) =
               if ctx.data.overlay.ytResults.len == 0:
                 ctx.data.overlay.ytResults = results
                 ctx.data.overlay.cursor = 0
+                ctx.data.ytSearchSeenUrls = initHashSet[string]()
+                for r in results: ctx.data.ytSearchSeenUrls.incl(r.url)
               else:
-                var seen: HashSet[string]
-                for r in ctx.data.overlay.ytResults: seen.incl(r.url)
                 for r in results:
-                  if r.url notin seen:
+                  if r.url notin ctx.data.ytSearchSeenUrls:
                     ctx.data.overlay.ytResults.add(r)
-                    seen.incl(r.url)
+                    ctx.data.ytSearchSeenUrls.incl(r.url)
               ctx.data.markDirty(ceSearchResults)
             if pollResp.hasKey("done") and pollResp["done"].getBool():
               ctx.data.ytSearchActive = false
@@ -2292,6 +2325,7 @@ proc runTui(args: seq[string]) =
             ctx.data.player.play()
             ctx.data.status = psPlaying
             ctx.data.currentPlayingPath = url
+            ctx.data.currentThumbnail = ctx.data.ytStreamPendingItem.thumbnail
             ctx.data.markDirtyBatch(cePlayState, ceTrack)
             ctx.data.showNotification("Streaming: " & ctx.data.ytStreamPendingItem.title, nkInfo)
           else:
@@ -2361,6 +2395,8 @@ proc runTui(args: seq[string]) =
         ctx.data.notificationTimer.dec
       if ctx.data.nowPlayingCueTimer > 0:
         ctx.data.nowPlayingCueTimer.dec
+      if ctx.data.lastKeyTimer > 0:
+        ctx.data.lastKeyTimer.dec
       if ctx.data.upNextTimer > 0:
         ctx.data.upNextTimer.dec
       if ctx.data.sleepTimerRemaining > 0 and ctx.data.player of DaemonClient:
@@ -2379,7 +2415,8 @@ proc runTui(args: seq[string]) =
         resized = true
       vizFrameSkip = (vizFrameSkip + 1) mod 3
       if ctx.data.viz != nil and vizFrameSkip == 0:
-        ctx.data.viz.readPcm()
+        if ctx.data.overlay.kind == okNone:
+          ctx.data.viz.readPcm()
       if ctx.data.status != oldStatus:
         ctx.data.needsRedraw = true
       oldStatus = ctx.data.status
@@ -2402,6 +2439,8 @@ proc runTui(args: seq[string]) =
       if shouldDraw and tbReady:
         iw.display(ctx.tb, prevTb)
         prevTb = ctx.tb
+        if ctx.data.tab == tabNowPlaying and ctx.data.artAnsi.len > 0:
+          writeCachedArt(ctx.data.artAnsi, 1, 0)
       if key != iw.Key.None:
         showInputCursor(ctx.data, curW, curH)
       ctx.data.clearDirty()

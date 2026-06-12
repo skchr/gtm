@@ -5,6 +5,8 @@ const
   MAX_VIS_BARS* = 64
   MIN_VIS_BARS* = 4
   PCM_RING_SIZE* = FFT_SIZE * 8
+  WATERFALL_COLS* = 256
+  FFT_HOP_SIZE* = FFT_SIZE div 2
 
 type
   PcmRingBuffer* = object
@@ -23,6 +25,12 @@ type
     running*: bool
     barCount*: int
     pcmBuf: seq[float32]
+    overlapBuf: seq[float32]
+    waterfall*: seq[array[MAX_VIS_BARS, float]]
+    waterfallHead*: int
+    waterfallLen*: int
+    fftReal: seq[float]
+    fftImag: seq[float]
 
 proc createShm*(name: string): PcmRingBuffer =
   result.shmName = name
@@ -91,10 +99,20 @@ proc destroyShm*(shm: var PcmRingBuffer) =
 proc shmPath*(): string = "/gtm-pcm"
 
 proc newVisualizer*(): Visualizer =
+  var wf = newSeq[array[MAX_VIS_BARS, float]](WATERFALL_COLS)
+  for i in 0..<WATERFALL_COLS:
+    for j in 0..<MAX_VIS_BARS:
+      wf[i][j] = 0.0
   Visualizer(
     pcmBuf: newSeq[float32](),
+    overlapBuf: newSeq[float32](),
+    waterfall: wf,
+    waterfallHead: 0,
+    waterfallLen: 0,
     running: true,
-    barCount: 32
+    barCount: 32,
+    fftReal: newSeq[float](FFT_SIZE),
+    fftImag: newSeq[float](FFT_SIZE)
   )
 
 proc clear*(v: Visualizer) =
@@ -103,10 +121,16 @@ proc clear*(v: Visualizer) =
     v.shm.writePos[] = 0
     v.shm.readPos[] = 0
   v.pcmBuf.setLen(0)
+  v.overlapBuf.setLen(0)
   for i in 0..<MAX_VIS_BARS:
     v.bins[i] = 0.0
     v.smoothBins[i] = 0.0
     v.peakVals[i] = 0.0
+  for i in 0..<WATERFALL_COLS:
+    for j in 0..<MAX_VIS_BARS:
+      v.waterfall[i][j] = 0.0
+  v.waterfallHead = 0
+  v.waterfallLen = 0
 
 proc startCapture*(v: Visualizer) =
   v.shm = createShm(shmPath())
@@ -118,16 +142,13 @@ proc stopCapture*(v: Visualizer) =
 proc hanning(i, n: int): float =
   0.5 * (1.0 - cos(2.0 * PI * float(i) / float(n - 1)))
 
-proc processFft*(v: Visualizer) =
-  let n = min(FFT_SIZE, v.pcmBuf.len)
-  if n < 64: return
-  var real = newSeq[float](n)
-  var imag = newSeq[float](n)
+proc processOneFft(v: Visualizer, samples: openArray[float32]) =
+  let n = FFT_SIZE
   for i in 0..<n:
     let w = hanning(i, n)
-    real[i] = float(v.pcmBuf[i]) * w
-    imag[i] = 0.0
-  v.pcmBuf = v.pcmBuf[n..^1]
+    v.fftReal[i] = float(samples[i]) * w
+    v.fftImag[i] = 0.0
+
   var bits = 0
   var tmp = n
   while tmp > 1:
@@ -140,8 +161,8 @@ proc processFft*(v: Visualizer) =
       j = (j shl 1) or (ti and 1)
       ti = ti shr 1
     if j > i:
-      swap(real[i], real[j])
-      swap(imag[i], imag[j])
+      swap(v.fftReal[i], v.fftReal[j])
+      swap(v.fftImag[i], v.fftImag[j])
   var step = 1
   while step < n:
     let halfStep = step
@@ -153,14 +174,16 @@ proc processFft*(v: Visualizer) =
         let angle = angleStep * float(pair)
         let wr = cos(angle)
         let wi = sin(angle)
-        let tRe = wr * real[idx + halfStep] - wi * imag[idx + halfStep]
-        let tIm = wr * imag[idx + halfStep] + wi * real[idx + halfStep]
-        real[idx + halfStep] = real[idx] - tRe
-        imag[idx + halfStep] = imag[idx] - tIm
-        real[idx] = real[idx] + tRe
-        imag[idx] = imag[idx] + tIm
+        let tRe = wr * v.fftReal[idx + halfStep] - wi * v.fftImag[idx + halfStep]
+        let tIm = wr * v.fftImag[idx + halfStep] + wi * v.fftReal[idx + halfStep]
+        v.fftReal[idx + halfStep] = v.fftReal[idx] - tRe
+        v.fftImag[idx + halfStep] = v.fftImag[idx] - tIm
+        v.fftReal[idx] = v.fftReal[idx] + tRe
+        v.fftImag[idx] = v.fftImag[idx] + tIm
+
   let bars = max(MIN_VIS_BARS, min(MAX_VIS_BARS, v.barCount))
   let nyquist = n div 2
+  let invN = 1.0 / float(n)
   for bar in 0..<bars:
     let logLo = ln(float(nyquist) * 0.02 + 1.0)
     let logHi = ln(float(nyquist) + 1.0)
@@ -172,14 +195,44 @@ proc processFft*(v: Visualizer) =
     let e = min(nyquist - 1, max(endBin, s + 1))
     var sum = 0.0
     for b in s..e:
-      sum += sqrt(real[b] * real[b] + imag[b] * imag[b])
+      sum += sqrt(v.fftReal[b] * v.fftReal[b] + v.fftImag[b] * v.fftImag[b])
     let avg = sum / float(max(e - s + 1, 1))
-    let db = 20.0 * log10(max(avg, 1e-10))
-    let raw = max(0.0, min(1.0, (db + 60.0) / 60.0))
-    let compressed = pow(raw, 1.8)
+    let normalized = avg * invN * 2.0
+    let db = 20.0 * log10(max(normalized, 1e-10))
+    let raw = max(0.0, min(1.0, (db + 70.0) / 70.0))
+    let compressed = pow(raw, 1.5)
     v.bins[bar] = compressed
-    v.smoothBins[bar] = v.smoothBins[bar] * 0.85 + raw * 0.15
+    let attack = 0.4
+    let release = 0.85
+    if compressed > v.smoothBins[bar]:
+      v.smoothBins[bar] = v.smoothBins[bar] * (1.0 - attack) + compressed * attack
+    else:
+      v.smoothBins[bar] = v.smoothBins[bar] * (1.0 - release) + compressed * release
     v.peakVals[bar] = max(v.smoothBins[bar], v.peakVals[bar] * 0.94)
+
+  let head = v.waterfallHead
+  for bar in 0..<bars:
+    v.waterfall[head][bar] = v.smoothBins[bar]
+  for bar in bars..<MAX_VIS_BARS:
+    v.waterfall[head][bar] = 0.0
+  v.waterfallHead = (head + 1) mod WATERFALL_COLS
+  if v.waterfallLen < WATERFALL_COLS:
+    v.waterfallLen.inc
+
+proc processFft*(v: Visualizer) =
+  if v.pcmBuf.len == 0: return
+  var combined = v.overlapBuf & v.pcmBuf
+  v.overlapBuf.setLen(0)
+  v.pcmBuf.setLen(0)
+  var pos = 0
+  while pos + FFT_SIZE <= combined.len:
+    processOneFft(v, combined[pos..<pos + FFT_SIZE])
+    pos += FFT_HOP_SIZE
+  let remaining = combined.len - pos
+  if remaining > 0:
+    v.overlapBuf = combined[pos..^1]
+  else:
+    v.overlapBuf.setLen(0)
 
 proc writePcm*(v: Visualizer, samples: openArray[float32]) =
   writePcm(v.shm, samples)
@@ -187,5 +240,5 @@ proc writePcm*(v: Visualizer, samples: openArray[float32]) =
 proc readPcm*(v: Visualizer) =
   if not v.running: return
   readPcm(v.shm, v.pcmBuf, FFT_SIZE * 4)
-  while v.pcmBuf.len >= FFT_SIZE:
+  if v.pcmBuf.len >= FFT_HOP_SIZE:
     processFft(v)

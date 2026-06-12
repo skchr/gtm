@@ -4,6 +4,7 @@ switch("define", "gtm")
 switch("outdir", "bin")
 switch("define", "useFFmpeg")
 switch("define", "useSqlite")
+switch("define", "ssl")
 
 let projectDir = currentSourcePath().parentDir()
 

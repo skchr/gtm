@@ -139,12 +139,15 @@ type
     url*: string
     duration*: string
     channel*: string
+    thumbnail*: string
+    playlistTitle*: string
     kind*: YtSearchResultKind
 
   YtPlaylistDetail* = object
     title*: string
     url*: string
     channel*: string
+    thumbnail*: string
     trackCount*: int
     tracks*: seq[YtSearchResult]
 
@@ -280,6 +283,8 @@ type
     notificationTimer*: int
     nowPlayingCueMsg*: string
     nowPlayingCueTimer*: int
+    lastKeyDisplay*: string
+    lastKeyTimer*: int
     prevVolume*: int
     shuffleEnabled*: bool
     shuffleOrder*: seq[int]
@@ -322,9 +327,12 @@ type
     ytCookieSource*: string
     ytJsRuntime*: string
     ytSearchHistory*: seq[string]
+    ytSearchHistoryLower*: seq[string]
     ytSearchQuery*: string
     ytSearchPage*: int
     ytSearchPageSize*: int
+    ytSearchSeenUrls*: HashSet[string]
+    ytSearchFrameCounter*: int
     ytSearchLoading*: bool
     ytSearchResultsAll*: seq[YtSearchResult]
     ytProgressCurrent*: int
@@ -350,6 +358,7 @@ type
     eqPreset*: string
     eqBandSelect*: int
     eqPresetSelect*: int
+    eqScrollOffset*: int
     ytPlaybackStartTime*: float
     ytPauseDuration*: float
     ytPauseStartTime*: float
@@ -360,9 +369,13 @@ type
     ytPlaylistFetching*: bool
     currentPlayingTitle*: string
     currentPlayingChannel*: string
+    currentThumbnail*: string
     upNextMsg*: string
     upNextTimer*: int
     cursorVisible*: bool
+    artAnsi*: string
+    artAnsiLines*: int
+    artAnsiKey*: string
 
 const
   GTM_VERSION* {.strdefine.} = "0.3.4"

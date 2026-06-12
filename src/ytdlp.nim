@@ -51,7 +51,10 @@ proc parseYtJsonLine*(line: string): YtSearchResult =
     let c = if j.hasKey("channel"): j["channel"].getStr("")
             elif j.hasKey("uploader"): j["uploader"].getStr("")
             else: ""
-    result = YtSearchResult(title: t, url: u, duration: dur, channel: c, kind: if isPlaylist: srkPlaylist else: srkVideo)
+    let thumb = if j.hasKey("thumbnail"): j["thumbnail"].getStr("") else: ""
+    let plTitle = if j.hasKey("playlist_title"): j["playlist_title"].getStr("") else: ""
+    result = YtSearchResult(title: t, url: u, duration: dur, channel: c, thumbnail: thumb,
+      playlistTitle: plTitle, kind: if isPlaylist: srkPlaylist else: srkVideo)
   except:
     discard
 
@@ -321,9 +324,11 @@ proc fetchPlaylistTracks*(url: string; cookieSource: string = ""; jsRuntime: str
           let channel = if j.hasKey("channel"): j["channel"].getStr("")
                        elif j.hasKey("uploader"): j["uploader"].getStr("")
                        else: ""
+          let thumbnail = if j.hasKey("thumbnail"): j["thumbnail"].getStr("") else: ""
           result.title = title
           result.url = url
           result.channel = channel
+          result.thumbnail = thumbnail
         except: discard
       for line in lines:
         if line.len > 0:

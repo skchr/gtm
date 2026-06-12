@@ -516,6 +516,28 @@ proc displayArtist*(track: Track): string =
 proc displayAlbum*(track: Track): string =
   if track.album.len > 0: track.album else: "Unknown Album"
 
+proc parseFilenameMetadata*(path: string): tuple[title, artist, album: string] =
+  let (_, name, _) = path.splitFile()
+  var title = name
+  var artist = ""
+  var album = ""
+  let dashPos = name.find(" - ")
+  if dashPos > 0:
+    let left = name[0..<dashPos].strip()
+    let right = name[dashPos+3..^1].strip()
+    var isTrackNum = left.len in {2, 3}
+    if isTrackNum:
+      for c in left:
+        if c notin {'0'..'9'}: isTrackNum = false; break
+    if isTrackNum:
+      title = right
+    else:
+      artist = left
+      title = right
+  if title.len == 0:
+    title = name
+  result = (title, artist, album)
+
 const audioExtensions* = [
   ".mp3", ".flac", ".ogg", ".m4a", ".wav", ".opus",
   ".aac", ".wma", ".alac", ".aiff", ".ape"

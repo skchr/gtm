@@ -21,7 +21,11 @@ proc daemonIsRunning*(): bool =
       let pid = readFile(p).strip().parseInt()
       if pid > 0:
         result = posix.kill(pid.cint, 0) == 0
+        if not result:
+          # Stale PID — remove file
+          try: removeFile(p) except: discard
     except:
+      try: removeFile(p) except: discard
       result = false
 
 proc startDaemonProcess*() =
@@ -58,15 +62,17 @@ proc connectToDaemon*(cli: DaemonClient): bool =
 proc ensureDaemon*(cli: DaemonClient) =
   if cli == nil: return
   if cli.connected: return
-  if cli.reconnectCooldown > 0: return
+  if cli.reconnectCooldown > 0:
+    cli.reconnectCooldown.dec
+    return
   if daemonIsRunning():
     if connectToDaemon(cli):
       cli.reconnectCooldown = 0
     else:
-      cli.reconnectCooldown = 30
+      cli.reconnectCooldown = 10
   else:
     startDaemonProcess()
-    cli.reconnectCooldown = 30
+    cli.reconnectCooldown = 10
 
 proc drainEventLines(cli: DaemonClient, buf: var string) =
   cli.drainedEvents = @[]
