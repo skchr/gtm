@@ -1351,12 +1351,11 @@ proc runDaemon*() =
           daemon.ytSearchResults.add(r)
         daemon.ytSearchActive = false
         daemon.ytSearchBuf = ""
-        if daemon.ytSearchResults.len > 0:
-          var arr = newJArray()
-          for r in daemon.ytSearchResults:
-            arr.add(%*{"title": %r.title, "url": %r.url, "duration": %r.duration, "channel": %r.channel, "kind": %r.kind.int})
-          let ev = %*{"events": [%*{"kind": %aekCustomEvent.int, "event": "yt_search_done", "results": arr}]}
-          daemon.broadcastAll($ev & "\n")
+        var arr = newJArray()
+        for r in daemon.ytSearchResults:
+          arr.add(%*{"title": %r.title, "url": %r.url, "duration": %r.duration, "channel": %r.channel, "kind": %r.kind.int})
+        let ev = %*{"events": [%*{"kind": %aekCustomEvent.int, "event": "yt_search_done", "results": arr}]}
+        daemon.broadcastAll($ev & "\n")
 
     # Auto-poll yt-dlp playlist fetch results & broadcast via events
     if daemon.ytPlaylistActive:

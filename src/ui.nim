@@ -297,22 +297,10 @@ method render*(node: NowPlayingView, ctx: var nw.Context[AppState]) =
     return
   let artSize = computeArtSize(w, h)
   let hasArt = artSize.charW > 0 and artSize.charH > 0
-  var artArtist = track.artist
-  var artAlbum = track.album
-  if artArtist.len == 0:
-    let parsed = parseFilenameMetadata(track.path)
-    artArtist = parsed.artist
-  let artKey = if state.currentThumbnail.len > 0: state.currentThumbnail else: track.path
-  if hasArt:
+  let showArt = ctx.data.artAnsi.len > 0
+  if hasArt and showArt:
     var artCtx = nw.slice(ctx, 1, 0, artSize.charW, artSize.charH)
     render(AlbumArtBox(charW: artSize.charW, charH: artSize.charH), artCtx)
-    if state.artAnsiKey != artKey:
-      let art = getArtForTrack(track.path, state.currentThumbnail, artArtist, artAlbum, artSize.charW, artSize.charH)
-      ctx.data.artAnsi = art.data
-      ctx.data.artAnsiLines = art.lines
-      ctx.data.artAnsiKey = artKey
-      ctx.data.artAnsiWritten = false
-  let showArt = ctx.data.artAnsi.len > 0
   let artPad = if showArt: artSize.charW + 2 else: 1
   var line = 0
   # Title row
@@ -935,7 +923,6 @@ proc renderPicker*(ctx: var nw.Context[AppState], props: PickerProps) =
   let boxH = min(props.maxHeight, h - 4)
   let boxX = (w - boxW) div 2
   let boxY = (h - boxH) div 2
-  overlayBackground(ctx.tb, w, h, theme.crust)
   fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.surface0)
   drawRoundedRect(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.mauve)
   writeStr(ctx.tb, boxX + 1, boxY, props.title, theme.mauve)
@@ -1009,7 +996,6 @@ method render*(node: GenericOverlay, ctx: var nw.Context[AppState]) =
   else: return
   let boxX = (w - boxW) div 2
   let boxY = (h - boxH) div 2
-  overlayBackground(ctx.tb, w, h, theme.crust)
   fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.surface0)
   drawRoundedRect(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.mauve)
   writeStr(ctx.tb, boxX + 1, boxY, title, theme.mauve)
@@ -1254,7 +1240,6 @@ method render*(node: LeaderMenuOverlay, ctx: var nw.Context[AppState]) =
   let boxH = min(20, h - 4)
   let boxX = (w - boxW) div 2
   let boxY = (h - boxH) div 2
-  overlayBackground(ctx.tb, w, h, theme.crust)
   fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.surface0)
   drawRoundedRect(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.peach)
   writeStr(ctx.tb, boxX + 1, boxY, "\u2316 Actions", theme.peach)
@@ -1312,7 +1297,6 @@ method render*(node: HelpOverlay, ctx: var nw.Context[AppState]) =
   let boxH = min(26, h - 4)
   let boxX = (w - boxW) div 2
   let boxY = (h - boxH) div 2
-  overlayBackground(ctx.tb, w, h, theme.crust)
   fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.surface0)
   drawRoundedRect(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.mauve)
   writeStr(ctx.tb, boxX + 2, boxY + 1, " Help — Keybindings ", theme.mauve)
@@ -1348,7 +1332,6 @@ method render*(node: AboutOverlay, ctx: var nw.Context[AppState]) =
   let boxH = min(34, h - 4)
   let boxX = (w - boxW) div 2
   let boxY = (h - boxH) div 2
-  overlayBackground(ctx.tb, w, h, theme.crust)
   fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.surface0)
   drawRoundedRect(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.mauve)
   writeStr(ctx.tb, boxX + 2, boxY + 1, " About gtm ", theme.mauve)
@@ -1500,7 +1483,6 @@ method render*(node: FeedbackCueOverlay, ctx: var nw.Context[AppState]) =
   let boxH = 2 + titleLines.len + bodyLines.len
   let boxX = w - boxW - 2
   let boxY = 2
-  overlayBackground(ctx.tb, w, h, theme.base)
   fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, bgCol)
   drawRoundedRect(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, if kind == nkError: theme.red elif kind == nkWarning: theme.peach else: theme.blue)
   var curY = boxY + 1
@@ -1526,7 +1508,6 @@ method render*(node: NowPlayingCueOverlay, ctx: var nw.Context[AppState]) =
   let boxH = 1 + lines.len
   let boxX = 2
   let boxY = 2
-  overlayBackground(ctx.tb, w, h, theme.base)
   fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.surface0)
   drawRoundedRect(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.blue)
   var curY = boxY + 1
@@ -1549,7 +1530,6 @@ method render*(node: UpNextCueOverlay, ctx: var nw.Context[AppState]) =
   let boxH = 1 + lines.len
   let boxX = 2
   let boxY = 2
-  overlayBackground(ctx.tb, w, h, theme.base)
   fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.surface0)
   drawRoundedRect(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.peach)
   var curY = boxY + 1
@@ -1568,7 +1548,6 @@ method render*(node: PlaylistInputOverlay, ctx: var nw.Context[AppState]) =
   let boxH = 5
   let boxX = (w - boxW) div 2
   let boxY = (h - boxH) div 2
-  overlayBackground(ctx.tb, w, h, theme.crust)
   fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.surface0)
   drawRoundedRect(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.mauve)
   writeStr(ctx.tb, boxX + 1, boxY, ctx.data.playlistInputPrompt, theme.mauve)
@@ -1588,8 +1567,6 @@ method render*(node: EqualizerOverlay, ctx: var nw.Context[AppState]) =
   let boxH = min(26, h - 4)
   let boxX = (w - boxW) div 2
   let boxY = (h - boxH) div 2
-  overlayBackground(ctx.tb, w, h, theme.crust)
-  ctx.tb.setBackgroundColor(theme.surface0)
   fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.surface0)
   drawRoundedRect(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.mauve)
   ctx.tb.setBackgroundColor(theme.surface0)

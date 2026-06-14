@@ -367,9 +367,10 @@ type
     artAnsiKey*: string
     artAnsiWritten*: bool
     artBoxX*, artBoxY*, artBoxW*, artBoxH*: int
+    artLoading*: bool
 
 const
-  GTM_VERSION* {.strdefine.} = "0.3.4"
+  GTM_VERSION* {.strdefine.} = "0.4.7"
   GTM_BUILD_TIME* {.strdefine.} = ""
 
   FooterPresets*: Table[FooterPresetName, set[FooterModule]] = {

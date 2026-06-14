@@ -351,16 +351,18 @@ proc cleanQuit(state: var AppState, stopDaemon: bool) =
   setCursorPos(0, 0)
   quit(0)
 
+proc syncSearchHistoryLower(state: var AppState) =
+  if state.ytSearchHistoryLower.len != state.ytSearchHistory.len:
+    state.ytSearchHistoryLower = @[]
+    for h in state.ytSearchHistory:
+      state.ytSearchHistoryLower.add(h.toLowerAscii())
+
 proc checkAutocomplete(state: var AppState) =
   let query = state.overlay.query
   if query.len < 2:
     state.overlay.ytAutocompleteVisible = false
     state.overlay.ytAutocompleteSuggestions = @[]
     return
-  if state.ytSearchHistoryLower.len != state.ytSearchHistory.len:
-    state.ytSearchHistoryLower = @[]
-    for h in state.ytSearchHistory:
-      state.ytSearchHistoryLower.add(h.toLowerAscii())
   var matches: seq[string] = @[]
   let lowerQuery = query.toLowerAscii()
   for i, hLower in state.ytSearchHistoryLower:
@@ -1724,7 +1726,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           state.setFeedback("Search history: " & $state.ytSearchHistory.len & " entries")
         of 6: # Clear Search History
           state.ytSearchHistory = @[]
-          state.ytSearchHistoryLower = @[]
+          state.syncSearchHistoryLower()
           state.saveConfig()
           state.showNotification("Search history cleared")
         else: discard
@@ -2361,6 +2363,25 @@ proc runTui(args: seq[string]) =
           ctx.data.reconnecting = false
           ctx.data.reconnectAttempts = 0
           ctx.data.setFeedback("[Daemon connected]")
+      if ctx.data.tab == tabNowPlaying and
+         ctx.data.artAnsiKey != (if ctx.data.currentThumbnail.len > 0: ctx.data.currentThumbnail else: ctx.data.currentPlayingPath):
+        if not ctx.data.artLoading:
+          ctx.data.artLoading = true
+      if ctx.data.artLoading:
+        let artKey = if ctx.data.currentThumbnail.len > 0: ctx.data.currentThumbnail else: ctx.data.currentPlayingPath
+        if artKey.len > 0 and artKey != ctx.data.artAnsiKey:
+          let curW = terminal.terminalWidth()
+          let curH = terminal.terminalHeight()
+          let artSize = computeArtSize(curW, curH)
+          let track = ctx.data.getPlayingTrack()
+          let artArtist = if track.artist.len > 0: track.artist else: track.path.parseFilenameMetadata().artist
+          let art = getArtForTrack(track.path, ctx.data.currentThumbnail, artArtist, track.album, artSize.charW, artSize.charH)
+          ctx.data.artAnsi = art.data
+          ctx.data.artAnsiLines = art.lines
+          ctx.data.artAnsiKey = artKey
+          ctx.data.artAnsiWritten = false
+          ctx.data.needsRedraw = true
+        ctx.data.artLoading = false
       if ctx.data.overlay.kind == okYtSearch and ctx.data.player of DaemonClient:
         let cli = DaemonClient(ctx.data.player)
         if ctx.data.ytDebounceAt > 0 and epochTime() >= ctx.data.ytDebounceAt:
