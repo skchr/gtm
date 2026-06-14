@@ -442,6 +442,14 @@ when defined(useSqlite):
       result = colText(stmt, 0.cint)
     finalize(stmt)
 
+  proc getDownloadMetaByUrl*(lib: LibraryDb, sourceUrl: string): tuple[path, title, channel: string] =
+    let stmt = prepare(lib.db, "SELECT local_path, title, channel FROM downloads WHERE source_url = ?")
+    if stmt == nil: return ("", "", "")
+    bindText(stmt, 1.cint, sourceUrl)
+    if sqlite3_step(stmt) == SQLITE_ROW:
+      result = (colText(stmt, 0.cint), colText(stmt, 1.cint), colText(stmt, 2.cint))
+    finalize(stmt)
+
   proc getDownloads*(lib: LibraryDb): seq[tuple[url, path, title: string]] =
     let stmt = prepare(lib.db, "SELECT source_url, local_path, title FROM downloads ORDER BY downloaded_at DESC")
     if stmt == nil: return
@@ -501,6 +509,7 @@ else:
   proc isFavourite*(lib: LibraryDb, trackId: int64): bool = false
   proc addDownload*(lib: LibraryDb, sourceUrl, localPath, title, channel: string) = discard
   proc getDownloadByUrl*(lib: LibraryDb, sourceUrl: string): string = ""
+  proc getDownloadMetaByUrl*(lib: LibraryDb, sourceUrl: string): tuple[path, title, channel: string] = ("", "", "")
   proc getDownloads*(lib: LibraryDb): seq[tuple[url, path, title: string]] = @[]
   proc addSearchQuery*(lib: LibraryDb, query: string) = discard
   proc getSearchHistory*(lib: LibraryDb): seq[string] = @[]

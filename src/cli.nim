@@ -92,7 +92,7 @@ proc execSubcommand*(args: CliArgs): bool =
     var cli = newDaemonClient()
     cli.ensureDaemon()
     if args.targets.len > 0:
-      cli.loadFile(args.targets[0])
+      discard cli.loadFile(args.targets[0])
       cli.play()
     echo "Playing: ", if args.targets.len > 0: args.targets[0] else: ""
   of scPause, scToggle:

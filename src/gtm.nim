@@ -218,7 +218,7 @@ proc playSelected(state: var AppState) =
   if track.path.len > 0:
     state.timePos = 0.0
     state.duration = 0.0
-    state.player.loadFile(track.path, track.title, track.artist)
+    discard state.player.loadFile(track.path, track.title, track.artist)
     state.player.play()
     state.status = psPlaying
     state.currentPlayingPath = track.path
@@ -515,6 +515,18 @@ proc updateThemePickerResults(state: var AppState) =
     if q.len == 0 or preset.contains(q):
       state.overlay.strResults.add(preset)
 
+proc updateEqPresetPickerResults(state: var AppState) =
+  state.overlay.strResults = @[]
+  let q = state.overlay.query.toLowerAscii()
+  for preset in state.eqPresetList:
+    if q.len == 0 or preset.toLowerAscii().contains(q):
+      state.overlay.strResults.add(preset)
+
+proc applyEqPreset(state: var AppState, name: string) =
+  state.eqPreset = name
+  if state.player of DaemonClient:
+    DaemonClient(state.player).setEqPreset(name)
+
 proc initCommands(state: var AppState) =
   state.registerCommand("leader_menu", "Actions Menu",
     "Open the actions/leader menu", "\u2316", @["CtrlL"],
@@ -594,6 +606,19 @@ proc initCommands(state: var AppState) =
   state.registerCommand("show_equalizer", "Equalizer",
     "Open graphic equalizer with 10-band EQ", "\U0001F3B5", @["AltE", "E"],
     proc(s: var AppState) = s.eqVisible = not s.eqVisible)
+  state.registerCommand("show_eq_presets", "EQ Presets",
+    "Browse and preview equalizer presets", "\U0001F3B5", @[],
+    proc(s: var AppState) =
+      if s.player of DaemonClient:
+        let cli = DaemonClient(s.player)
+        let resp = cli.getEqPresets()
+        if resp.hasKey("presets"):
+          s.eqPresetList = @[]
+          for p in resp["presets"]:
+            s.eqPresetList.add(p.getStr(""))
+      s.eqVisible = false
+      s.overlay = OverlayState(kind: okEqPresetPicker, query: "")
+      s.updateEqPresetPickerResults())
   state.registerCommand("quit_background", "Quit (Background)",
     "Exit TUI, keep playback running", "\u23F8", @["q"],
     proc(s: var AppState) = s.quitBackground())
@@ -718,6 +743,39 @@ proc cycleEqPreset(state: var AppState) =
           idx = (i + 1) mod presets.len
           break
       state.eqPreset = presets[idx].getStr("")
+
+proc handleEqPresetPickerOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
+  case key
+  of iw.Key.Escape:
+    state.overlay.clear()
+  of iw.Key.Enter:
+    if state.overlay.strResults.len > 0 and state.overlay.cursor >= 0 and
+       state.overlay.cursor < state.overlay.strResults.len:
+      state.applyEqPreset(state.overlay.strResults[state.overlay.cursor])
+    state.overlay.clear()
+  of iw.Key.Backspace:
+    if state.overlay.query.len > 0:
+      state.overlay.query = state.overlay.query[0..^2]
+      state.updateEqPresetPickerResults()
+  of iw.Key.Down:
+    if state.overlay.cursor < state.overlay.strResults.len - 1:
+      state.overlay.cursor.inc
+      if state.overlay.cursor < state.overlay.strResults.len:
+        state.applyEqPreset(state.overlay.strResults[state.overlay.cursor])
+  of iw.Key.Up:
+    if state.overlay.cursor > 0:
+      state.overlay.cursor.dec
+      if state.overlay.cursor < state.overlay.strResults.len:
+        state.applyEqPreset(state.overlay.strResults[state.overlay.cursor])
+  else:
+    for ch in chars:
+      let code = ch.int
+      if code >= 32 and code < 127:
+        state.overlay.query &= $ch
+        state.updateEqPresetPickerResults()
+    state.overlay.cursor = 0
+  if state.overlay.strResults.len > 0:
+    state.overlay.cursor = min(state.overlay.cursor, state.overlay.strResults.len - 1)
 
 proc adjustSetting(state: var AppState, delta: int) =
   if state.tab != tabSettings: return
@@ -1106,7 +1164,7 @@ proc handleQueueOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         state.playbackQueue.delete(qIdx)
         if state.queueCursor >= qIdx and state.queueCursor > 0:
           state.queueCursor.dec
-        state.player.loadFile(track.path)
+        discard state.player.loadFile(track.path)
         state.player.play()
         state.status = psPlaying
         state.currentPlayingPath = track.path
@@ -1310,8 +1368,19 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
       state.eqBandSelect = min(9, state.eqBandSelect + 1)
     of iw.Key.Up:
       state.eqBandSelect = max(0, state.eqBandSelect - 1)
-    of iw.Key.P, iw.Key.ShiftP:
+    of iw.Key.P:
       cycleEqPreset(state)
+    of iw.Key.ShiftP:
+      if state.player of DaemonClient:
+        let cli = DaemonClient(state.player)
+        let resp = cli.getEqPresets()
+        if resp.hasKey("presets"):
+          state.eqPresetList = @[]
+          for p in resp["presets"]:
+            state.eqPresetList.add(p.getStr(""))
+      state.eqVisible = false
+      state.overlay = OverlayState(kind: okEqPresetPicker, query: "")
+      state.updateEqPresetPickerResults()
     of iw.Key.H, iw.Key.LeftBracket:
       state.eqScrollOffset = max(0, state.eqScrollOffset - 1)
     of iw.Key.L, iw.Key.RightBracket:
@@ -1409,6 +1478,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
   if state.overlay.kind != okNone:
     case state.overlay.kind
     of okThemePicker: state.handleThemePickerOverlay(key, chars)
+    of okEqPresetPicker: state.handleEqPresetPickerOverlay(key, chars)
     of okYtSearch: state.handleYtSearchOverlay(key, chars)
     of okYtBatch: state.handleYtBatchOverlay(key, chars)
     of okQueuePicker: state.handleQueuePickerOverlay(key, chars)
@@ -2140,7 +2210,7 @@ proc processEvents(state: var AppState) =
         if url.len > 0:
           state.ytStreamResolving = false
           let thumb = state.ytStreamPendingItem.thumbnail
-          state.player.loadFile(url, title, channel, thumb)
+          discard state.player.loadFile(url, title, channel, thumb)
           state.player.play()
           state.status = psPlaying
           state.currentPlayingPath = url

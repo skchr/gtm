@@ -213,7 +213,7 @@ proc sendAsync*(cli: DaemonClient, cmd: JsonNode, callback: proc(resp: JsonNode)
   except:
     discard
 
-method loadFile*(cli: DaemonClient, path: string, title: string = "", channel: string = "", thumbnail: string = "") =
+method loadFile*(cli: DaemonClient, path: string, title: string = "", channel: string = "", thumbnail: string = ""): bool =
   cli.ensureDaemon()
   let resp = sendDaemonCmd(cli, %*{"cmd": "load_file", "path": path, "title": title, "channel": channel, "thumbnail": thumbnail})
   cli.lastTrackId = 0
@@ -226,6 +226,7 @@ method loadFile*(cli: DaemonClient, path: string, title: string = "", channel: s
   if resp.hasKey("state"):
     let s = resp["state"].getStr()
     cli.state = (if s == "playing": 1 elif s == "paused": 2 else: 0)
+  result = resp.hasKey("ok") and resp["ok"].getBool(false)
 
 method play*(cli: DaemonClient) =
   cli.ensureDaemon()

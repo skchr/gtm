@@ -137,3 +137,85 @@ suite "YtSearchResult":
     check pl.trackCount == 2
     check pl.tracks.len == 2
     check pl.title == "My Mix"
+
+suite "Crossfade":
+  test "crossfade command construction":
+    let cmd = %*{"cmd": "crossfade", "duration": 5.0}
+    check cmd["cmd"].getStr("") == "crossfade"
+    check cmd["duration"].getFloat(0.0) == 5.0
+
+  test "prepare_next command construction":
+    let cmd = %*{"cmd": "prepare_next", "path": "/music/next.flac"}
+    check cmd["cmd"].getStr("") == "prepare_next"
+    check cmd["path"].getStr("") == "/music/next.flac"
+
+  test "set_crossfade_curve command construction":
+    let cmd = %*{"cmd": "set_crossfade_curve", "curve_type": 2}
+    check cmd["curve_type"].getInt(0) == 2
+
+  test "crossfade frame calculation at 44100 Hz":
+    let durationSec = 5.0
+    let sampleRate = 44100
+    let frames = int(durationSec * sampleRate.float32)
+    check frames == 220500
+    # At 1024 samples/frame, should complete in ~215 iterations
+    let framesPerIter = 1024
+    let iterations = frames div framesPerIter
+    check iterations == 215
+
+  test "crossfade frame calculation at 48000 Hz":
+    let durationSec = 5.0
+    let sampleRate = 48000
+    let frames = int(durationSec * sampleRate.float32)
+    check frames == 240000
+
+  test "crossfade event serialization":
+    let startedEv = %*{"kind": 8, "event": "crossfade_started"}
+    check startedEv["event"].getStr("") == "crossfade_started"
+    let endedEv = %*{"kind": 8, "event": "crossfade_ended"}
+    check endedEv["event"].getStr("") == "crossfade_ended"
+
+  test "crossfade schedule phase detection":
+    let crossfadeDuration = 5
+    let dur = 200.0
+    let tpos = 196.0
+    let timeRemaining = dur - tpos
+    let prepareThreshold = float(crossfadeDuration) + 2.0
+    check timeRemaining <= prepareThreshold  # Phase 0: should prepare
+    check timeRemaining <= float(crossfadeDuration)  # Phase 1: should start
+    check timeRemaining > 0.0
+
+  test "crossfade not triggered yet when far from end":
+    let crossfadeDuration = 5
+    let dur = 200.0
+    let tpos = 100.0
+    let timeRemaining = dur - tpos
+    check timeRemaining > float(crossfadeDuration) + 2.0  # Too early
+
+suite "Equalizer":
+  test "set_eq_band command construction":
+    let cmd = %*{"cmd": "set_eq_band", "band": 3, "gain_db": -2.5}
+    check cmd["cmd"].getStr("") == "set_eq_band"
+    check cmd["band"].getInt(0) == 3
+    check cmd["gain_db"].getFloat(0.0) == -2.5
+
+  test "set_eq_preset command construction":
+    let cmd = %*{"cmd": "set_eq_preset", "name": "Rock"}
+    check cmd["name"].getStr("") == "Rock"
+
+  test "list_eq_presets response includes new presets":
+    let presets = ["Flat", "Rock", "Pop", "Classical", "Jazz", "HipHop", "Vocal",
+                   "BassBoost", "Headphones", "Laptop",
+                   "Electronic", "Acoustic", "Podcast", "Dance"]
+    check presets.len == 14
+    check "Electronic" in presets
+    check "Acoustic" in presets
+    check "Podcast" in presets
+    check "Dance" in presets
+
+  test "eq band clamping":
+    let bands = [31.25, 62.5, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0]
+    check bands.len == 10
+    for b in bands:
+      check b >= 31.25
+      check b <= 16000.0

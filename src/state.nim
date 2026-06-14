@@ -161,6 +161,7 @@ type
     okCommandPalette
     okQueueOverlay
     okFuzzyFinder
+    okEqPresetPicker
 
   YtSubTab* = enum ystAll, ystPlaylists
 
@@ -215,7 +216,6 @@ type
     fmPlayStatus
     fmVolume
     fmBackend
-    fmNextTrack
     fmSelectCount
     fmTime
     fmDate
@@ -344,6 +344,7 @@ type
     eqVisible*: bool
     eqBands*: array[10, float]
     eqPreset*: string
+    eqPresetList*: seq[string]
     eqBandSelect*: int
     eqPresetSelect*: int
     eqScrollOffset*: int
@@ -376,11 +377,11 @@ const
   FooterPresets*: Table[FooterPresetName, set[FooterModule]] = {
     fpnMinimal:   {fmPlayStatus},
     fpnCompact:   {fmPlayStatus, fmTime, fmBackend, fmQueueCount, fmEqPreset},
-    fpnFull:      {fmPlayStatus, fmVolume, fmBackend, fmNextTrack, fmSelectCount, fmTime, fmDate, fmRepeatShuffle, fmSleepTimer, fmQueueCount, fmEqPreset, fmCurrentPlaylist},
-    fpnInfo:      {fmPlayStatus, fmNextTrack, fmVolume, fmBackend, fmQueueCount},
+    fpnFull:      {fmPlayStatus, fmVolume, fmBackend, fmSelectCount, fmTime, fmDate, fmRepeatShuffle, fmSleepTimer, fmQueueCount, fmEqPreset, fmCurrentPlaylist},
+    fpnInfo:      {fmPlayStatus, fmVolume, fmBackend, fmQueueCount},
     fpnNavigator: {fmPlayStatus, fmRepeatShuffle, fmSelectCount, fmTime, fmDate},
     fpnDebug:     {fmPlayStatus, fmTime, fmDate, fmSleepTimer, fmBackend, fmVolume, fmQueueCount, fmEqPreset},
-    fpnMusic:     {fmPlayStatus, fmNextTrack, fmRepeatShuffle, fmVolume, fmQueueCount, fmEqPreset},
+    fpnMusic:     {fmPlayStatus, fmRepeatShuffle, fmVolume, fmQueueCount, fmEqPreset},
     fpnClock:     {fmPlayStatus, fmTime, fmDate}
   }.toTable()
 

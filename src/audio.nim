@@ -1,4 +1,4 @@
-import os, math, strutils, posix, tables, osproc
+import os, math, strutils, posix, tables
 
 type
   AudioBackendType* = enum abtNone, abtFFmpeg, abtDaemon, abtMixer
@@ -33,7 +33,7 @@ type
     backendType*: AudioBackendType
     working*: bool
 
-method loadFile*(b: AudioBackend, path: string, title: string = "", channel: string = "", thumbnail: string = "") {.base.} = discard
+method loadFile*(b: AudioBackend, path: string, title: string = "", channel: string = "", thumbnail: string = ""): bool {.base.} = false
 method play*(b: AudioBackend) {.base.} = discard
 method pause*(b: AudioBackend) {.base.} = discard
 method stop*(b: AudioBackend) {.base.} = discard
@@ -89,6 +89,7 @@ when defined(useFFmpeg):
   proc ffmpeg_mixer_is_playing(ctx: FfmpegCtx): cint {.importc.}
   proc ffmpeg_mixer_is_crossfading(ctx: FfmpegCtx): cint {.importc.}
   proc ffmpeg_mixer_master_ended(ctx: FfmpegCtx): cint {.importc.}
+  proc ffmpeg_mixer_get_sample_rate(ctx: FfmpegCtx): cint {.importc.}
   proc ffmpeg_mixer_read_pcm(ctx: FfmpegCtx, output: ptr float32, count: cint): cint {.importc.}
   proc ffmpeg_mixer_get_metadata(ctx: FfmpegCtx, title, artist, album: ptr cstring, duration: ptr cdouble) {.importc.}
   proc ffmpeg_mixer_start_crossfade(ctx: FfmpegCtx, duration_frames: cint, reverse: cint = 0) {.importc.}
@@ -111,7 +112,7 @@ when defined(useFFmpeg):
     else:
       output.setLen(0)
 
-  method loadFile*(b: FfmpegBackend, path: string, title: string = "", channel: string = "", thumbnail: string = "") =
+  method loadFile*(b: FfmpegBackend, path: string, title: string = "", channel: string = "", thumbnail: string = ""): bool =
     b.stop()
     b.timePos = 0.0
     b.duration = 0.0
@@ -119,13 +120,14 @@ when defined(useFFmpeg):
     b.lastPlaying = false
     if b.ctx == nil:
       b.state = 0
-      return
+      return false
     if ffmpeg_audio_load(b.ctx, path.cstring) == 0:
       b.state = 0
-      return
+      return false
     b.metadata = b.getMetadata(path)
     b.duration = ffmpeg_audio_get_duration(b.ctx)
     b.state = 0
+    return true
 
   method play*(b: FfmpegBackend) =
     ffmpeg_audio_start(b.ctx)
@@ -235,7 +237,7 @@ when defined(useFFmpeg):
     else:
       output.setLen(0)
 
-  method loadFile*(b: MixerBackend, path: string, title: string = "", channel: string = "", thumbnail: string = "") =
+  method loadFile*(b: MixerBackend, path: string, title: string = "", channel: string = "", thumbnail: string = ""): bool =
     b.stop()
     b.timePos = 0.0
     b.duration = 0.0
@@ -244,13 +246,14 @@ when defined(useFFmpeg):
     b.lastCrossfading = false
     if b.ctx == nil:
       b.state = 0
-      return
+      return false
     if ffmpeg_mixer_load_master(b.ctx, path.cstring) == 0:
       b.state = 0
-      return
+      return false
     b.metadata = b.getMetadata(path)
     b.duration = ffmpeg_mixer_get_duration(b.ctx)
     b.state = 0
+    return true
 
   method play*(b: MixerBackend) =
     ffmpeg_mixer_start(b.ctx)
@@ -289,8 +292,9 @@ when defined(useFFmpeg):
 
   method startCrossfade*(b: MixerBackend, durationSeconds: float, reverse: bool = false) =
     if b.ctx == nil or b.duration <= 0: return
-    let sampleRate = 44100  # default, matched to master
-    let frames = (durationSeconds * sampleRate.float32).cint
+    let sampleRate = ffmpeg_mixer_get_sample_rate(b.ctx).int
+    let frames = if sampleRate > 0: (durationSeconds * sampleRate.float32).cint else: 0
+    if frames <= 0: return
     ffmpeg_mixer_start_crossfade(b.ctx, frames, reverse.cint)
 
   method getStatusFlags*(b: MixerBackend): tuple[crossfading, masterEnded: bool] =

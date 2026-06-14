@@ -511,7 +511,8 @@ static void eq_apply(Equalizer* eq, float* data, int samples) {
 
 static const char* EQ_PRESET_NAMES[] = {
   "Flat", "Rock", "Pop", "Classical", "Jazz", "HipHop", "Vocal",
-  "BassBoost", "Headphones", "Laptop", NULL
+  "BassBoost", "Headphones", "Laptop",
+  "Electronic", "Acoustic", "Podcast", "Dance", NULL
 };
 
 static const float EQ_PRESETS[][EQ_BANDS] = {
@@ -525,6 +526,10 @@ static const float EQ_PRESETS[][EQ_BANDS] = {
   { 7, 6, 5, 4, 3, 2, 1, 1, 1, 1 },          // BassBoost
   { 2, 2, 1, 0, -1, -1, 0, 1, 2, 3 },        // Headphones
   { 1, 2, 2, 3, 3, 2, 1, 0, -1, -2 },        // Laptop
+  { 5, 4, 3, 1, 0, 0, 1, 3, 5, 5 },          // Electronic — strong bass + treble for synths/EDM
+  { 3, 2, 1, 2, 3, 4, 3, 2, 1, 1 },          // Acoustic — mid-focused for strings/vocals
+  { -2, -1, 0, 2, 4, 5, 3, 1, 0, -1 },       // Podcast — cut rumble, boost speech presence
+  { 5, 4, 2, 1, 0, 0, 1, 3, 4, 4 },          // Dance — punchy bass + crisp highs for club
 };
 
 // --- MixerCtx for PCM crossfade ---
@@ -645,6 +650,7 @@ static void* mixer_thread(void* arg) {
     if (mx->crossfade_active && mx->slave && mx->slave->fmt_ctx) {
       int stotal = decode_into_buf(mx->slave, spkt, sframe, &sbuf, &scap);
       if (stotal > 0) {
+        int ch = mx->master->channels > 0 ? mx->master->channels : 2;
         int total_frames = mx->crossfade_total_frames;
         int remaining = mx->crossfade_frames_remaining;
         double p = 1.0 - (total_frames > 0 ? (double)remaining / total_frames : 0.0);
@@ -721,8 +727,10 @@ static void* mixer_thread(void* arg) {
           if (next != mx->pcm_rp) { mx->pcm_ring[wp] = mixbuf[i]; mx->pcm_wp = next; }
         }
 
-        mx->current_time += (double)(nsamples / ch) / mx->master->sample_rate;
-        mx->crossfade_frames_remaining--;
+        int frames_proc = nsamples / ch;
+        if (frames_proc < 1) frames_proc = 1;
+        mx->current_time += (double)frames_proc / mx->master->sample_rate;
+        mx->crossfade_frames_remaining -= frames_proc;
         if (mx->crossfade_frames_remaining <= 0) {
           mx->crossfade_active = 0;
           mx->crossfade_reverse = 0;
@@ -923,6 +931,11 @@ double ffmpeg_mixer_get_time(MixerCtx* mx) {
 double ffmpeg_mixer_get_duration(MixerCtx* mx) {
   if (!mx) return 0.0;
   return mx->master_duration;
+}
+
+int ffmpeg_mixer_get_sample_rate(MixerCtx* mx) {
+  if (!mx || !mx->master) return 44100;
+  return mx->master->sample_rate > 0 ? (int)mx->master->sample_rate : 44100;
 }
 
 int ffmpeg_mixer_is_playing(MixerCtx* mx) {

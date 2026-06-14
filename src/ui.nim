@@ -221,7 +221,7 @@ method render*(node: TabBar, ctx: var nw.Context[AppState]) =
 var gCursorX, gCursorY: int = -1
 
 proc showInputCursor*(state: var AppState, w, h: int) =
-  let shouldShow = state.overlay.kind in {okYtSearch, okCommandPalette, okThemePicker, okQueuePicker, okPlaylistSearch, okQueueOverlay, okFuzzyFinder} or
+  let shouldShow = state.overlay.kind in {okYtSearch, okCommandPalette, okThemePicker, okEqPresetPicker, okQueuePicker, okPlaylistSearch, okQueueOverlay, okFuzzyFinder} or
     (state.overlay.kind == okNone and (state.playlistInputActive or state.mode == imFilter or state.mode == imLeaderMode))
   if shouldShow == state.cursorVisible: return
   state.cursorVisible = shouldShow
@@ -868,14 +868,7 @@ method render*(node: StatusBarComp, ctx: var nw.Context[AppState]) =
       addMod(ic.shuffle, theme.base, theme.peach)
   if fmSelectCount in activeModules and state.selectedIndices.len > 0:
     addMod(" [" & $state.selectedIndices.len & "] ", theme.base, theme.peach)
-  if fmNextTrack in activeModules and state.playbackQueue.len > 0:
-    let qIdx = state.playbackQueue[0]
-    if qIdx >= 0 and qIdx < state.libraryTracks.len:
-      let nextTitle = state.libraryTracks[qIdx].title
-      if nextTitle.len > 0:
-        let maxLen = (rightX - 15) div 2
-        let truncd = if nextTitle.runeLen > maxLen: nextTitle.substr(0, maxLen - 2) & ".." else: nextTitle
-        addMod(" " & ic.nextTrack & " " & truncd, theme.base, theme.sky)
+
   if fmBackend in activeModules:
     let backend = "ALSA"
     addMod(" " & backend, theme.base, theme.mauve)
@@ -985,6 +978,8 @@ method render*(node: GenericOverlay, ctx: var nw.Context[AppState]) =
     title = if ov.plMode == 1: "Add to Playlist" else: "Remove from Playlist"
   of okThemePicker:
     title = "Change Theme"
+  of okEqPresetPicker:
+    title = "EQ Presets"
   of okCommandPalette:
     title = "\u2328 Commands"
   of okQueueOverlay:
@@ -1150,6 +1145,33 @@ method render*(node: GenericOverlay, ctx: var nw.Context[AppState]) =
       writeStrBg(ctx.tb, boxX + 1, boxY + boxH - 1, truncateAt("> " & ov.query, boxW - 2), theme.text, theme.surface1)
     else:
       let hint = truncateAt("> Type to search...", boxW - 2)
+      if hint.len > 0: writeStr(ctx.tb, boxX + 1, boxY + boxH - 1, hint, theme.subtext0)
+  #--- EQ Preset Picker ---
+  elif ov.kind == okEqPresetPicker:
+    let displayResults = min(12, ov.strResults.len)
+    for i in 0..<displayResults:
+      let lineY = curY + i
+      if lineY >= boxY + boxH - 2: break
+      let name = ov.strResults[i]
+      let isSelected = (i == ov.cursor)
+      let isActive = name == ctx.data.eqPreset
+      let ovRowBg = if isSelected: theme.blue else: theme.surface0
+      if isSelected:
+        fillBg(ctx.tb, boxX + 1, lineY, boxX + boxW - 2, lineY, ovRowBg)
+      ctx.tb.setBackgroundColor(ovRowBg)
+      let prefix = if isActive and not isSelected: "\u25C9 " else: "  "
+      let label = prefix & name
+      if isSelected:
+        writeStr(ctx.tb, boxX + 2, lineY, label, if isDarkMode(ctx.data.config.theme): theme.base else: theme.crust)
+      elif isActive:
+        writeStr(ctx.tb, boxX + 2, lineY, label, theme.green)
+      else:
+        writeStr(ctx.tb, boxX + 2, lineY, label, theme.text)
+    ctx.tb.setBackgroundColor(theme.surface0)
+    if ov.query.len > 0:
+      writeStrBg(ctx.tb, boxX + 1, boxY + boxH - 1, truncateAt("> " & ov.query, boxW - 2), theme.text, theme.surface1)
+    else:
+      let hint = truncateAt("> Type to filter presets...", boxW - 2)
       if hint.len > 0: writeStr(ctx.tb, boxX + 1, boxY + boxH - 1, hint, theme.subtext0)
   #--- Current Queue Overlay ---
   elif ov.kind == okQueueOverlay:
@@ -1752,7 +1774,7 @@ proc initApp*(state: var AppState) =
           if ext in [".mp3", ".flac", ".ogg", ".m4a", ".wav", ".opus", ".aac", ".wma", ".alac", ".aiff", ".ape"]:
             state.downloadCount.inc
   except: discard
-  state.footerModules = {fmPlayStatus, fmVolume, fmBackend, fmNextTrack, fmSelectCount, fmTime, fmDate, fmRepeatShuffle, fmSleepTimer}
+  state.footerModules = {fmPlayStatus, fmVolume, fmBackend, fmSelectCount, fmTime, fmDate, fmRepeatShuffle, fmSleepTimer}
   state.rawKeybindingsJson = nil
   state.ytJsRuntime = "node"
   state.ytSearchHistory = @[]
@@ -1785,6 +1807,7 @@ proc initApp*(state: var AppState) =
   state.eqVisible = false
   state.eqBandSelect = 0
   state.eqPreset = "Flat"
+  state.eqPresetList = @[]
   state.eqPresetSelect = 0
   state.eqScrollOffset = 0
   state.favouriteIds = initHashSet[int64]()

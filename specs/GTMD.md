@@ -603,7 +603,8 @@ Apply a named equalizer preset.
 | `name` | string | `""` | Preset name (see list below) |
 
 Available presets: `Flat`, `Rock`, `Pop`, `Classical`, `Jazz`, `HipHop`,
-`Vocal`, `BassBoost`, `Headphones`, `Laptop`
+`Vocal`, `BassBoost`, `Headphones`, `Laptop`, `Electronic`, `Acoustic`,
+`Podcast`, `Dance`
 
 Request: `{"cmd": "set_eq_preset", "name": "Rock"}`
 Response: `{"ok": true}`
@@ -613,7 +614,7 @@ Response: `{"ok": true}`
 List available EQ preset names.
 
 Request: `{"cmd": "list_eq_presets"}`
-Response: `{"ok": true, "presets": ["Flat", "Rock", "Pop", "Classical", "Jazz", "HipHop", "Vocal", "BassBoost", "Headphones", "Laptop"]}`
+Response: `{"ok": true, "presets": ["Flat", "Rock", "Pop", "Classical", "Jazz", "HipHop", "Vocal", "BassBoost", "Headphones", "Laptop", "Electronic", "Acoustic", "Podcast", "Dance"]}`
 
 ### 5.8 Library
 

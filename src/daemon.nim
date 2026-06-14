@@ -1,4 +1,4 @@
-import os, json, strutils, net, posix, random, osproc, times, tables
+import os, json, strutils, net, posix, random, osproc, times
 from nativesockets import setBlocking, selectRead, SocketHandle
 proc prctl(option: cint, arg2: cstring): cint {.importc, header: "<sys/prctl.h>".}
 import audio, state, library, ytdlp
@@ -104,14 +104,13 @@ type
     ytStreamPendingTitle: string
     ytStreamPendingChannel: string
     ytStreamPendingDuration: string
-    ytStreamUrls: Table[string, string]
+    ytStreamResolvedUrl: string
+    ytStreamResolvedFor: string
     ytStreamResolveProcess: Process
     ytStreamResolveBuf: string
     ytStreamResolveUrl: string
     ytStreamResolving: bool
     ytDownloadTasks: seq[DownloadTask]
-    ytDownloaded: Table[string, string]
-    ytDownloadedMeta: Table[string, tuple[title, channel: string]]
     ytLastCompletedPath: string
     ytLastCompletedUrl: string
     ytPlaylistProcess: Process
@@ -378,22 +377,27 @@ proc advanceToNextTrack(d: Daemon, forward: bool = true): bool =
     # Resolve YouTube watch URLs: prefer downloaded file, fall back to stream URL
     var loadPath = nextCandidate
     if isYtWatchUrl(nextCandidate):
-      if nextCandidate in d.ytDownloaded:
-        loadPath = d.ytDownloaded[nextCandidate]
-        if nextCandidate in d.ytDownloadedMeta:
-          d.currentTrackTitle = d.ytDownloadedMeta[nextCandidate].title
-          d.currentTrackChannel = d.ytDownloadedMeta[nextCandidate].channel
-      elif nextCandidate in d.ytStreamUrls:
-        loadPath = d.ytStreamUrls[nextCandidate]
+      var dlPath = ""
+      var dlTitle = ""
+      var dlChannel = ""
+      if d.lib != nil:
+        let meta = d.lib.getDownloadMetaByUrl(nextCandidate)
+        dlPath = meta.path; dlTitle = meta.title; dlChannel = meta.channel
+      if dlPath.len > 0:
+        loadPath = dlPath
+        if dlTitle.len > 0:
+          d.currentTrackTitle = dlTitle
+          d.currentTrackChannel = dlChannel
+      elif d.ytStreamResolvedFor == nextCandidate and d.ytStreamResolvedUrl.len > 0:
+        loadPath = d.ytStreamResolvedUrl
         # Ensure download is running in background
         var alreadyDL = false
         for t in d.ytDownloadTasks:
           if t.url == nextCandidate: alreadyDL = true; break
         if not alreadyDL and d.lib != nil:
-          var meta = if nextCandidate in d.ytDownloadedMeta: d.ytDownloadedMeta[nextCandidate] else: (title: "", channel: "")
           var task: DownloadTask
-          if startDownload(YtSearchResult(url: nextCandidate, title: meta.title, channel: meta.channel), d.ytDownloadDir, task.process, d.ytCookieSource, d.ytJsRuntime):
-            task.title = meta.title; task.url = nextCandidate; task.channel = meta.channel
+          if startDownload(YtSearchResult(url: nextCandidate, title: dlTitle, channel: dlChannel), d.ytDownloadDir, task.process, d.ytCookieSource, d.ytJsRuntime):
+            task.title = dlTitle; task.url = nextCandidate; task.channel = dlChannel
             task.outputDir = d.ytDownloadDir; task.completed = false; task.startedAt = epochTime()
             d.ytDownloadTasks.add(task)
       else:
@@ -421,7 +425,9 @@ proc advanceToNextTrack(d: Daemon, forward: bool = true): bool =
       d.crossfadeNextPath = ""
     else:
       d.player.stop()
-      d.player.loadFile(loadPath)
+      if not d.player.loadFile(loadPath):
+        # File failed to load — skip it; retry loop will pick up next queue item
+        return false
       d.currentTrackPath = loadPath
       d.player.play()
     d.idleFrames = 0
@@ -451,7 +457,10 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
         if d.trackHistory.len > 50:
           d.trackHistory.delete(0)
       d.player.stop()
-      d.player.loadFile(cmd.strArg)
+      if not d.player.loadFile(cmd.strArg):
+        result["ok"] = %false
+        result["error"] = %"failed to load file"
+        return
       d.currentTrackPath = cmd.strArg
       d.currentTrackTitle = cmd.strArg2
       d.currentTrackChannel = cmd.strArg3
@@ -530,7 +539,7 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
         d.crossfadeConsumed = false
       else:
         d.player.stop()
-        d.player.loadFile(prevPath)
+        discard d.player.loadFile(prevPath)
         d.currentTrackPath = prevPath
         d.currentTrackTitle = ""
         d.currentTrackChannel = ""
@@ -781,26 +790,26 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
             channel = item{"channel"}.getStr("")
           if path.len > 0:
             d.playbackQueue.add(path)
-            if isYtWatchUrl(path) and path notin d.ytDownloaded:
-              var alreadyDL = false
-              for task in d.ytDownloadTasks:
-                if task.url == path:
-                  alreadyDL = true
-                  break
-              if not alreadyDL:
-                var task: DownloadTask
-                if startDownload(YtSearchResult(url: path, title: title, channel: channel), d.ytDownloadDir, task.process, d.ytCookieSource, d.ytJsRuntime):
-                  task.title = title
-                  task.url = path
-                  task.channel = channel
-                  task.outputDir = d.ytDownloadDir
-                  task.completed = false
-                  task.startedAt = epochTime()
-                  d.ytDownloadTasks.add(task)
-                else:
-                  stderr.writeLine("[gtm] Failed to start download for: " & path)
+            if isYtWatchUrl(path):
+              let existingPath = if d.lib != nil: d.lib.getDownloadByUrl(path) else: ""
+              if existingPath.len == 0:
+                var alreadyDL = false
+                for task in d.ytDownloadTasks:
+                  if task.url == path:
+                    alreadyDL = true
+                    break
+                if not alreadyDL:
+                  var task: DownloadTask
+                  if startDownload(YtSearchResult(url: path, title: title, channel: channel), d.ytDownloadDir, task.process, d.ytCookieSource, d.ytJsRuntime):
+                    task.title = title
+                    task.url = path
+                    task.channel = channel
+                    task.outputDir = d.ytDownloadDir
+                    task.completed = false
+                    task.startedAt = epochTime()
+                    d.ytDownloadTasks.add(task)
               # Also start resolving stream URL for instant playback
-              if path notin d.ytStreamUrls and not d.ytStreamResolving:
+              if d.ytStreamResolvedFor != path and not d.ytStreamResolving:
                 d.ytStreamResolveBuf = ""
                 d.ytStreamResolveUrl = path
                 discard startStreamUrlFetch(path, d.ytStreamResolveProcess, d.ytCookieSource, d.ytJsRuntime)
@@ -944,8 +953,9 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
       activeArr.add(%*{"url": %t.url, "title": %t.title, "started": %t.startedAt})
     result["active"] = activeArr
     var completedArr = newJArray()
-    for url, path in d.ytDownloaded:
-      completedArr.add(%*{"url": %url, "path": %path})
+    if d.lib != nil:
+      for dl in d.lib.getDownloads():
+        completedArr.add(%*{"url": %dl.url, "path": %dl.path, "title": %dl.title})
     result["completed"] = completedArr
   of dckYtCancelDownload:
     for i in 0..<d.ytDownloadTasks.len:
@@ -1010,7 +1020,7 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     if d.lib != nil:
       d.lib.clearSearchHistory()
   of dckListEqPresets:
-    result["presets"] = %["Flat", "Rock", "Pop", "Classical", "Jazz", "HipHop", "Vocal", "BassBoost", "Headphones", "Laptop"]
+    result["presets"] = %["Flat", "Rock", "Pop", "Classical", "Jazz", "HipHop", "Vocal", "BassBoost", "Headphones", "Laptop", "Electronic", "Acoustic", "Podcast", "Dance"]
   of dckPing:
     result["pong"] = %true
 
@@ -1115,8 +1125,8 @@ proc runDaemon*() =
     ytSearchActive: false,
     ytStreamActive: false,
     ytStreamResultUrl: "",
-    ytDownloaded: initTable[string, string](),
-    ytDownloadedMeta: initTable[string, tuple[title, channel: string]](),
+    ytStreamResolvedUrl: "",
+    ytStreamResolvedFor: "",
     ytLastCompletedPath: "",
     ytLastCompletedUrl: "",
     ytPlaylistActive: false,
@@ -1138,7 +1148,7 @@ proc runDaemon*() =
     let trackTitle = daemon.lib.getPlaybackState("track_title")
     let trackChannel = daemon.lib.getPlaybackState("track_channel")
     if trackPath.len > 0 and fileExists(trackPath):
-      daemon.player.loadFile(trackPath)
+      discard daemon.player.loadFile(trackPath)
       daemon.currentTrackPath = trackPath
       daemon.currentTrackTitle = trackTitle
       daemon.currentTrackChannel = trackChannel
@@ -1166,9 +1176,7 @@ proc runDaemon*() =
     let ytMax = daemon.lib.getPlaybackState("yt_max_concurrent")
     if ytMax.len > 0:
       try: daemon.ytMaxConcurrentDownloads = parseInt(ytMax) except: discard
-    # Restore completed downloads from database
-    for dl in daemon.lib.getDownloads():
-      daemon.ytDownloaded[dl.url] = dl.path
+    # Completed downloads are queried from DB on demand
     let queueStr = daemon.lib.getPlaybackState("queue_json")
     if queueStr.len > 0:
       try:
@@ -1260,6 +1268,10 @@ proc runDaemon*() =
     if daemonEvents.len > 0 and daemon.clients.len > 0:
       let evJson = %*{"events": serializeEvents(daemonEvents, daemon)}
       daemon.broadcastAll($evJson & "\n")
+    # Reset auto-advance flag after playback started event is broadcast
+    for ev in daemonEvents:
+      if ev.kind == aekPlaybackStarted:
+        daemon.autoAdvancing = false
     # Auto-advance on track ended
     for ev in daemonEvents:
       if ev.kind == aekTrackEnded:
@@ -1305,8 +1317,6 @@ proc runDaemon*() =
           dlDone.add(i)
           if path.len > 0:
             let dlUrl = daemon.ytDownloadTasks[i].url
-            daemon.ytDownloaded[dlUrl] = path
-            daemon.ytDownloadedMeta[dlUrl] = (title: daemon.ytDownloadTasks[i].title, channel: daemon.ytDownloadTasks[i].channel)
             daemon.ytLastCompletedPath = path
             daemon.ytLastCompletedUrl = dlUrl
             if daemon.lib != nil:
@@ -1331,7 +1341,8 @@ proc runDaemon*() =
         daemon.ytStreamResolving = false
         daemon.ytStreamResolveBuf = ""
         if url.len > 0:
-          daemon.ytStreamUrls[daemon.ytStreamResolveUrl] = url
+          daemon.ytStreamResolvedFor = daemon.ytStreamResolveUrl
+          daemon.ytStreamResolvedUrl = url
           daemon.ytStreamResolveUrl = ""
 
     # Auto-poll yt-dlp search results & broadcast via events (no client polling needed)
@@ -1356,6 +1367,7 @@ proc runDaemon*() =
           arr.add(%*{"title": %r.title, "url": %r.url, "duration": %r.duration, "channel": %r.channel, "kind": %r.kind.int})
         let ev = %*{"events": [%*{"kind": %aekCustomEvent.int, "event": "yt_search_done", "results": arr}]}
         daemon.broadcastAll($ev & "\n")
+        daemon.ytSearchResults = @[]
 
     # Auto-poll yt-dlp playlist fetch results & broadcast via events
     if daemon.ytPlaylistActive:
@@ -1416,9 +1428,9 @@ proc runDaemon*() =
         if timeRemaining <= 8.0 and timeRemaining > 0.0:
           daemon.upNextSent = true
           var nextTitle = ""; var nextChannel = ""
-          if isYtWatchUrl(nextQueuedPath) and nextQueuedPath in daemon.ytDownloadedMeta:
-            nextTitle = daemon.ytDownloadedMeta[nextQueuedPath].title
-            nextChannel = daemon.ytDownloadedMeta[nextQueuedPath].channel
+          if isYtWatchUrl(nextQueuedPath) and daemon.lib != nil:
+            let meta = daemon.lib.getDownloadMetaByUrl(nextQueuedPath)
+            nextTitle = meta.title; nextChannel = meta.channel
           let ev = %*{"events": [%*{"kind": %aekCustomEvent.int, "event": "up_next",
             "next_path": %nextQueuedPath, "next_title": %nextTitle, "next_channel": %nextChannel}]}
           daemon.broadcastAll($ev & "\n")
@@ -1434,10 +1446,12 @@ proc runDaemon*() =
             let prepareThreshold = float(daemon.crossfadeDuration) + 2.0
             if not daemon.crossfadePrepared and timeRemaining <= prepareThreshold:
               var loadNextPath = nextQueuedPath
-              if isYtWatchUrl(nextQueuedPath) and nextQueuedPath in daemon.ytDownloaded:
-                loadNextPath = daemon.ytDownloaded[nextQueuedPath]
-              elif isYtWatchUrl(nextQueuedPath) and nextQueuedPath in daemon.ytStreamUrls:
-                loadNextPath = daemon.ytStreamUrls[nextQueuedPath]
+              if isYtWatchUrl(nextQueuedPath) and daemon.lib != nil:
+                let meta = daemon.lib.getDownloadMetaByUrl(nextQueuedPath)
+                if meta.path.len > 0:
+                  loadNextPath = meta.path
+                elif daemon.ytStreamResolvedFor == nextQueuedPath and daemon.ytStreamResolvedUrl.len > 0:
+                  loadNextPath = daemon.ytStreamResolvedUrl
               daemon.player.prepareNext(loadNextPath)
               daemon.crossfadePrepared = true
               daemon.crossfadeNextPath = loadNextPath
