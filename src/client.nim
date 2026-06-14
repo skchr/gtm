@@ -138,6 +138,8 @@ proc drainEventLines(cli: DaemonClient, buf: var string) =
       buf = line & "\n" & buf
       break
 
+proc clearPending*(cli: DaemonClient)
+
 proc sendDaemonCmd*(cli: DaemonClient, cmd: JsonNode): JsonNode =
   if cli == nil or cli.sock == nil or not cli.connected: return %*{"ok": false, "error": "not connected"}
   try:
@@ -178,10 +180,10 @@ proc sendDaemonCmd*(cli: DaemonClient, cmd: JsonNode): JsonNode =
         if j.hasKey("events"): continue
         if j.hasKey("state"): continue
       totalWait += 0.1
-    except:
-      cli.connected = false
-      cli.clearPending()
-    return %*{"ok": false, "error": "no response"}
+  except:
+    cli.connected = false
+    cli.clearPending()
+  return %*{"ok": false, "error": "no response"}
 
 proc sendOnly*(cli: DaemonClient, cmd: JsonNode) =
   if cli == nil or cli.sock == nil or not cli.connected: return
@@ -211,9 +213,9 @@ proc sendAsync*(cli: DaemonClient, cmd: JsonNode, callback: proc(resp: JsonNode)
   except:
     discard
 
-method loadFile*(cli: DaemonClient, path: string, title: string = "", channel: string = "") =
+method loadFile*(cli: DaemonClient, path: string, title: string = "", channel: string = "", thumbnail: string = "") =
   cli.ensureDaemon()
-  let resp = sendDaemonCmd(cli, %*{"cmd": "load_file", "path": path, "title": title, "channel": channel})
+  let resp = sendDaemonCmd(cli, %*{"cmd": "load_file", "path": path, "title": title, "channel": channel, "thumbnail": thumbnail})
   cli.lastTrackId = 0
   if resp.hasKey("track_id"):
     cli.lastTrackId = resp["track_id"].getInt().int64
@@ -492,17 +494,17 @@ proc getFullState*(cli: DaemonClient): JsonNode =
   cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "get_full_state"})
 
-proc ytSearch*(cli: DaemonClient, query: string, pageSize: int = 10): JsonNode =
+proc ytSearch*(cli: DaemonClient, query: string, pageSize: int = 10) =
   cli.ensureDaemon()
-  sendDaemonCmd(cli, %*{"cmd": "yt_search", "query": query, "page_size": pageSize})
+  sendOnly(cli, %*{"cmd": "yt_search", "query": query, "page_size": pageSize})
 
 proc ytSearchPoll*(cli: DaemonClient): JsonNode =
   cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "yt_search_poll"})
 
-proc ytSearchCancel*(cli: DaemonClient): JsonNode =
+proc ytSearchCancel*(cli: DaemonClient) =
   cli.ensureDaemon()
-  sendDaemonCmd(cli, %*{"cmd": "yt_search_cancel"})
+  sendOnly(cli, %*{"cmd": "yt_search_cancel"})
 
 proc ytResolveStream*(cli: DaemonClient, url: string): JsonNode =
   cli.ensureDaemon()

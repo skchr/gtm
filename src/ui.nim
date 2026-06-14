@@ -2,7 +2,7 @@ import illwave as iw
 import ../vendor/nimwave/nimwave as nw
 from unicode import runeLen, toRunes, Rune
 import colors, sequtils, math, strutils, tables, sets, os, times, posix, osproc, options
-import state, theme, audio, visualizer, library, icons, commands, albumart
+import state, theme, audio, library, icons, commands, albumart
 
 type State* = AppState
 include ../vendor/nimwave/nimwave/prelude
@@ -39,7 +39,6 @@ proc initHighlightGroups*(theme: Theme): HighlightGroups =
   result.FilterBar = HighlightAttr(fg: some(theme.text), bg: some(theme.surface1))
   result.ProgressBar = HighlightAttr(fg: some(theme.mauve), bg: some(theme.crust))
   result.ProgressBarTime = HighlightAttr(fg: some(theme.sky))
-  result.VisualizerBar = HighlightAttr(fg: some(theme.mauve))
   result.OverlayBorder = HighlightAttr(fg: some(theme.mauve))
   result.OverlayTitle = HighlightAttr(fg: some(theme.mauve))
   result.OverlayInput = HighlightAttr(fg: some(theme.text), bg: some(theme.surface1))
@@ -146,6 +145,7 @@ proc fillBg(tb: var iw.TerminalBuffer, x1, y1, x2, y2: int, col: colors.Color) =
       var cell = tb[x, y]
       cell.bgTruecolor = col
       cell.bg = iw.bgNone
+      cell.ch = " ".toRunes[0]
       tb[x, y] = cell
   tb.setBackgroundColor(col)
 
@@ -217,22 +217,6 @@ method render*(node: TabBar, ctx: var nw.Context[AppState]) =
       writeStr(ctx.tb, x, 0, display, theme.subtext0)
     x += segLen
   writeStr(ctx.tb, w - 12, 0, " gtm " & GTM_VERSION & " ", theme.overlay2)
-
-proc hsvToRgb(h, s, v: float): (int, int, int) =
-  let hh = h * 6.0
-  let i = hh.int
-  let f = hh - float(i)
-  let p = v * (1.0 - s)
-  let q = v * (1.0 - s * f)
-  let t = v * (1.0 - s * (1.0 - f))
-  case i mod 6
-  of 0: (int(v * 255), int(t * 255), int(p * 255))
-  of 1: (int(q * 255), int(v * 255), int(p * 255))
-  of 2: (int(p * 255), int(v * 255), int(t * 255))
-  of 3: (int(p * 255), int(q * 255), int(v * 255))
-  of 4: (int(t * 255), int(p * 255), int(v * 255))
-  of 5: (int(v * 255), int(p * 255), int(q * 255))
-  else: (0, 0, 0)
 
 var gCursorX, gCursorY: int = -1
 
@@ -327,6 +311,7 @@ method render*(node: NowPlayingView, ctx: var nw.Context[AppState]) =
       ctx.data.artAnsi = art.data
       ctx.data.artAnsiLines = art.lines
       ctx.data.artAnsiKey = artKey
+      ctx.data.artAnsiWritten = false
   let showArt = ctx.data.artAnsi.len > 0
   let artPad = if showArt: artSize.charW + 2 else: 1
   var line = 0
@@ -484,18 +469,7 @@ method render*(node: LibrarySidebar, ctx: var nw.Context[AppState]) =
     writeStr(ctx.tb, 1, line, display, fg)
     writeStr(ctx.tb, w - countStr.runeLen - 1, line, countStr, theme.overlay0)
     line.inc
-    # Show Downloads sub-tabs when scope is active
-    if entry.scope == fsDownloads and isActive and line + 2 < h:
-      let subTabs = [(dtDownloading, "Downloading"), (dtDownloaded, "Downloaded")]
-      for (subTab, subLabel) in subTabs:
-        let isSubSelected = state.downloadsTab == subTab
-        let subBg = if isSubSelected: theme.surface2 else: theme.base
-        fillBg(ctx.tb, 2, line, w - 2, line, subBg)
-        ctx.tb.setBackgroundColor(subBg)
-        let subBullet = if isSubSelected: "\u25B8 " else: "  "
-        writeStr(ctx.tb, 3, line, subBullet & subLabel,
-          if isSubSelected: theme.mauve else: theme.subtext0)
-        line.inc
+    # Downloads is a single item — no sub-tabs
   line.inc
   if line < h:
     writeStr(ctx.tb, 1, line, "\u2500".repeat(min(w - 2, 16)), theme.surface2)
@@ -529,14 +503,13 @@ method render*(node: LibraryContentView, ctx: var nw.Context[AppState]) =
       if pt.displayArtist().len > 0 and 5 + label.runeLen < w:
         writeStr(ctx.tb, 3 + label.runeLen, line, truncateAt("\u2014 " & pt.displayArtist(), avail - label.runeLen), theme.subtext0)
       line.inc
-  # Downloads sub-tab: Downloading view
-  if state.filterScope == fsDownloads and state.downloadsTab == dtDownloading:
+  # Downloads view
+  if state.filterScope == fsDownloads:
     fillBg(ctx.tb, 0, line, w - 1, line, theme.mantle)
     writeStr(ctx.tb, 1, line, "Downloading", theme.subtext0)
     writeStr(ctx.tb, w - 10, line, "Status", theme.subtext0)
     line.inc
     var anyItems = false
-    # Show active downloads
     for task in state.ytDownloadTasks:
       if line >= h: break
       anyItems = true
@@ -547,7 +520,6 @@ method render*(node: LibraryContentView, ctx: var nw.Context[AppState]) =
       writeStr(ctx.tb, 1, line, displayLabel, theme.blue)
       writeStr(ctx.tb, w - 14, line, "downloading", theme.green)
       line.inc
-    # Show queued downloads
     for q in state.ytDownloadQueue:
       if line >= h: break
       anyItems = true
@@ -561,7 +533,7 @@ method render*(node: LibraryContentView, ctx: var nw.Context[AppState]) =
       writeStr(ctx.tb, 1, line, "  No active downloads", theme.subtext0)
       line.inc
     fillBg(ctx.tb, 0, line, w - 1, h - 1, theme.base)
-    if state.ytDownloadTasks.len > 0 or state.ytDownloadQueue.len > 0:
+    if anyItems:
       ctx.data.markDirty(ceDownloadProgress)
     return
 
@@ -716,9 +688,6 @@ method render*(node: SettingsView, ctx: var nw.Context[AppState]) =
     settingsRow("Volume")
     sliderWidget(state.volume, 100, 14)
     line.inc
-    settingsRow("Visualizer")
-    toggleWidget(state.vizVisible)
-    line.inc
     settingsRow("Crossfade Duration")
     sliderWidget(state.crossfadeDuration, 10, 14)
     writeStr(ctx.tb, contentX + contentW - 7, line, "s", theme.subtext0)
@@ -855,9 +824,11 @@ method render*(node: StatusBarComp, ctx: var nw.Context[AppState]) =
   var leftX = 1
 
   let isOverlayActive = state.overlay.kind != okNone or state.helpVisible or state.aboutVisible or state.eqVisible or state.mode == imLeaderMode
-  let showKey = (state.lastKeyTimer > 0 or isOverlayActive) and state.lastKeyDisplay.len > 0
+  let displayKey = if isOverlayActive and state.lastCommandName.len > 0: state.lastCommandName
+                   else: state.lastKeyDisplay
+  let showKey = (state.lastKeyTimer > 0 or isOverlayActive) and displayKey.len > 0
   if showKey:
-    let keyText = " [" & state.lastKeyDisplay & "] "
+    let keyText = " [" & displayKey & "] "
     writeStrBg(ctx.tb, leftX, 0, keyText, theme.base, theme.surface2)
     leftX += keyText.runeLen
 
@@ -875,6 +846,12 @@ method render*(node: StatusBarComp, ctx: var nw.Context[AppState]) =
     let selText = " [SELECT] "
     writeStrBg(ctx.tb, leftX, 0, selText, theme.base, theme.peach)
     leftX += selText.runeLen
+
+  # Always show elapsed time
+  if state.duration > 0:
+    let elapsedText = " " & formatTime(state.timePos) & " "
+    writeStrBg(ctx.tb, leftX, 0, elapsedText, theme.base, theme.sky)
+    leftX += elapsedText.runeLen
 
   # Right-aligned footer modules
   var rightX = w - 1
@@ -922,59 +899,14 @@ method render*(node: StatusBarComp, ctx: var nw.Context[AppState]) =
       of psPaused: ic.pause
       of psStopped: ic.stop
     addMod(" " & stIcon, theme.base, if state.status == psPlaying: theme.green else: theme.surface2)
-
-type VisualizerView = ref object of nw.Node
-method render*(node: VisualizerView, ctx: var nw.Context[AppState]) =
-  let w = iw.width(ctx.tb)
-  let h = iw.height(ctx.tb)
-  if w < 10 or h < 2: return
-  if not ctx.data.vizVisible or ctx.data.viz == nil: return
-  let viz = ctx.data.viz
-  if viz.waterfallLen < 1: return
-  let bars = max(MIN_VIS_BARS, min(MAX_VIS_BARS, h * 4))
-  viz.barCount = bars
-  let cols = max(1, w - 2)
-  let rows = h
-  let bandsPerRow = bars div rows
-  if bandsPerRow < 1: return
-  let startCol = if viz.waterfallLen >= cols: 0 else: cols - viz.waterfallLen
-  const dotRowBits = [0xC0, 0x24, 0x12, 0x09]
-  for col in 0..<cols:
-    let visCol = col - startCol
-    if visCol < 0: continue
-    let wfIdx = (viz.waterfallHead - viz.waterfallLen + visCol + WATERFALL_COLS) mod WATERFALL_COLS
-    let bx = 1 + col
-    for row in 0..<rows:
-      let bandStart = row * bandsPerRow
-      let bandEnd = min(bars, bandStart + bandsPerRow)
-      if bandStart >= bars: break
-      let subBandSize = max(1, (bandEnd - bandStart) div 4)
-      var maxIntensity = 0.0
-      var bits = 0
-      for sb in 0..<4:
-        let sbStart = bandStart + sb * subBandSize
-        let sbEnd = min(bandEnd, sbStart + subBandSize)
-        if sbEnd <= sbStart: continue
-        var sbSum = 0.0
-        for b in sbStart..<sbEnd:
-          let val = viz.waterfall[wfIdx][b]
-          sbSum += val
-          if val > maxIntensity: maxIntensity = val
-        let sbAvg = sbSum / float(sbEnd - sbStart)
-        if sbAvg > 0.15:
-          bits = bits or dotRowBits[sb]
-      let t = clamp(maxIntensity, 0.0, 1.0)
-      let hue = 240.0 * (1.0 - t)
-      let sat = 0.5 + 0.5 * t
-      let val2 = 0.2 + 0.8 * t
-      let (r, g, b2) = hsvToRgb(hue / 360.0, sat, val2)
-      let col = iw.toColor(uint8(r), uint8(g), uint8(b2))
-      var cell = ctx.tb[bx, row]
-      cell.ch = Rune(0x2800 + bits)
-      cell.fgTruecolor = col
-      cell.fg = iw.fgNone
-      cell.bg = iw.bgNone
-      ctx.tb[bx, row] = cell
+  if fmQueueCount in activeModules and state.playbackQueue.len > 0:
+    let qPos = min(state.queueCursor + 1, state.playbackQueue.len)
+    addMod(" " & $qPos & "/" & $state.playbackQueue.len, theme.base, theme.sapphire)
+  if fmEqPreset in activeModules and state.eqPreset.len > 0:
+    addMod(" " & state.eqPreset, theme.base, theme.teal)
+  if fmCurrentPlaylist in activeModules and state.playlistContentsIdx >= 0 and
+     state.playlistContentsIdx < state.libraryPlaylists.len:
+    addMod(" " & state.libraryPlaylists[state.playlistContentsIdx].name, theme.base, theme.sky)
 
 type
   PickerItem* = object
@@ -1252,13 +1184,10 @@ method render*(node: GenericOverlay, ctx: var nw.Context[AppState]) =
       let bullet = if isNowPlaying: icQueue.play & " " else: "  "
       let nameStr = bullet & truncateAt(t.displayName(), boxW - 6)
       writeStr(ctx.tb, boxX + 2, lineY, nameStr, if isSelected: theme.blue elif isNowPlaying: theme.green else: theme.text)
-      if t.displayArtist().len > 0:
-        let artist = truncateAt(t.displayArtist(), boxW - 4)
-        writeStr(ctx.tb, boxX + boxW - 2 - artist.runeLen, lineY, artist, theme.subtext0)
     ctx.tb.setBackgroundColor(theme.surface0)
     if queue.len == 0:
       writeStr(ctx.tb, boxX + 2, curY, "Queue is empty", theme.subtext0)
-    let qFooter = truncateAt("\u2191/\u2193:Nav  d:Remove  Enter:Play  Esc:Close", boxW - 2)
+    let qFooter = truncateAt("\u2191/\u2193:Nav  d:Remove  a:Add  Enter:Play  Esc:Close", boxW - 2)
     if qFooter.len > 0: writeStr(ctx.tb, boxX + 1, boxY + boxH - 1, qFooter, theme.subtext0)
   #--- Command Palette ---
   elif ov.kind == okCommandPalette:
@@ -1558,7 +1487,6 @@ method render*(node: FeedbackCueOverlay, ctx: var nw.Context[AppState]) =
   let theme = ctx.data.theme
   let kind = ctx.data.notificationKind
   let (_, fgCol, bgCol) = notificationColors(theme, kind)
-  let ic = currentIcons()
   let icon = notificationIcon(kind)
   let title = ctx.data.notificationMsg
   let body = ctx.data.notificationBody
@@ -1717,9 +1645,9 @@ method render*(node: EqualizerOverlay, ctx: var nw.Context[AppState]) =
       writeStr(ctx.tb, sx + sliderW div 2 - 1, dotY, ">", theme.peach)
       writeStr(ctx.tb, sx + sliderW div 2 + 1, dotY, "<", theme.peach)
 
-    # Frequency label
+    # Frequency label above band
     ctx.tb.setBackgroundColor(theme.surface0)
-    writeStr(ctx.tb, sx, sliderStartY + sliderH + 1, bandLabels[i], theme.subtext0)
+    writeStr(ctx.tb, sx, sliderStartY - 1, bandLabels[i], theme.subtext0)
 
   # Gain value indicator
   let selBand = st.eqBandSelect.clamp(0, 9)
@@ -1752,12 +1680,7 @@ proc renderApp*(ctx: var nw.Context[AppState]) =
   if mainH > 0:
     case ctx.data.tab
     of tabNowPlaying:
-      if w >= 80 and ctx.data.vizVisible:
-        let splitW = w * 3 div 4
-        sliceCtx = nw.slice(ctx, 0, y, splitW, mainH); render(NowPlayingView(), sliceCtx)
-        sliceCtx = nw.slice(ctx, splitW, y, w - splitW, mainH); render(VisualizerView(), sliceCtx)
-      else:
-        sliceCtx = nw.slice(ctx, 0, y, w, mainH); render(NowPlayingView(), sliceCtx)
+      sliceCtx = nw.slice(ctx, 0, y, w, mainH); render(NowPlayingView(), sliceCtx)
     of tabLibrary:
       let sidebarW = max(20, min(28, w div 5))
       let contentW = w - sidebarW
@@ -1811,8 +1734,6 @@ proc initApp*(state: var AppState) =
   state.selectMode = false
   state.selectedIndices = initHashSet[int]()
   state.selectionAnchor = 0
-  state.viz = newVisualizer()
-  state.vizVisible = true
   state.overlay.clear()
   state.daemonConnected = false
   state.daemonPid = 0

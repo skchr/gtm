@@ -91,23 +91,6 @@
       "type": "boolean",
       "default": false
     },
-    "visualizer": {
-      "type": "object",
-      "description": "Visualizer settings",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        },
-        "bar_count": {
-          "type": "integer",
-          "minimum": 4,
-          "maximum": 64,
-          "default": 32
-        }
-      },
-      "additionalProperties": false
-    },
     "keybindings": {
       "type": "object",
       "description": "Custom keybinding overrides",

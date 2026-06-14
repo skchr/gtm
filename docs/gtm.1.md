@@ -4,8 +4,7 @@
 
 # NAME
 
-gtm - terminal music player with YouTube integration, crossfade, and
-visualizer
+gtm - terminal music player with YouTube integration, crossfade
 
 # SYNOPSIS
 
@@ -16,8 +15,7 @@ visualizer
 # DESCRIPTION
 
 **gtm** is a terminal-based music player. It supports local audio files,
-YouTube streaming, playlist management, album art display, an audio
-visualizer, and gapless crossfade playback.
+YouTube streaming, playlist management, album art display, and gapless crossfade playback.
 
 The player is split into two binaries:
 
@@ -187,8 +185,6 @@ When invoked with a subcommand, **gtm** operates in headless mode:
 `/tmp/gtm-daemon.sock`
 :   Unix socket for TUI-daemon communication.
 
-`/dev/shm/gtm-viz`
-:   Shared memory for visualizer PCM data.
 
 # ENVIRONMENT
 

@@ -501,7 +501,7 @@ Response:
 #### `quit`
 
 Shut down the daemon. Saves playback state (volume, current track, position)
-to the library database, stops the visualizer capture, closes the audio
+to the library database, closes the audio
 backend, removes the socket file, and exits the process.
 
 Request: `{"cmd": "quit"}`

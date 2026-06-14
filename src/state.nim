@@ -1,5 +1,5 @@
 import illwave as iw
-import os, tables, sets, osproc, audio, theme, visualizer, math, json, options, colors
+import os, tables, sets, osproc, audio, theme, math, json, options, colors
 
 var debugMode*: bool
 
@@ -221,6 +221,10 @@ type
     fmDate
     fmRepeatShuffle
     fmSleepTimer
+    fmElapsedTime
+    fmQueueCount
+    fmEqPreset
+    fmCurrentPlaylist
 
   SettingsCategory* = enum
     scAudio, scYouTube, scAppearance, scSystem
@@ -251,8 +255,6 @@ type
     selectMode*: bool
     selectedIndices*: HashSet[int]
     selectionAnchor*: int
-    viz*: Visualizer
-    vizVisible*: bool
     config*: ConfigData
     libraryTracks*: seq[Track]
     libraryArtists*: seq[ArtistEnt]
@@ -285,6 +287,7 @@ type
     nowPlayingCueTimer*: int
     lastKeyDisplay*: string
     lastKeyTimer*: int
+    lastCommandName*: string
     prevVolume*: int
     shuffleEnabled*: bool
     shuffleOrder*: seq[int]
@@ -362,6 +365,7 @@ type
     artAnsi*: string
     artAnsiLines*: int
     artAnsiKey*: string
+    artAnsiWritten*: bool
     artBoxX*, artBoxY*, artBoxW*, artBoxH*: int
 
 const
@@ -370,12 +374,12 @@ const
 
   FooterPresets*: Table[FooterPresetName, set[FooterModule]] = {
     fpnMinimal:   {fmPlayStatus},
-    fpnCompact:   {fmPlayStatus, fmTime, fmBackend},
-    fpnFull:      {fmPlayStatus, fmVolume, fmBackend, fmNextTrack, fmSelectCount, fmTime, fmDate, fmRepeatShuffle, fmSleepTimer},
-    fpnInfo:      {fmPlayStatus, fmNextTrack, fmVolume, fmBackend},
+    fpnCompact:   {fmPlayStatus, fmTime, fmBackend, fmQueueCount, fmEqPreset},
+    fpnFull:      {fmPlayStatus, fmVolume, fmBackend, fmNextTrack, fmSelectCount, fmTime, fmDate, fmRepeatShuffle, fmSleepTimer, fmQueueCount, fmEqPreset, fmCurrentPlaylist},
+    fpnInfo:      {fmPlayStatus, fmNextTrack, fmVolume, fmBackend, fmQueueCount},
     fpnNavigator: {fmPlayStatus, fmRepeatShuffle, fmSelectCount, fmTime, fmDate},
-    fpnDebug:     {fmPlayStatus, fmTime, fmDate, fmSleepTimer, fmBackend, fmVolume},
-    fpnMusic:     {fmPlayStatus, fmNextTrack, fmRepeatShuffle, fmVolume},
+    fpnDebug:     {fmPlayStatus, fmTime, fmDate, fmSleepTimer, fmBackend, fmVolume, fmQueueCount, fmEqPreset},
+    fpnMusic:     {fmPlayStatus, fmNextTrack, fmRepeatShuffle, fmVolume, fmQueueCount, fmEqPreset},
     fpnClock:     {fmPlayStatus, fmTime, fmDate}
   }.toTable()
 

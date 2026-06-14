@@ -1,7 +1,7 @@
 import os, json, strutils, net, posix, random, osproc, times, tables
 from nativesockets import setBlocking, selectRead, SocketHandle
 proc prctl(option: cint, arg2: cstring): cint {.importc, header: "<sys/prctl.h>".}
-import audio, state, visualizer, library, ytdlp
+import audio, state, library, ytdlp
 
 proc parseFilenameForMetadata(path: string): tuple[title, artist: string] =
   let (_, stem, _) = path.splitFile()
@@ -47,6 +47,7 @@ type
     intArg*: int
     strArg2*: string
     strArg3*: string
+    strArg4*: string
 
   ClientState* = object
     sock*: Socket
@@ -55,13 +56,13 @@ type
   Daemon* = ref object
     player: AudioBackend
     lib: LibraryDb
-    viz: Visualizer
     running: bool
     server: Socket
     clients*: seq[ClientState]
     currentTrackPath: string
     currentTrackTitle: string
     currentTrackChannel: string
+    currentTrackThumbnail: string
     trackHistory: seq[string]
     idleFrames: int
     idleTimeout: int
@@ -154,6 +155,7 @@ proc parseDaemonCommand(line: string): DaemonCmd =
       result.kind = dckLoadFile; result.strArg = j{"path"}.getStr("")
       result.strArg2 = j{"title"}.getStr("")
       result.strArg3 = j{"channel"}.getStr("")
+      result.strArg4 = j{"thumbnail"}.getStr("")
     of "quit": result.kind = dckQuit
     of "status": result.kind = dckStatus
     of "now_playing": result.kind = dckNowPlaying
@@ -269,6 +271,7 @@ proc serializeEvents(events: seq[AudioEvent]; d: Daemon = nil): JsonNode =
         obj["track_path"] = %d.currentTrackPath
         obj["track_title"] = %d.currentTrackTitle
         obj["track_channel"] = %d.currentTrackChannel
+        obj["track_thumbnail"] = %d.currentTrackThumbnail
         obj["auto_advanced"] = %d.autoAdvancing
     of aekPlaybackPaused: obj["state"] = %"paused"
     of aekPlaybackStopped: obj["state"] = %"stopped"
@@ -452,6 +455,7 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
       d.currentTrackPath = cmd.strArg
       d.currentTrackTitle = cmd.strArg2
       d.currentTrackChannel = cmd.strArg3
+      d.currentTrackThumbnail = cmd.strArg4
       d.player.play()
       d.idleFrames = 0
       # Poll events once so state reflects actual playback status
@@ -477,12 +481,11 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     when defined(useMpris):
       emitMprisPlayerChanged(d)
   of dckPause:
-    d.player.pause(); d.viz.clear()
+    d.player.pause()
     when defined(useMpris):
       emitMprisPlayerChanged(d)
   of dckTogglePause:
     d.player.togglePause(); d.idleFrames = 0
-    if d.player.state == 2: d.viz.clear()
     when defined(useMpris):
       emitMprisPlayerChanged(d)
   of dckStop:
@@ -557,7 +560,6 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     d.savePlaybackState()
     if d.lib != nil:
       d.lib.closeDb()
-    d.viz.stopCapture()
     d.player.shutdown()
     d.running = false
   of dckStatus, dckNowPlaying:
@@ -724,6 +726,7 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     result["time_pos"] = %d.player.timePos
     result["duration"] = %d.player.duration
     result["track_path"] = %d.currentTrackPath
+    result["track_thumbnail"] = %d.currentTrackThumbnail
     if d.currentTrackPath.len > 0:
       if d.currentTrackTitle.len > 0:
         result["track_title"] = %d.currentTrackTitle
@@ -808,15 +811,18 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
   of dckQueueRemove:
     if cmd.intArg >= 0 and cmd.intArg < d.playbackQueue.len:
       d.playbackQueue.delete(cmd.intArg)
+    d.sendQueueEvent()
   of dckQueueRemovePath:
     if cmd.strArg.len > 0:
       let idx = d.playbackQueue.find(cmd.strArg)
       if idx >= 0:
         d.playbackQueue.delete(idx)
+    d.sendQueueEvent()
   of dckQueueClear:
     d.playbackQueue = @[]
     d.shuffleOrder = @[]
     d.shuffleIndex = 0
+    d.sendQueueEvent()
   of dckQueueList:
     var arr = newJArray()
     for p in d.playbackQueue:
@@ -847,6 +853,7 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     result["track_path"] = %d.currentTrackPath
     result["track_title"] = %d.currentTrackTitle
     result["track_channel"] = %d.currentTrackChannel
+    result["track_thumbnail"] = %d.currentTrackThumbnail
     result["track_album"] = %d.player.metadata.album
     result["crossfading"] = %d.player.getStatusFlags().crossfading
     result["master_ended"] = %d.player.getStatusFlags().masterEnded
@@ -1011,7 +1018,7 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
 proc trySend(client: Socket, data: string): bool =
   if data.len == 0: return true
   var remaining = data
-  var retries = 200
+  var retries = 20
   while remaining.len > 0 and retries > 0:
     let n = posix.send(client.getFd, unsafeAddr remaining[0], remaining.len.cint, 0.cint)
     if n > 0:
@@ -1081,7 +1088,6 @@ proc runDaemon*() =
   let defaultDownloadDir = dataDir() & "/audio"
   var daemon = Daemon(
     player: player,
-    viz: newVisualizer(),
     running: true,
     idleTimeout: 300,
     clients: @[],
@@ -1117,7 +1123,6 @@ proc runDaemon*() =
     ytPlaylistBuf: "",
     ytPlaylistUrl: ""
   )
-  daemon.viz.startCapture()
   when defined(useMpris):
     initMpris(daemon)
   let libPath = dataDir() & "/gtm.db"
@@ -1460,11 +1465,6 @@ proc runDaemon*() =
         let ev = %*{"events": [%*{"kind": %aekCustomEvent.int, "event": "scan_done"}]}
         daemon.broadcastAll($ev & "\n")
 
-    daemon.viz.readPcm()
-    var pcmBuf: seq[float32] = @[]
-    daemon.player.readPcmFrames(pcmBuf, 512)
-    if pcmBuf.len > 0:
-      daemon.viz.writePcm(pcmBuf)
     if daemon.sleepTimerRemaining > 0:
       daemon.sleepTimerFrames.inc
       if daemon.sleepTimerFrames >= 60:
@@ -1476,7 +1476,6 @@ proc runDaemon*() =
             shutdownMpris()
           if daemon.lib != nil:
             daemon.lib.closeDb()
-          daemon.viz.stopCapture()
           daemon.player.shutdown()
           daemon.running = false
           break
@@ -1491,7 +1490,6 @@ proc runDaemon*() =
         shutdownMpris()
       if daemon.lib != nil:
         daemon.lib.closeDb()
-      daemon.viz.stopCapture()
       daemon.player.shutdown()
       break
   for c in daemon.clients:

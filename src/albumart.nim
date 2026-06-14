@@ -91,7 +91,12 @@ proc computeArtSize*(termW, termH: int): tuple[charW, charH: int] =
   else:
     result = (0, 0)
 
-proc writeCachedArt*(data: string, x, y: int) =
+proc writeCachedArt*(data: string, x, y, w, h: int) =
   if data.len == 0: return
-  stdout.write("\e[" & $(y + 1) & ";" & $(x + 1) & "H" & data)
+  # Clear the art area first to erase any previous art remnants
+  var clearBuf = "\e[" & $(y + 1) & ";" & $(x + 1) & "H"
+  for row in 0..<h:
+    if row > 0: clearBuf &= "\e[" & $(y + 1 + row) & ";" & $(x + 1) & "H"
+    clearBuf &= spaces(w)
+  stdout.write(clearBuf & "\e[" & $(y + 1) & ";" & $(x + 1) & "H" & data)
   stdout.flushFile()

@@ -1,7 +1,7 @@
 import os, terminal, strutils, unicode, json, sets, math, sequtils, algorithm, times, posix, tables
 from illwave as iw import nil
 from ../vendor/nimwave/nimwave as nw import nil
-import state, ui, audio, library, theme, commands, client, visualizer, cli, ytdlp, albumart
+import state, ui, audio, library, theme, commands, client, cli, ytdlp, albumart
 
 proc loadConfig(state: var AppState) =
   let path = state.configPath
@@ -21,16 +21,10 @@ proc loadConfig(state: var AppState) =
           state.tab = AppTab(savedTab)
       if json.hasKey("refresh_theme"):
         state.config.refreshTheme = json["refresh_theme"].getBool(false)
-      if json.hasKey("viz_visible"):
-        state.vizVisible = json["viz_visible"].getBool(true)
       if json.hasKey("idle_timeout"):
         state.config.idleTimeout = json["idle_timeout"].getInt(300)
       if json.hasKey("ipc_timeout"):
         state.config.ipcTimeout = json["ipc_timeout"].getInt(3)
-      if json.hasKey("visualizer"):
-        let vizNode = json["visualizer"]
-        if vizNode.hasKey("bar_count"):
-          state.viz.barCount = vizNode["bar_count"].getInt(32)
       if json.hasKey("yt_search_page_size"):
         state.ytSearchPageSize = json["yt_search_page_size"].getInt(10)
       if json.hasKey("keybindings"):
@@ -74,8 +68,6 @@ proc saveConfig(state: AppState) =
     "volume": %state.volume,
     "last_tab": %(state.tab.ord),
     "refresh_theme": %state.config.refreshTheme,
-    "viz_visible": %state.vizVisible,
-    "visualizer": %{"bar_count": %state.viz.barCount},
     "footer_preset": %($state.footerPreset).substr(3).toLowerAscii(),
     "crossfade_duration": %state.crossfadeDuration,
     "crossfade_curve": %state.crossfadeCurve.ord,
@@ -304,7 +296,7 @@ proc moveSelection(state: var AppState, delta: int) =
       state.selectIndex = 0
     else:
       let maxIdx = case state.settingsCategory
-        of scAudio: 4
+        of scAudio: 3
         of scYouTube: 6
         of scAppearance: 3
         of scSystem: 2
@@ -352,7 +344,6 @@ proc cleanQuit(state: var AppState, stopDaemon: bool) =
     DaemonClient(state.player).sendQuitDaemon()
   elif not stopDaemon:
     state.player.shutdown()
-  if state.viz != nil: state.viz.stopCapture()
   try: removeFile(sockPath()) except: stderr.writeLine("[gtm] removeFile sock: " & getCurrentExceptionMsg())
   try: removeFile(pidPath()) except: stderr.writeLine("[gtm] removeFile pid: " & getCurrentExceptionMsg())
   terminal.showCursor()
@@ -385,7 +376,6 @@ proc checkAutocomplete(state: var AppState) =
 
 proc quitBackground(state: var AppState) =
   state.saveConfig()
-  if state.viz != nil: state.viz.stopCapture()
   terminal.showCursor()
   eraseScreen()
   setCursorPos(0, 0)
@@ -393,9 +383,6 @@ proc quitBackground(state: var AppState) =
 
 proc quitDaemon(state: var AppState) =
   cleanQuit(state, true)
-
-proc toggleVisualizer(state: var AppState) =
-  state.vizVisible = not state.vizVisible
 
 proc goToFirst(state: var AppState) =
   state.selectIndex = 0
@@ -611,9 +598,6 @@ proc initCommands(state: var AppState) =
   state.registerCommand("quit_daemon", "Quit & Stop Daemon",
     "Exit and terminate background daemon", "\u23F9", @["ShiftQ"],
     proc(s: var AppState) = s.quitDaemon())
-  state.registerCommand("toggle_visualizer", "Toggle Visualizer",
-    "Show or hide audio visualizer", "\U0001F4CA", @["CtrlV"],
-    proc(s: var AppState) = s.toggleVisualizer())
   state.registerCommand("command_palette", "Command Palette",
     "Show command palette with fuzzy search", "\u2328", @["Colon"],
     proc(s: var AppState) =
@@ -716,6 +700,8 @@ proc initCommands(state: var AppState) =
 proc execCmd(state: var AppState, cmdId: string) =
   let idx = findCommandIdx(state, cmdId)
   if idx >= 0:
+    if state.overlay.kind == okNone and not state.helpVisible and not state.aboutVisible and not state.eqVisible and state.mode != imLeaderMode:
+      state.lastCommandName = state.commands[idx].name
     state.commands[idx].handler(state)
 
 proc cycleEqPreset(state: var AppState) =
@@ -725,9 +711,9 @@ proc cycleEqPreset(state: var AppState) =
     if resp.hasKey("presets"):
       let presets = resp["presets"]
       var idx = 0
-      for i, p in presets:
-        if p.getStr("") == state.eqPreset:
-          idx = (parseInt(i) + 1) mod presets.len
+      for i in 0..<presets.len:
+        if presets[i].getStr("") == state.eqPreset:
+          idx = (i + 1) mod presets.len
           break
       state.eqPreset = presets[idx].getStr("")
 
@@ -741,12 +727,10 @@ proc adjustSetting(state: var AppState, delta: int) =
       state.player.setVolume(state.volume)
       state.showVolumeCue()
       state.saveConfig()
-    of 1: # Visualizer
-      state.toggleVisualizer()
-    of 2: # Crossfade Duration
+    of 1: # Crossfade Duration
       state.crossfadeDuration = max(0, min(10, state.crossfadeDuration + delta))
       state.saveConfig()
-    of 3: # Crossfade Curve
+    of 2: # Crossfade Curve
       let curves = [cctEqualPower, cctQuadratic, cctCubic, cctAsymmetric]
       var i = 0
       for idx, v in curves:
@@ -1143,6 +1127,9 @@ proc handleQueueOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         state.overlay.clear()
       else:
         state.overlay = OverlayState(kind: okQueueOverlay, cursor: min(state.overlay.cursor, state.playbackQueue.len - 1))
+  of iw.Key.A:
+    state.overlay = OverlayState(kind: okQueuePicker, query: "")
+    for i in 0..<state.libraryTracks.len: state.overlay.results.add(i)
   else: discard
 
 proc handlePlaylistSearchOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
@@ -1295,6 +1282,8 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
   if key != iw.Key.None:
     state.lastKeyDisplay = keyDisplayName(key)
     state.lastKeyTimer = 120
+    if state.overlay.kind == okNone and not state.helpVisible and not state.aboutVisible and not state.eqVisible and state.mode != imLeaderMode:
+      state.lastCommandName = ""
   if state.aboutVisible:
     if key notin {iw.Key.None}:
       state.aboutVisible = false
@@ -1610,6 +1599,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
   case key
   of iw.Key.Colon:
     state.overlay = OverlayState(kind: okCommandPalette, query: "")
+    state.lastCommandName = "Command Palette"
     for i in 0..<state.commands.len: state.overlay.results.add(i)
   of iw.Key.Space:
     if state.selectMode:
@@ -1620,13 +1610,10 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
       state.playSelected()
   of iw.Key.CtrlL:
     state.mode = imLeaderMode
+    state.lastCommandName = "Actions Menu"
   of iw.Key.Tab:
     if state.tab == tabLibrary:
-      if state.filterScope == fsDownloads and state.libraryFocusPanel == lpContent:
-        state.downloadsTab = if state.downloadsTab == dtDownloading: dtDownloaded else: dtDownloading
-        state.selectIndex = 0
-        state.rebuildItems()
-      elif state.libraryFocusPanel == lpContent: state.libraryFocusPanel = lpSidebar
+      if state.libraryFocusPanel == lpContent: state.libraryFocusPanel = lpSidebar
       else: state.libraryFocusPanel = lpContent
       state.needsRedraw = true
     elif state.tab == tabSettings:
@@ -1649,20 +1636,21 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     state.mode = imFilter; state.filterText = ""; state.filteredIndices = @[]
   of iw.Key.CtrlR:
     execCmd(state, "yt_recommended")
-  of iw.Key.CtrlV:
-    state.toggleVisualizer()
-    state.markDirty(ceSettings)
   of iw.Key.AltY:
     state.overlay = OverlayState(kind: okYtSearch, query: "")
+    state.lastCommandName = "YouTube Search"
     state.ytDebounceAt = 0
   of iw.Key.AltC:
     state.overlay = OverlayState(kind: okThemePicker, query: "")
+    state.lastCommandName = "Change Theme"
     state.updateThemePickerResults()
   of iw.Key.AltE:
     state.eqVisible = not state.eqVisible
+    if state.eqVisible: state.lastCommandName = "Equalizer"
     state.markDirty(ceSettings)
   of iw.Key.AltQ:
     state.overlay = OverlayState(kind: okQueueOverlay, query: "", cursor: state.queueCursor)
+    state.lastCommandName = "Current Queue"
   of iw.Key.AltP:
     if state.isPlaylistView() and state.playlistContentsIdx < 0:
       execCmd(state, "create_playlist")
@@ -1752,7 +1740,6 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           state.config.theme = "mocha"
           state.theme = getTheme("mocha")
           state.volume = 80
-          state.vizVisible = true
           state.config.refreshTheme = false
           state.player.setVolume(80)
           state.shuffleEnabled = false
@@ -1776,9 +1763,11 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
   of iw.Key.S: state.player.stop(); state.status = psStopped
   of iw.Key.Y:
     state.overlay = OverlayState(kind: okYtSearch, query: "")
+    state.lastCommandName = "YouTube Search"
     state.ytDebounceAt = 0
   of iw.Key.I:
     state.overlay = OverlayState(kind: okQueuePicker, query: "")
+    state.lastCommandName = "Add to Queue"
     for i in 0..<state.libraryTracks.len: state.overlay.results.add(i)
   of iw.Key.H:
     if state.tab == tabLibrary:
@@ -1820,11 +1809,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         state.selectIndex = 0
         state.needsRedraw = true
     elif state.tab == tabLibrary:
-      if state.filterScope == fsDownloads and state.libraryFocusPanel == lpContent:
-        state.downloadsTab = if state.downloadsTab == dtDownloading: dtDownloaded else: dtDownloading
-        state.selectIndex = 0
-        state.rebuildItems()
-      elif state.libraryFocusPanel == lpContent:
+      if state.libraryFocusPanel == lpContent:
         state.libraryFocusPanel = lpSidebar
     elif state.isPlaylistView():
       if state.playlistContentsIdx >= 0:
@@ -1840,11 +1825,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         state.selectIndex = 0
         state.needsRedraw = true
     elif state.tab == tabLibrary:
-      if state.filterScope == fsDownloads and state.libraryFocusPanel == lpContent:
-        state.downloadsTab = if state.downloadsTab == dtDownloading: dtDownloaded else: dtDownloading
-        state.selectIndex = 0
-        state.rebuildItems()
-      elif state.libraryFocusPanel == lpSidebar:
+      if state.libraryFocusPanel == lpSidebar:
         const scopeMap2 = [fsAll, fsArtists, fsAlbums, fsPlaylists, fsRecent, fsFavourites, fsLastPlayed, fsMostPlayed, fsLeastPlayed, fsDownloads]
         state.filterScope = scopeMap2[state.librarySidebarSelect]
         state.libraryFocusPanel = lpContent
@@ -1891,10 +1872,12 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
   of iw.Key.ShiftA:
     if state.isPlaylistView() and state.playlistContentsIdx >= 0:
       state.overlay = OverlayState(kind: okPlaylistSearch, query: "", plMode: 1)
+      state.lastCommandName = "Add to Playlist"
       for i in 0..<state.libraryTracks.len:
         state.overlay.results.add(i)
     else:
       state.aboutVisible = true
+      state.lastCommandName = "About"
   of iw.Key.D:
     if state.isPlaylistView() and state.playlistContentsIdx < 0:
       execCmd(state, "delete_playlist")
@@ -1927,7 +1910,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
       state.selectMode = true
       state.selectedIndices = initHashSet[int]()
       state.selectionAnchor = state.selectIndex
-  of iw.Key.QuestionMark: state.helpVisible = true
+  of iw.Key.QuestionMark: state.helpVisible = true; state.lastCommandName = "Show Help"
   of iw.Key.One: state.tab = tabNowPlaying; state.rebuildItems()
   of iw.Key.Two: state.tab = tabLibrary; state.rebuildItems()
   of iw.Key.Three: state.tab = tabSettings; state.rebuildItems()
@@ -1935,10 +1918,12 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
   of iw.Key.ShiftX:
     if state.isPlaylistView() and state.playlistContentsIdx >= 0:
       state.overlay = OverlayState(kind: okPlaylistSearch, query: "", plMode: 2)
+      state.lastCommandName = "Edit Playlist"
       for i in 0..<state.libraryTracks.len:
         state.overlay.results.add(i)
   of iw.Key.F:
     state.overlay = OverlayState(kind: okFuzzyFinder, query: "")
+    state.lastCommandName = "Fuzzy Finder"
     for i in 0..<state.libraryTracks.len:
       state.overlay.results.add(i)
       let t = state.libraryTracks[i]
@@ -1947,6 +1932,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     execCmd(state, "toggle_favourite")
   of iw.Key.T:
     state.overlay = OverlayState(kind: okThemePicker, query: "")
+    state.lastCommandName = "Change Theme"
     state.updateThemePickerResults()
   of iw.Key.Q:
     quitBackground(state)
@@ -1967,6 +1953,8 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     if state.keyDispatch.hasKey(key):
       for idx in state.keyDispatch[key]:
         if idx >= 0 and idx < state.commands.len:
+          if state.overlay.kind == okNone and not state.helpVisible and not state.aboutVisible and not state.eqVisible and state.mode != imLeaderMode:
+            state.lastCommandName = state.commands[idx].name
           state.commands[idx].handler(state)
 
 proc getNextTrackInfo(state: var AppState): tuple[path: string, id: int64] =
@@ -2024,7 +2012,7 @@ proc processEvents(state: var AppState) =
         state.currentPlayingPath = ev.metadata["track_path"]
         state.currentPlayingTitle = ev.metadata.getOrDefault("track_title", "")
         state.currentPlayingChannel = ev.metadata.getOrDefault("track_channel", "")
-        state.currentThumbnail = ""
+        state.currentThumbnail = ev.metadata.getOrDefault("track_thumbnail", "")
       state.markDirtyBatch(cePlayState, ceTrack)
       # Show Now Playing notification (skip if auto-advanced — "Up Next" was already shown)
       if not autoAdvanced:
@@ -2149,13 +2137,14 @@ proc processEvents(state: var AppState) =
         let channel = ev.metadata.getOrDefault("channel", "")
         if url.len > 0:
           state.ytStreamResolving = false
-          state.player.loadFile(url, title, channel)
+          let thumb = state.ytStreamPendingItem.thumbnail
+          state.player.loadFile(url, title, channel, thumb)
           state.player.play()
           state.status = psPlaying
           state.currentPlayingPath = url
           state.currentPlayingTitle = title
           state.currentPlayingChannel = channel
-          state.currentThumbnail = ""
+          state.currentThumbnail = thumb
           state.markDirtyBatch(cePlayState, ceTrack)
           state.showNotification("Streaming: " & title)
         else:
@@ -2206,6 +2195,8 @@ proc fullStateSync(state: var AppState, daemonState: JsonNode) =
     state.currentPlayingTitle = daemonState["track_title"].getStr("")
   if daemonState.hasKey("track_channel"):
     state.currentPlayingChannel = daemonState["track_channel"].getStr("")
+  if daemonState.hasKey("track_thumbnail"):
+    state.currentThumbnail = daemonState["track_thumbnail"].getStr("")
   if daemonState.hasKey("time_pos"):
     state.timePos = max(0.0, daemonState["time_pos"].getFloat(0.0))
   if daemonState.hasKey("duration"):
@@ -2276,8 +2267,6 @@ proc runTui(args: seq[string]) =
   if args.len > 0:
     ctx.data.selectIndex = 0
     ctx.data.playSelected()
-  if ctx.data.viz != nil and ctx.data.player of DaemonClient:
-    ctx.data.viz.startCapture()
   var prevTb: iw.TerminalBuffer
   var tbReady: bool
   var mouseInfo: iw.MouseInfo
@@ -2288,7 +2277,6 @@ proc runTui(args: seq[string]) =
   var lastH = terminal.terminalHeight()
   var resized = false
   var frameNo = 0
-  var vizFrameSkip = 0
   while true:
     try:
       var rfds: TFdSet
@@ -2328,8 +2316,21 @@ proc runTui(args: seq[string]) =
             cli.ensureDaemon()
             if cli.connected:
               ctx.data.setFeedback("[Daemon reconnected]")
-              let daemonState = cli.getDaemonState()
+              let daemonState = cli.getFullState()
               fullStateSync(ctx.data, daemonState)
+              if daemonState.hasKey("queue"):
+                try:
+                  let qArr = daemonState["queue"]
+                  var queue: seq[int] = @[]
+                  for qItem in qArr.items:
+                    let qPath = qItem.getStr("")
+                    for i, t in ctx.data.libraryTracks:
+                      if t.path == qPath:
+                        queue.add(i)
+                        break
+                  ctx.data.playbackQueue = queue
+                  ctx.data.markDirtyBatch(ceQueue, cePlayState)
+                except: discard
               # Re-fetch library from daemon to pick up any metadata changes
               let libResp = cli.getLibrary()
               if libResp.hasKey("tracks") and libResp["tracks"].len > 0:
@@ -2367,13 +2368,13 @@ proc runTui(args: seq[string]) =
           if ctx.data.overlay.query.len > 0:
             if ctx.data.ytSearchQuery != ctx.data.overlay.query:
               if ctx.data.ytSearchActive:
-                discard cli.ytSearchCancel()
+                cli.ytSearchCancel()
               ctx.data.overlay.ytResults = @[]
               ctx.data.overlay.cursor = 0
               ctx.data.ytSearchQuery = ctx.data.overlay.query
               ctx.data.ytSearchPage = 0
             if not ctx.data.ytSearchActive:
-              discard cli.ytSearch(ctx.data.overlay.query, ctx.data.ytSearchPageSize * max(1, ctx.data.ytSearchPage + 1))
+              cli.ytSearch(ctx.data.overlay.query, ctx.data.ytSearchPageSize * max(1, ctx.data.ytSearchPage + 1))
               ctx.data.ytSearchActive = true
               ctx.data.ytSearchLoading = true
               ctx.data.markDirty(ceSearchLoading)
@@ -2408,10 +2409,6 @@ proc runTui(args: seq[string]) =
         lastW = curW
         lastH = curH
         resized = true
-      vizFrameSkip = (vizFrameSkip + 1) mod 3
-      if ctx.data.viz != nil and vizFrameSkip == 0:
-        if ctx.data.overlay.kind == okNone:
-          ctx.data.viz.readPcm()
       if ctx.data.status != oldStatus:
         ctx.data.needsRedraw = true
       oldStatus = ctx.data.status
@@ -2421,8 +2418,6 @@ proc runTui(args: seq[string]) =
           oldTimeDisplay = newDisplay
           ctx.data.markDirty(cePosition)
         oldTimePos = ctx.data.timePos
-      if ctx.data.vizVisible and ctx.data.viz != nil and frameNo mod 6 == 0:
-        ctx.data.markDirty(cePosition)
       let shouldDraw = resized or ctx.data.needsRedraw or ctx.data.dirtyFlags.card > 0
       if shouldDraw:
         ctx.tb = iw.initTerminalBuffer(curW, curH)
@@ -2434,14 +2429,15 @@ proc runTui(args: seq[string]) =
       if shouldDraw and tbReady:
         iw.display(ctx.tb, prevTb)
         prevTb = ctx.tb
+        ctx.data.artAnsiWritten = false
         if ctx.data.tab == tabNowPlaying and ctx.data.artAnsi.len > 0 and ctx.data.artBoxW > 0:
-          writeCachedArt(ctx.data.artAnsi, ctx.data.artBoxX, ctx.data.artBoxY)
+          writeCachedArt(ctx.data.artAnsi, ctx.data.artBoxX, ctx.data.artBoxY, ctx.data.artBoxW, ctx.data.artBoxH)
+          ctx.data.artAnsiWritten = true
       if key != iw.Key.None:
         showInputCursor(ctx.data, curW, curH)
       ctx.data.clearDirty()
       frameNo += 1
     except Exception as ex:
-      if ctx.data.viz != nil: ctx.data.viz.stopCapture()
       iw.deinit()
       echo "\nError: ", ex.msg
       echo ex.getStackTrace()

@@ -9,7 +9,7 @@ type
     queue*, library*, settings*, help*: string
     checkmark*, cross*, arrowUp*, arrowDown*, arrowLeft*, arrowRight*: string
     musicNote*, disk*, headphone*, speaker*: string
-    commandPalette*, filter*, selectMode*, visualizer*: string
+    commandPalette*, filter*, selectMode*: string
     track*, time*, folder*, file*: string
 
 proc nerdFontIcons*(): IconPack =
@@ -22,7 +22,7 @@ proc nerdFontIcons*(): IconPack =
     queue: "\uF0C9", library: "\uF02D", settings: "\uF013", help: "\uF059",
     checkmark: "\uF00C", cross: "\uF00D", arrowUp: "\uF062", arrowDown: "\uF063", arrowLeft: "\uF060", arrowRight: "\uF061",
     musicNote: "\uF3B5", disk: "\uF0A0", headphone: "\uF025", speaker: "\uF028",
-    commandPalette: "\uF120", filter: "\uF0B0", selectMode: "\uF204", visualizer: "\uF012",
+    commandPalette: "\uF120", filter: "\uF0B0", selectMode: "\uF204",
     track: "\uF001", time: "\uF017", folder: "\uF07B", file: "\uF15B"
   )
 
@@ -36,7 +36,7 @@ proc emojiIcons*(): IconPack =
     queue: "\U0001F4DC", library: "\U0001F4DA", settings: "\u2699", help: "\u2753",
     checkmark: "\u2714", cross: "\u274C", arrowUp: "\u2B06", arrowDown: "\u2B07", arrowLeft: "\u2B05", arrowRight: "\u27A1",
     musicNote: "\u266B", disk: "\U0001F4BF", headphone: "\U0001F3A7", speaker: "\U0001F509",
-    commandPalette: "\u2328", filter: "\U0001F50D", selectMode: "\U0001F7E8", visualizer: "\U0001F4CA",
+    commandPalette: "\u2328", filter: "\U0001F50D", selectMode: "\U0001F7E8",
     track: "\U0001F3B5", time: "\u23F1", folder: "\U0001F4C1", file: "\U0001F4C4"
   )
 

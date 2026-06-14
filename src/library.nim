@@ -690,7 +690,6 @@ proc rebuildItems*(state: var AppState) =
     state.displayItems.add(LibraryItem(kind: likTrack, label: "Theme: " & themeName(state.config.theme), sublabel: "Enter to change", id: 0))
     state.displayItems.add(LibraryItem(kind: likTrack, label: "Volume: " & $state.volume & "%", sublabel: "Shift+J/K or +/-", id: 1))
     state.displayItems.add(LibraryItem(kind: likTrack, label: "Refresh Theme: " & (if state.config.refreshTheme: "On" else: "Off"), sublabel: "Enter to toggle", id: 2))
-    state.displayItems.add(LibraryItem(kind: likTrack, label: "Visualizer: " & (if state.vizVisible: "Visible" else: "Hidden"), sublabel: "Enter to toggle", id: 3))
     state.displayItems.add(LibraryItem(kind: likTrack, label: "Daemon: " & (if state.daemonConnected: "Connected" else: "Disconnected"), sublabel: "", id: 4))
     state.displayItems.add(LibraryItem(kind: likTrack, label: "Reset to Defaults", sublabel: "Enter to reset all settings", id: 5))
     state.displayItems.add(LibraryItem(kind: likTrack, label: "Max Concurrent Downloads: " & $state.ytMaxConcurrentDownloads, sublabel: "Enter to adjust", id: 7))
