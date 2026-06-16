@@ -601,7 +601,7 @@ proc initCommands(state: var AppState) =
     "Display help overlay with keybindings", "\u2753", @["QuestionMark"],
     proc(s: var AppState) = s.helpVisible = true)
   state.registerCommand("show_about", "About",
-    "Show system information and build details", "\u24D8", @["ShiftA"],
+    "Show system information and build details", "\u24D8", @["AltA"],
     proc(s: var AppState) = s.aboutVisible = true)
   state.registerCommand("show_equalizer", "Equalizer",
     "Open graphic equalizer with 10-band EQ", "\U0001F3B5", @["AltE", "E"],
@@ -1947,9 +1947,6 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
       state.lastCommandName = "Add to Playlist"
       for i in 0..<state.libraryTracks.len:
         state.overlay.results.add(i)
-    else:
-      state.aboutVisible = true
-      state.lastCommandName = "About"
   of iw.Key.D:
     if state.isPlaylistView() and state.playlistContentsIdx < 0:
       execCmd(state, "delete_playlist")

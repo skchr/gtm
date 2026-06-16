@@ -200,14 +200,13 @@ method render*(node: TabBar, ctx: var nw.Context[AppState]) =
     "Now Playing", "Library",
     "Settings"
   ]
-  let narrow = w < 48
   var x = 1
   let tabKeys = ["1", "2", "3"]
   for i, name in tabs:
     let key = tabKeys[i]
     let tab = AppTab(i)
     let isActive = ctx.data.tab == tab
-    let display = "[" & key & "]" & tabIcons[i] & (if narrow: "" else: " " & name)
+    let display = "[" & key & "]" & tabIcons[i] & " " & name
     let segLen = display.runeLen + 1
     if isActive:
       fillBg(ctx.tb, x, 0, x + segLen, 0, theme.surface2)
@@ -450,7 +449,7 @@ method render*(node: LibrarySidebar, ctx: var nw.Context[AppState]) =
     let bullet = if isActive: "\u25C9 " else: "\u25CB "
     let countStr = $actualCount
     let prefix = treePrefix(i)
-    let maxLabelW = max(1, w - countStr.runeLen - prefix.runeLen - 3)
+    let maxLabelW = max(1, w - countStr.runeLen - prefix.runeLen - 5)
     let label = entry.label
     let display = prefix & bullet & (if label.runeLen > maxLabelW: label[0..<max(1, maxLabelW - 2)] & "\u2026" else: label)
     let fg = if isActive: theme.blue elif isSelected: theme.text else: theme.subtext0
@@ -458,16 +457,7 @@ method render*(node: LibrarySidebar, ctx: var nw.Context[AppState]) =
     writeStr(ctx.tb, w - countStr.runeLen - 1, line, countStr, theme.overlay0)
     line.inc
     # Downloads is a single item — no sub-tabs
-  line.inc
-  if line < h:
-    writeStr(ctx.tb, 1, line, "\u2500".repeat(min(w - 2, 16)), theme.surface2)
-  line.inc
-  if line < h:
-    if state.mode == imFilter:
-      writeStrBg(ctx.tb, 1, line, "[/] " & truncateAt(state.filterText, max(0, w - 6)), theme.text, theme.surface1)
-    else:
-      writeStr(ctx.tb, 1, line, "[/] Filter", theme.overlay0)
-  fillBg(ctx.tb, 0, line + 1, w - 1, h - 1, theme.mantle)
+  fillBg(ctx.tb, 0, line, w - 1, h - 1, theme.mantle)
 
 type LibraryContentView = ref object of nw.Node
 method render*(node: LibraryContentView, ctx: var nw.Context[AppState]) =
@@ -644,8 +634,9 @@ method render*(node: SettingsView, ctx: var nw.Context[AppState]) =
     writeStr(ctx.tb, 2, y, prefix & cat.icon & " " & cat.label, fg)
 
   # Right pane: content by category
+  let descH = 5
   let contentFocused = state.settingsFocusPanel == lpContent
-  fillBg(ctx.tb, contentX, 0, w - 1, h - 2, theme.base)
+  fillBg(ctx.tb, contentX, 0, w - 1, h - 2 - descH, theme.base)
   var line = 0
   var itemIdx = 0
   template sectionHeader(label: string) =
@@ -744,21 +735,49 @@ method render*(node: SettingsView, ctx: var nw.Context[AppState]) =
     writeStr(ctx.tb, contentX + contentW - 8, line, "[Reset]", theme.peach)
     line.inc
 
-  # Keybinding legend at bottom of content area
-  if line + 4 < h - 1:
-    fillBg(ctx.tb, contentX, line, w - 1, line, theme.crust)
-    writeStr(ctx.tb, contentX + 1, line, "Keybindings", theme.mauve)
-    line.inc
-    let contentW2 = w - contentX - 2
-    if sidebarFocused:
-      writeStr(ctx.tb, contentX + 2, line, truncateAt("\u2191/\u2193:Nav  Tab/Enter:Content  \u2190/\u2192:Switch", contentW2), theme.subtext0)
-    else:
-      writeStr(ctx.tb, contentX + 2, line, truncateAt("\u2191/\u2193:Scroll  \u2190/\u2192:Adjust  Tab:Category  Enter:Open", contentW2), theme.subtext0)
-    line.inc
+  # Description panel at bottom of right pane
+  fillBg(ctx.tb, contentX, h - 2 - descH, w - 1, h - 2, theme.mantle)
+  var descLine = h - 2 - descH + 1
+  writeStr(ctx.tb, contentX + 2, descLine, "Help", theme.mauve)
+  descLine.inc
+  if sidebarFocused:
+    let catDesc = SettingCategoryDescs[state.settingsCategory]
+    let wrapped = wordWrap(catDesc, max(1, contentW - 4))
+    for wl in wrapped:
+      if descLine >= h - 2: break
+      writeStr(ctx.tb, contentX + 2, descLine, wl, theme.subtext0)
+      descLine.inc
+  else:
+    let cat = state.settingsCategory
+    let descIdx = state.selectIndex
+    if descIdx >= 0 and descIdx < SettingDescs[cat].len:
+      let wrapped = wordWrap(SettingDescs[cat][descIdx], max(1, contentW - 4))
+      for wl in wrapped:
+        if descLine >= h - 2: break
+        writeStr(ctx.tb, contentX + 2, descLine, wl, theme.subtext0)
+        descLine.inc
+      let toggleOpt =
+        if cat == scAudio and descIdx == 2:
+          let cNames = ["EqualPower", "Quadratic", "Cubic", "Asymmetric"]
+          let cIdx = state.crossfadeCurve.ord
+          if cIdx >= 0 and cIdx < cNames.len: some(cNames[cIdx]) else: none(string)
+        elif cat == scYouTube and descIdx == 1:
+          let rLabel = if state.ytJsRuntime.len == 0: "node" else: state.ytJsRuntime
+          some(rLabel)
+        else:
+          none(string)
+      if toggleOpt.isSome and toggleOpt.get in ToggleOptionDescs:
+        let optDesc = ToggleOptionDescs[toggleOpt.get]
+        if descLine < h - 2:
+          writeStr(ctx.tb, contentX + 2, descLine, "\u2192 " & optDesc, theme.sky)
+          descLine.inc
 
-  # Bottom status line (shared)
+  # Bottom status line (shared) — keybinding hints instead of version
   fillBg(ctx.tb, 0, h - 1, w - 1, h - 1, theme.base)
-  writeStr(ctx.tb, 1, h - 1, "Tracks: " & $state.libraryTracks.len & "  |  gtm " & GTM_VERSION, theme.subtext0)
+  let kbLine = "Tracks: " & $state.libraryTracks.len & "  |  " &
+    (if sidebarFocused: "\u2191/\u2193:Nav  Tab/Enter:Content  \u2190/\u2192:Switch"
+     else: "\u2191/\u2193:Scroll  \u2190/\u2192:Adjust  Tab:Category  Enter:Open")
+  writeStr(ctx.tb, 1, h - 1, truncateAt(kbLine, w - 2), theme.subtext0)
 
 type ProgressBarComp = ref object of nw.Node
 method render*(node: ProgressBarComp, ctx: var nw.Context[AppState]) =
@@ -845,7 +864,7 @@ method render*(node: StatusBarComp, ctx: var nw.Context[AppState]) =
   var rightX = w - 1
   template addMod(text: string, col: colors.Color, bgCol: colors.Color) =
     if rightX > text.runeLen + 2:
-      rightX -= text.runeLen + 1
+      rightX -= text.runeLen + 2
       fillBg(ctx.tb, rightX, 0, rightX + text.runeLen, 0, bgCol)
       ctx.tb.setBackgroundColor(bgCol)
       writeStr(ctx.tb, rightX, 0, text, col)
@@ -1681,7 +1700,7 @@ proc renderApp*(ctx: var nw.Context[AppState]) =
     of tabNowPlaying:
       sliceCtx = nw.slice(ctx, 0, y, w, mainH); render(NowPlayingView(), sliceCtx)
     of tabLibrary:
-      let sidebarW = max(20, min(28, w div 5))
+      let sidebarW = max(24, min(32, w div 4))
       let contentW = w - sidebarW
       sliceCtx = nw.slice(ctx, 0, y, sidebarW, mainH); render(LibrarySidebar(), sliceCtx)
       sliceCtx = nw.slice(ctx, sidebarW, y, contentW, mainH); render(LibraryContentView(), sliceCtx)

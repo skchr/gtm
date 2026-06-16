@@ -386,6 +386,52 @@ const
   }.toTable()
 
 
+const
+  SettingCategoryDescs*: array[SettingsCategory, string] = [
+    "Configure audio playback: volume, crossfade between tracks, and audio backend.",
+    "YouTube integration: JS runtime, download limits, search preferences, cookies.",
+    "Customize the UI appearance: theme colors, footer layout, and refresh behavior.",
+    "System settings: idle timeout, daemon IPC, and factory reset options."
+  ]
+
+  SettingDescs*: array[SettingsCategory, seq[string]] = [
+    scAudio: @[
+      "Master output volume (0\u2013100). Adjust with Left/Right arrows.",
+      "Crossfade transition length (0\u201310 sec). 0 = disabled.",
+      "Crossfade curve type for smooth transitions between tracks.",
+      "Connection status to the background gtm daemon process."
+    ],
+    scYouTube: @[
+      "Path to browser cookie file for YouTube authentication.",
+      "JavaScript runtime for YouTube extraction and processing.",
+      "Maximum concurrent YouTube downloads (1\u201310).",
+      "YouTube search results per page (10\u201350).",
+      "View and manage saved YouTube search history.",
+      "When enabled, all YouTube results are queued as batch downloads.",
+      "Remove all saved YouTube search queries permanently."
+    ],
+    scAppearance: @[
+      "Color theme seed. Type a name or use a preset (mocha/latte).",
+      "Randomize the theme seed on each application launch.",
+      "Choose a preset layout for the status bar footer modules."
+    ],
+    scSystem: @[
+      "Seconds of inactivity before auto-shutdown (0 = never).",
+      "Timeout in seconds for daemon IPC communication (1\u201330).",
+      "Restore all settings to factory defaults (cannot be undone)."
+    ]
+  ]
+
+  ToggleOptionDescs*: Table[string, string] = {
+    "node": "Node.js runtime. Recommended for best yt-dlp compatibility.",
+    "bun": "Bun runtime. Fast startup, good yt-dlp compatibility.",
+    "deno": "Deno runtime. Experimental \u2014 may have compatibility issues.",
+    "EqualPower": "Equal-power cos/sin curve. Constant perceived loudness.",
+    "Quadratic": "Quadratic ease-in-out. Faster fade-in, slower fade-out.",
+    "Cubic": "Cubic ease-in-out. More pronounced fade effect.",
+    "Asymmetric": "Asymmetric curve. Fast fade-out, slow fade-in."
+  }.toTable()
+
 proc stateDir*(): string =
   let xdg = getEnv("XDG_RUNTIME_DIR", "")
   if xdg.len > 0:

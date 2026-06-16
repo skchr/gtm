@@ -62,22 +62,22 @@ proc generateTheme*(seed: string, mode: ThemeMode, refreshSeed: bool): Theme =
       arr[i] = genColor(h, accentSat, accentLight)
     arr
 
-  let textVal = if dark: 0.90 else: 0.25
-  let sub1Val = if dark: 0.78 else: 0.35
-  let sub0Val = if dark: 0.68 else: 0.45
-  let ov2Val = if dark: 0.58 else: 0.52
-  let ov1Val = if dark: 0.48 else: 0.60
-  let ov0Val = if dark: 0.40 else: 0.68
+  let textVal = if dark: 0.90 else: 0.15
+  let sub1Val = if dark: 0.78 else: 0.25
+  let sub0Val = if dark: 0.68 else: 0.32
+  let ov2Val = if dark: 0.58 else: 0.40
+  let ov1Val = if dark: 0.48 else: 0.48
+  let ov0Val = if dark: 0.40 else: 0.55
 
   let baseH = (baseHue + 0.0) mod 360.0
   let bgSat = if dark: 0.10 else: 0.05
 
-  let crustL = if dark: 0.06 else: 0.88
-  let mantleL = if dark: 0.10 else: 0.92
-  let baseL = if dark: 0.14 else: 0.95
-  let surf0L = if dark: 0.20 else: 0.82
-  let surf1L = if dark: 0.26 else: 0.78
-  let surf2L = if dark: 0.32 else: 0.72
+  let crustL = if dark: 0.06 else: 0.86
+  let mantleL = if dark: 0.10 else: 0.90
+  let baseL = if dark: 0.14 else: 0.93
+  let surf0L = if dark: 0.20 else: 0.80
+  let surf1L = if dark: 0.26 else: 0.74
+  let surf2L = if dark: 0.32 else: 0.66
 
   let textH = baseH
   let subH = (baseH + 30.0) mod 360.0

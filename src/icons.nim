@@ -18,7 +18,7 @@ proc nerdFontIcons*(): IconPack =
     nextTrack: "\uF050", prevTrack: "\uF049",
     volumeHigh: "\uF028", volumeMedium: "\uF027", volumeLow: "\uF026", volumeMuted: "\uF6A9",
     music: "\uF001", artist: "\uF007", album: "\uF0A0", playlist: "\uF0CA",
-    search: "\uF002", heart: "\uF004", shuffle: "\uF074", repeatOne: "\uF01E", repeatAll: "\uF01E",
+    search: "\uF002", heart: "\uF004", shuffle: "\uF049D", repeatOne: "\uF0B6", repeatAll: "\uF01E",
     queue: "\uF0C9", library: "\uF02D", settings: "\uF013", help: "\uF059",
     checkmark: "\uF00C", cross: "\uF00D", arrowUp: "\uF062", arrowDown: "\uF063", arrowLeft: "\uF060", arrowRight: "\uF061",
     musicNote: "\uF3B5", disk: "\uF0A0", headphone: "\uF025", speaker: "\uF028",
