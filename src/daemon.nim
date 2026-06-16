@@ -29,7 +29,7 @@ type
     dckPrepareNext, dckCrossfade,
     dckSetEqBand, dckSetEqPreset,
     dckGetLibrary, dckAddTrack, dckUpdateTrackPath,
-    dckQueueAdd, dckQueueRemove, dckQueueRemovePath, dckQueueClear, dckQueueList, dckQueueSetCursor,
+    dckQueueAdd, dckQueueRemove, dckQueueRemovePath, dckQueueClear, dckQueueValidate, dckQueueList, dckQueueSetCursor,
     dckAddFavourite, dckRemoveFavourite, dckGetFavourites, dckGetFullState,
     dckYtSearch, dckYtSearchPoll, dckYtSearchCancel,
     dckYtResolveStream, dckYtResolveStreamPoll,
@@ -204,6 +204,8 @@ proc parseDaemonCommand(line: string): DaemonCmd =
       result.kind = dckQueueRemovePath; result.strArg = j{"path"}.getStr("")
     of "queue_clear":
       result.kind = dckQueueClear
+    of "queue_validate":
+      result.kind = dckQueueValidate
     of "queue_list":
       result.kind = dckQueueList
     of "queue_set_cursor":
@@ -330,7 +332,20 @@ proc shuffleOrder(count: int): seq[int] =
     let j = rand(i..<count)
     swap(result[i], result[j])
 
+proc regenShuffleIfNeeded(d: Daemon) =
+  if d.shuffleEnabled:
+    d.shuffleOrder = shuffleOrder(d.playbackQueue.len)
+    d.shuffleIndex = 0
+
 proc nextTrackFromQueue(d: Daemon): string =
+  # Repeat-one: return current track without consuming queue
+  if d.repeatMode == 2 and d.currentTrackPath.len > 0:
+    result = d.currentTrackPath
+    if result.len > 0:
+      d.lastConsumedFromQueue.add(result)
+      if d.lastConsumedFromQueue.len > 10:
+        d.lastConsumedFromQueue.delete(0)
+    return
   if d.shuffleEnabled and d.shuffleOrder.len > 0:
     if d.shuffleIndex < d.shuffleOrder.len:
       let idx = d.shuffleOrder[d.shuffleIndex]
@@ -366,6 +381,15 @@ proc advanceToNextTrack(d: Daemon, forward: bool = true): bool =
   d.autoAdvancing = true
   d.upNextSent = false
   if forward:
+    # Repeat-one: use current track path when queue is empty
+    if d.repeatMode == 2 and d.currentTrackPath.len > 0 and d.playbackQueue.len == 0:
+      discard d.nextTrackFromQueue()
+      d.player.stop()
+      if not d.player.loadFile(d.currentTrackPath):
+        return false
+      d.player.play()
+      d.idleFrames = 0
+      return true
     if d.playbackQueue.len == 0: return false
     # Peek at next candidate without consuming
     var nextCandidate = ""
@@ -815,23 +839,40 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
                 discard startStreamUrlFetch(path, d.ytStreamResolveProcess, d.ytCookieSource, d.ytJsRuntime)
                 d.ytStreamResolving = true
         result["queue_length"] = %d.playbackQueue.len
+        d.regenShuffleIfNeeded()
         d.sendQueueEvent()
       except: stderr.writeLine("[gtm] queueAdd error: " & getCurrentExceptionMsg())
   of dckQueueRemove:
     if cmd.intArg >= 0 and cmd.intArg < d.playbackQueue.len:
       d.playbackQueue.delete(cmd.intArg)
+    d.regenShuffleIfNeeded()
     d.sendQueueEvent()
   of dckQueueRemovePath:
     if cmd.strArg.len > 0:
       let idx = d.playbackQueue.find(cmd.strArg)
       if idx >= 0:
         d.playbackQueue.delete(idx)
+    d.regenShuffleIfNeeded()
     d.sendQueueEvent()
   of dckQueueClear:
     d.playbackQueue = @[]
     d.shuffleOrder = @[]
     d.shuffleIndex = 0
     d.sendQueueEvent()
+  of dckQueueValidate:
+    var removed = 0
+    var i = 0
+    while i < d.playbackQueue.len:
+      let p = d.playbackQueue[i]
+      if p.len > 0 and not isYtWatchUrl(p) and not fileExists(p):
+        d.playbackQueue.delete(i)
+        removed.inc
+      else:
+        i.inc
+    if removed > 0:
+      d.regenShuffleIfNeeded()
+      d.sendQueueEvent()
+    result["removed"] = %removed
   of dckQueueList:
     var arr = newJArray()
     for p in d.playbackQueue:
@@ -1185,6 +1226,14 @@ proc runDaemon*() =
         for p in qj:
           daemon.playbackQueue.add(p.getStr(""))
       except: discard
+    # Validate restored queue paths
+    var i = 0
+    while i < daemon.playbackQueue.len:
+      let p = daemon.playbackQueue[i]
+      if p.len > 0 and not isYtWatchUrl(p) and not fileExists(p):
+        daemon.playbackQueue.delete(i)
+      else:
+        i.inc
     # Auto-scan download directory for files not yet in library
     if dirExists(daemon.ytDownloadDir):
       let existing = scanDirectoryRecursive(daemon.ytDownloadDir)
@@ -1283,7 +1332,11 @@ proc runDaemon*() =
             if cfId > 0:
               daemon.lib.updatePlayCount(cfId)
           # Consume queue now that crossfade completed
-          if not daemon.shuffleEnabled and daemon.playbackQueue.len > 0:
+          if daemon.repeatMode == 2:
+            daemon.crossfadeNextPath = ""
+            daemon.crossfadePrepared = false
+            daemon.crossfadeConsumed = false
+          elif not daemon.shuffleEnabled and daemon.playbackQueue.len > 0:
             daemon.playbackQueue.delete(0)
             if daemon.repeatMode == 1:
               daemon.playbackQueue.add(daemon.crossfadeNextPath)
@@ -1407,7 +1460,7 @@ proc runDaemon*() =
         daemon.broadcastAll($ev & "\n")
 
     # Retry advancing if player stopped with items pending (e.g. waiting for YT download)
-    if daemon.player.state == 0 and daemon.playbackQueue.len > 0:
+    if daemon.currentTrackPath.len > 0 and daemon.player.state == 0 and daemon.playbackQueue.len > 0:
       if daemon.advanceToNextTrack(true):
         daemon.sendQueueEvent()
 

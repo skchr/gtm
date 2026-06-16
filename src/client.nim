@@ -471,6 +471,10 @@ proc queueClear*(cli: DaemonClient): JsonNode =
   cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "queue_clear"})
 
+proc queueValidate*(cli: DaemonClient): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "queue_validate"})
+
 proc queueList*(cli: DaemonClient): JsonNode =
   cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "queue_list"})

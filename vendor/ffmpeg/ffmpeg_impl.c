@@ -517,19 +517,19 @@ static const char* EQ_PRESET_NAMES[] = {
 
 static const float EQ_PRESETS[][EQ_BANDS] = {
   { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },         // Flat
-  { 5, 4, 3, 2, 1, 0, 0, 1, 2, 3 },          // Rock
-  { 2, 3, 4, 3, 1, 0, 0, 1, 2, 2 },          // Pop
-  { 4, 3, 2, 1, 0, 1, 2, 3, 4, 5 },          // Classical
-  { 3, 2, 1, 2, 3, 4, 3, 2, 1, 0 },          // Jazz
-  { 5, 4, 3, 2, 1, 0, 0, 0, 1, 2 },          // HipHop
-  { 1, 2, 3, 4, 5, 4, 3, 2, 1, 0 },          // Vocal
-  { 7, 6, 5, 4, 3, 2, 1, 1, 1, 1 },          // BassBoost
-  { 2, 2, 1, 0, -1, -1, 0, 1, 2, 3 },        // Headphones
-  { 1, 2, 2, 3, 3, 2, 1, 0, -1, -2 },        // Laptop
-  { 5, 4, 3, 1, 0, 0, 1, 3, 5, 5 },          // Electronic — strong bass + treble for synths/EDM
-  { 3, 2, 1, 2, 3, 4, 3, 2, 1, 1 },          // Acoustic — mid-focused for strings/vocals
-  { -2, -1, 0, 2, 4, 5, 3, 1, 0, -1 },       // Podcast — cut rumble, boost speech presence
-  { 5, 4, 2, 1, 0, 0, 1, 3, 4, 4 },          // Dance — punchy bass + crisp highs for club
+  { 4, 4, 3, 1, 0, 0, 0, 2, 3, 4 },          // Rock — classic rock: boosted lows/highs, slight mid scoop
+  { 2, 3, 4, 2, 0, -1, 0, 2, 3, 3 },         // Pop — presence boost, slight mid cut for clarity
+  { 2, 2, 1, 0, 0, 0, 1, 2, 3, 4 },          // Classical — gentle rise in highs for brilliance
+  { 2, 2, 1, 1, 2, 3, 2, 1, 1, 0 },          // Jazz — warm mids, rounded highs
+  { 5, 5, 3, 1, 0, 0, 0, 0, 2, 3 },          // HipHop — heavy sub/bass, flat mids, crisp highs
+  { -1, 0, 1, 3, 5, 5, 3, 1, 0, 0 },         // Vocal — boost speech presence 500-2kHz, cut rumble
+  { 7, 6, 4, 2, 1, 0, 0, 0, 0, 0 },          // BassBoost — deep bass shelf only, clear mids/highs
+  { 2, 2, 1, 0, -1, -2, -1, 1, 2, 3 },       // Headphones — compensate closed-back resonance
+  { 0, 1, 2, 3, 4, 4, 3, 2, 1, 0 },          // Laptop — loudness contour for small speakers
+  { 5, 4, 3, 0, -2, -2, 0, 3, 5, 6 },        // Electronic — smiley curve for synths/EDM
+  { 2, 2, 1, 2, 3, 3, 2, 2, 2, 2 },          // Acoustic — slight low-mid warmth, natural top
+  { -3, -2, -1, 2, 4, 5, 3, 1, 0, -1 },      // Podcast — cut rumble/sub, boost speech clarity 1-4kHz
+  { 5, 4, 2, 0, -1, -1, 1, 3, 5, 5 },        // Dance — punchy low end, presence for percussion
 };
 
 // --- MixerCtx for PCM crossfade ---
@@ -633,6 +633,19 @@ static void* mixer_thread(void* arg) {
     if (!mx->playing || mx->paused) { usleep(10000); continue; }
 
     if (!mx->master || !mx->master->fmt_ctx) { usleep(10000); continue; }
+
+    // Handle seek in mixer thread
+    if (mx->master->seek_pending) {
+      mx->master->seek_pending = 0;
+      double target = mx->master->seek_target;
+      avcodec_flush_buffers(mx->master->codec_ctx);
+      AVStream* st = mx->master->fmt_ctx->streams[mx->master->audio_stream_idx];
+      int64_t ts = (int64_t)(target / av_q2d(st->time_base));
+      av_seek_frame(mx->master->fmt_ctx, mx->master->audio_stream_idx, ts, AVSEEK_FLAG_BACKWARD);
+      mx->master->current_time = target;
+      mx->current_time = target;
+      continue;
+    }
 
     // Decode master
     int mtotal = decode_into_buf(mx->master, mpkt, mframe, &mbuf, &mcap);
@@ -851,6 +864,9 @@ static void mixer_alsa_reopen(MixerCtx* mx) {
 
 int ffmpeg_mixer_load_master(MixerCtx* mx, const char* path) {
   if (!mx) return 0;
+  mx->crossfade_active = 0;
+  mx->crossfade_reverse = 0;
+  mx->priming = 0;
   if (mx->master) ffmpeg_audio_uninit(mx->master);
   mx->master = ffmpeg_audio_init();
   if (!mx->master) return 0;
@@ -865,6 +881,7 @@ int ffmpeg_mixer_load_master(MixerCtx* mx, const char* path) {
 
 int ffmpeg_mixer_load_slave(MixerCtx* mx, const char* path) {
   if (!mx) return 0;
+  mx->slave_loaded = 0;
   if (mx->slave) ffmpeg_audio_uninit(mx->slave);
   mx->slave = ffmpeg_audio_init();
   if (!mx->slave) return 0;
@@ -978,9 +995,11 @@ void ffmpeg_mixer_get_metadata(MixerCtx* mx, char** title, char** artist,
 
 void ffmpeg_mixer_seek(MixerCtx* mx, double seconds) {
   if (!mx || !mx->master) return;
-  // Not implemented for mixer (seek during crossfade is complex)
-  // Fall back to master seek
-  ffmpeg_audio_seek(mx->master, seconds);
+  mx->master->seek_target = mx->current_time + seconds;
+  if (mx->master->seek_target < 0.0) mx->master->seek_target = 0.0;
+  if (mx->master->duration > 0.0 && mx->master->seek_target > mx->master->duration)
+    mx->master->seek_target = mx->master->duration;
+  mx->master->seek_pending = 1;
 }
 
 int ffmpeg_mixer_set_eq_band(MixerCtx* mx, int band, float gain_db) {

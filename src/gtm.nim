@@ -162,6 +162,7 @@ proc buildPlaylistFromArgs(state: var AppState, args: seq[string]) =
       let musicDir = home & "/Music"
       if dirExists(musicDir): paths = scanDirectory(musicDir)
   if paths.len == 0: paths = scanDirectory(".")
+  let startIdx = state.libraryTracks.len
   for p in paths:
     let (_, name, _) = splitFile(p)
     let title = name.replace(".", " ")
@@ -169,6 +170,23 @@ proc buildPlaylistFromArgs(state: var AppState, args: seq[string]) =
       path: p, title: title, artist: "", album: "",
       duration: 0.0, id: int64(state.libraryTracks.len + 1)
     ))
+  # Populate playback queue from CLI args (not for default ~/Music or . scan)
+  if args.len > 0:
+    let addedCount = state.libraryTracks.len - startIdx
+    if addedCount > 0:
+      state.playbackQueue = @[]
+      for i in startIdx..<state.libraryTracks.len:
+        state.playbackQueue.add(i)
+      # Sync queue to daemon (clear first, then add)
+      if state.player of DaemonClient:
+        let cli = DaemonClient(state.player)
+        if cli.connected:
+          discard daemonSimpleCmd(cli, "queue_clear")
+          var items: seq[(string, string, string)] = @[]
+          for idx in state.playbackQueue:
+            let t = state.libraryTracks[idx]
+            items.add((t.path, t.title, t.artist))
+          discard cli.queueAdd(items)
 
 proc getCurrentTrack(state: AppState): Track =
   let items = state.displayItems
@@ -1426,6 +1444,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           let p = state.playlistInputBuffer
           if fileExists(p):
             let paths = parseM3u(p)
+            let startIdx = state.libraryTracks.len
             for path in paths:
               let (title, artist, album) = parseFilenameMetadata(path)
               state.libraryTracks.add(Track(
@@ -1433,6 +1452,23 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
                 duration: 0.0, id: int64(state.libraryTracks.len + 1)
               ))
             state.rebuildItems()
+            # Add M3U tracks to queue and daemon
+            let addedCount = state.libraryTracks.len - startIdx
+            if addedCount > 0:
+              state.playbackQueue = @[]
+              for i in startIdx..<state.libraryTracks.len:
+                state.playbackQueue.add(i)
+              if state.player of DaemonClient:
+                let cli = DaemonClient(state.player)
+                if cli.connected:
+                  discard daemonSimpleCmd(cli, "queue_clear")
+                  var items: seq[(string, string, string)] = @[]
+                  for idx in state.playbackQueue:
+                    let t = state.libraryTracks[idx]
+                    items.add((t.path, t.title, t.artist))
+                  discard cli.queueAdd(items)
+            state.nextTrack()
+            state.setFeedback("Imported " & $addedCount & " tracks from M3U")
         elif state.playlistInputPrompt.contains("Sleep timer"):
           let minutes = state.playlistInputBuffer.parseInt()
           if state.player of DaemonClient:
@@ -1643,12 +1679,17 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     if key == iw.Key.Y:
       if state.queuePendingConfirm == 1:
         if state.queueCursor < state.playbackQueue.len:
+          let t = state.libraryTracks[state.playbackQueue[state.queueCursor]]
           state.playbackQueue.delete(state.queueCursor)
           if state.queueCursor >= state.playbackQueue.len and state.queueCursor > 0:
             state.queueCursor.dec
+          if state.player of DaemonClient:
+            discard DaemonClient(state.player).queueRemovePath(t.path)
       elif state.queuePendingConfirm == 2:
         state.playbackQueue = @[]
         state.queueCursor = 0
+        if state.player of DaemonClient:
+          discard daemonSimpleCmd(DaemonClient(state.player), "queue_clear")
     state.queuePendingConfirm = 0
     state.markDirty(ceQueue)
     state.setFeedback("")
