@@ -1,7 +1,7 @@
-import os, terminal, strutils, unicode, json, sets, math, sequtils, algorithm, times, posix, tables, osproc, hashes
+import os, terminal, strutils, unicode, json, sets, math, sequtils, algorithm, times, posix, tables, osproc, hashes, base64
 from illwave as iw import nil
 from ../vendor/nimwave/nimwave as nw import nil
-import state, ui, audio, library, theme, commands, client, cli, ytdlp, graphics
+import state, ui, audio, library, theme, commands, client, cli, ytdlp, graphics, lyrics
 
 proc loadConfig(state: var AppState) =
   let path = state.configPath
@@ -55,6 +55,12 @@ proc loadConfig(state: var AppState) =
         state.ytMaxConcurrentDownloads = json["yt_max_concurrent"].getInt(4)
       if json.hasKey("yt_batch_mode"):
         state.ytBatchDownloadMode = json["yt_batch_mode"].getBool(false)
+      if json.hasKey("sp_cookie_source"):
+        state.spCookieSource = json["sp_cookie_source"].getStr("")
+      if json.hasKey("sp_cookie_file_path"):
+        state.spCookieFilePath = json["sp_cookie_file_path"].getStr("")
+      if json.hasKey("sp_audio_format"):
+        state.spAudioFormat = json["sp_audio_format"].getStr("opus")
       if json.hasKey("footer_left_modules"):
         let arr = json["footer_left_modules"]
         if arr.kind == JArray:
@@ -110,7 +116,10 @@ proc saveConfig(state: AppState) =
     "yt_cookie_source": %state.ytCookieSource,
     "yt_cookie_file_path": %state.ytCookieFilePath,
     "yt_max_concurrent": %state.ytMaxConcurrentDownloads,
-    "yt_batch_mode": %state.ytBatchDownloadMode
+    "yt_batch_mode": %state.ytBatchDownloadMode,
+    "sp_cookie_source": %state.spCookieSource,
+    "sp_cookie_file_path": %state.spCookieFilePath,
+    "sp_audio_format": %state.spAudioFormat
   }
   # Save EQ bands
   var eqBands = newJArray()
@@ -309,74 +318,30 @@ proc playSelected(state: var AppState) =
   let track = state.getCurrentTrack()
   if track.path.len > 0:
     queueLog("playSelected: track=" & track.path & " title=" & track.title & " id=" & $track.id)
-    state.timePos = 0.0
-    state.duration = 0.0
     discard state.player.loadFile(track.path, track.title, track.artist)
     state.player.play()
-    state.status = psPlaying
-    state.currentPlayingPath = track.path
-    state.currentPlayingId = track.id
-    if state.player of DaemonClient:
-      let tid = DaemonClient(state.player).lastTrackId
-      if tid > 0:
-        state.currentPlayingId = tid
+    # Build queue from current view and send to daemon — daemon owns queue from here
+    if state.tab == tabLibrary and state.player of DaemonClient:
+      let cli = DaemonClient(state.player)
+      if cli.connected:
+        discard daemonSimpleCmd(cli, "queue_clear")
+        var items: seq[(string, string, string)] = @[]
+        var started = false
+        for item in state.displayItems:
+          if item.kind == likTrack:
+            if not started and item.id == track.id:
+              started = true
+              continue
+            if started and item.trackIdx >= 0 and item.trackIdx < state.libraryTracks.len:
+              let t = state.libraryTracks[item.trackIdx]
+              items.add((t.path, t.title, t.artist))
+        if items.len > 0:
+          discard cli.queueAdd(items)
     state.markDirtyBatch(cePlayState, ceTrack)
-    if state.duration == 0.0 and track.duration > 0:
-      state.duration = track.duration
-    # Queue up remaining tracks from the current library view (all scopes)
-    if state.tab == tabLibrary:
-      state.playbackQueue = @[]
-      state.queuePaths = @[]
-      var started = false
-      var likTrackCount = 0
-      for item in state.displayItems:
-        if item.kind == likTrack:
-          likTrackCount.inc
-          if not started and item.id == track.id:
-            started = true
-            continue
-          if started:
-            state.playbackQueue.add(item.trackIdx)
-      # Sync to daemon
-      if state.player of DaemonClient:
-        let cli = DaemonClient(state.player)
-        if cli.connected:
-          queueLog("playSelected: displayItems.len=" & $state.displayItems.len & " likTrackCount=" & $likTrackCount & " playbackQueue.len=" & $state.playbackQueue.len)
-          discard daemonSimpleCmd(cli, "queue_clear")
-          if state.playbackQueue.len > 0:
-            var items: seq[(string, string, string)] = @[]
-            for idx in state.playbackQueue:
-              if idx >= 0 and idx < state.libraryTracks.len:
-                let t = state.libraryTracks[idx]
-                items.add((t.path, t.title, t.artist))
-            if items.len > 0:
-              queueLog("playSelected: sending " & $items.len & " tracks to daemon queue")
-              discard cli.queueAdd(items)
-          else:
-            queueLog("playSelected: queue_clear sent, no items to queue")
-      else:
-        queueLog("playSelected: player is not DaemonClient (tabLibrary but no daemon)")
-      state.markDirty(ceQueue)
 
 proc nextTrack(state: var AppState) =
   state.upNextTimer = 0
   state.upNextMsg = ""
-  # Sync TUI queue to daemon before advancing, so daemon knows what's queued
-  if state.player of DaemonClient:
-    let cli = DaemonClient(state.player)
-    if cli.connected:
-      let resp = cli.queueList()
-      var daemonQueueEmpty = true
-      if resp.hasKey("queue") and resp["queue"].len > 0:
-        daemonQueueEmpty = false
-      if daemonQueueEmpty and state.playbackQueue.len > 0:
-        var items: seq[(string, string, string)] = @[]
-        for idx in state.playbackQueue:
-          if idx >= 0 and idx < state.libraryTracks.len:
-            let t = state.libraryTracks[idx]
-            items.add((t.path, t.title, t.artist))
-        if items.len > 0:
-          discard cli.queueAdd(items)
   let nextResp = daemonSimpleCmd(DaemonClient(state.player), "next")
   if nextResp.hasKey("ok") and not nextResp["ok"].getBool(false):
     state.showNotification(nextResp{"error"}.getStr("No next track"))
@@ -391,30 +356,29 @@ proc prevTrack(state: var AppState) =
   state.markDirty(cePlayState)
 
 proc adjustVolume(state: var AppState, delta: int) =
-  state.volume = max(0, min(100, state.volume + delta))
-  state.player.setVolume(state.volume)
+  let newVol = max(0, min(100, state.volume + delta))
+  state.player.setVolume(newVol)
   state.showVolumeCue()
   if state.tab == tabSettings: state.rebuildItems()
 
 proc toggleShuffle(state: var AppState) =
-  state.shuffleEnabled = not state.shuffleEnabled
   if state.player of DaemonClient:
-    discard DaemonClient(state.player).setShuffle(state.shuffleEnabled)
+    let cli = DaemonClient(state.player)
+    discard cli.setShuffle(not state.shuffleEnabled)
 
 proc cycleRepeat(state: var AppState) =
-  state.repeatMode = (state.repeatMode + 1) mod 3
   if state.player of DaemonClient:
-    discard DaemonClient(state.player).setRepeat(state.repeatMode)
+    let newMode = (state.repeatMode + 1) mod 3
+    discard DaemonClient(state.player).setRepeat(newMode)
 
 proc toggleMute(state: var AppState) =
   if state.volume > 0:
     state.prevVolume = state.volume
     state.player.setVolume(0)
-    state.volume = 0
   else:
     let restore = if state.prevVolume > 0: state.prevVolume else: 80
     state.player.setVolume(restore)
-    state.volume = restore
+    state.prevVolume = 0
   state.showVolumeCue()
 
 proc moveSelection(state: var AppState, delta: int) =
@@ -429,6 +393,7 @@ proc moveSelection(state: var AppState, delta: int) =
         of scYouTube: 6
         of scAppearance: 4
         of scSystem: 2
+        of scSpotify: 6
       state.selectIndex = max(0, min(maxIdx, state.selectIndex + delta))
     return
   let count = state.filteredCount()
@@ -1043,6 +1008,35 @@ proc adjustSetting(state: var AppState, delta: int) =
     of 2: # Reset All — action on Enter only
       discard
     else: discard
+  of scSpotify:
+    case state.selectIndex
+    of 0: # Cookie Source — detect on Enter only
+      discard
+    of 1: # Cookie File — Enter opens filter mode
+      discard
+    of 2: # Audio Format — cycle
+      const formats = ["opus", "m4a", "best"]
+      var i = 0
+      for idx, f in formats:
+        if f == state.spAudioFormat:
+          i = (idx + delta + formats.len) mod formats.len
+          break
+      state.spAudioFormat = formats[i]
+      if state.player of DaemonClient:
+        discard DaemonClient(state.player).spSetConfig(state.spCookieSource, state.spCookieFilePath, state.spAudioFormat)
+      state.saveConfig()
+    of 3: # Max Downloads
+      state.ytMaxConcurrentDownloads = max(1, min(10, state.ytMaxConcurrentDownloads + delta))
+      if state.player of DaemonClient:
+        discard DaemonClient(state.player).spSetConfig(state.spCookieSource, state.spCookieFilePath, state.spAudioFormat)
+      state.saveConfig()
+    of 4: # Download History — Enter to view
+      discard
+    of 5: # Clear History — action on Enter only
+      discard
+    of 6: # Import Playlist — action on Enter only
+      discard
+    else: discard
   state.rebuildItems()
   state.markDirty(ceSettings)
 
@@ -1275,6 +1269,43 @@ proc handleYtBatchOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         state.playlistInputBuffer = ""
       else: discard
     else: discard
+
+proc handleSpotifyUrlOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
+  case key
+  of iw.Key.Escape: state.overlay.clear()
+  of iw.Key.Enter:
+    let input = state.overlay.query.strip()
+    if input.len > 0:
+      if input.startsWith("https://"):
+        state.overlay = OverlayState(kind: okYtSearch, query: input, cursor: 0)
+        state.overlay.ytSubTab = ystAll
+        state.overlay.ytAutocompleteVisible = false
+        state.overlay.ytResults = @[]
+        state.ytSearchLoading = true
+        if state.player of DaemonClient:
+          let cli = DaemonClient(state.player)
+          let resp = cli.ytFetchPlaylist(input)
+          if resp.hasKey("ok") and resp["ok"].getBool(false):
+            state.showNotification("Fetching Spotify playlist...")
+          else:
+            let err = if resp.hasKey("error"): resp["error"].getStr("") else: "unknown error"
+            state.setFeedback("Failed: " & err)
+            state.overlay.clear()
+        else:
+          state.setFeedback("Daemon not connected")
+          state.overlay.clear()
+      else:
+        state.setFeedback("Please enter a valid Spotify playlist URL (starting with https://)")
+    else:
+      state.overlay.clear()
+  of iw.Key.Backspace:
+    if state.overlay.query.len > 0:
+      state.overlay.query = state.overlay.query[0..^2]
+  else:
+    for ch in chars:
+      let code = ch.int
+      if code >= 32 and code < 127:
+        state.overlay.query &= $ch
 
 proc handleQueuePickerOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
   case key
@@ -1846,9 +1877,10 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     of okFuzzyFinder: state.handleFuzzyFinderOverlay(key, chars)
     of okTrashView: state.handleTrashOverlay(key, chars)
     of okFooterModulePicker: state.handleFooterModulePickerOverlay(key, chars)
+    of okSpotifyUrlInput: state.handleSpotifyUrlOverlay(key, chars)
     of okNone: discard
     return
-  const sidebarScopes = [fsAll, fsArtists, fsAlbums, fsPlaylists, fsRecent, fsFavourites, fsLastPlayed, fsMostPlayed, fsLeastPlayed, fsDownloads]
+  const sidebarScopes = [fsAll, fsArtists, fsAlbums, fsPlaylists, fsRecent, fsFavourites, fsLastPlayed, fsMostPlayed, fsLeastPlayed, fsDownloads, fsSpotify]
   if state.tab == tabLibrary and state.libraryFocusPanel == lpSidebar and state.mode == imNormal:
     case key
     of iw.Key.Down:
@@ -1987,6 +2019,13 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         state.ytCookieFilePath = state.filterText
         state.saveConfig()
         state.setFeedback("Cookie file set: " & state.ytCookieFilePath)
+        state.filterText = ""
+      elif state.tab == tabSettings and state.settingsCategory == scSpotify and state.selectIndex == 1:
+        state.spCookieFilePath = state.filterText
+        if state.player of DaemonClient:
+          discard DaemonClient(state.player).spSetConfig(state.spCookieSource, state.spCookieFilePath, state.spAudioFormat)
+        state.saveConfig()
+        state.setFeedback("Cookie file set: " & state.spCookieFilePath)
         state.filterText = ""
       elif state.filteredCount() > 0 and state.selectIndex >= 0:
         state.playSelected()
@@ -2264,6 +2303,11 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           state.ytJsRuntime = "node"
           state.ytCookieSource = ""
           state.ytCookieFilePath = ""
+          state.spCookieSource = ""
+          state.spCookieFilePath = ""
+          state.spAudioFormat = "opus"
+          state.spDownloaded = initTable[string, string]()
+          state.spDownloadCount = 0
           state.eqPreset = "Flat"
           for i in 0..9: state.eqBands[i] = 0.0
           state.mode = imNormal
@@ -2274,6 +2318,59 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           state.saveConfig()
           state.showVolumeCue()
         else: discard
+      of scSpotify:
+        case state.selectIndex
+        of 0: # Cookie Source — cycle: auto-detect → file path → none
+          if state.spCookieFilePath.len > 0 and state.spCookieSource != state.spCookieFilePath:
+            state.spCookieSource = state.spCookieFilePath
+            state.showNotification("Using cookie file: " & state.spCookieFilePath)
+          elif state.spCookieSource.len > 0:
+            state.spCookieSource = ""
+            state.setFeedback("Cookies disabled")
+          else:
+            state.spCookieSource = detectBrowserCookieSource()
+            if state.spCookieSource.len == 0:
+              state.setFeedback("No browser cookies found — set a Cookie File path below")
+            else:
+              state.showNotification("Detected cookies: " & state.spCookieSource)
+          if state.player of DaemonClient:
+            discard DaemonClient(state.player).spSetConfig(state.spCookieSource, state.spCookieFilePath, state.spAudioFormat)
+          state.saveConfig()
+        of 1: # Cookie File — enter path via filter mode
+          state.mode = imFilter
+          state.filterText = state.spCookieFilePath
+          state.setFeedback("Enter Spotify cookie file path (e.g. /path/to/cookies.txt)")
+        of 2: # Audio Format — cycle
+          const formats2 = ["opus", "m4a", "best"]
+          var i = 0
+          for idx, f in formats2:
+            if f == state.spAudioFormat:
+              i = (idx + 1) mod formats2.len
+              break
+          state.spAudioFormat = formats2[i]
+          if state.player of DaemonClient:
+            discard DaemonClient(state.player).spSetConfig(state.spCookieSource, state.spCookieFilePath, state.spAudioFormat)
+          state.saveConfig()
+        of 4: # Download History (view)
+          if state.player of DaemonClient:
+            let resp = DaemonClient(state.player).spListDownloads()
+            if resp.hasKey("downloads"):
+              let arr = resp["downloads"]
+              state.spDownloadCount = arr.len
+              state.spDownloaded = initTable[string, string]()
+              for item in arr:
+                state.spDownloaded[item{"url"}.getStr("")] = item{"path"}.getStr("")
+              state.setFeedback("Spotify downloads: " & $(state.spDownloadCount) & " tracks")
+              state.rebuildItems()
+        of 5: # Clear History
+          state.spDownloaded = initTable[string, string]()
+          state.spDownloadCount = 0
+          state.showNotification("Spotify download history cleared")
+          state.rebuildItems()
+        of 6: # Import Playlist URL
+          state.overlay = OverlayState(kind: okSpotifyUrlInput, query: "")
+          state.setFeedback("Paste a Spotify playlist URL (e.g. https://open.spotify.com/playlist/...)")
+        else: discard
       state.rebuildItems()
       state.markDirty(ceSettings)
     elif state.tab != tabNowPlaying:
@@ -2282,7 +2379,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
   of iw.Key.S: state.player.stop(); state.status = psStopped; state.lastCommandName = "Stop"
   of iw.Key.H:
     if state.tab == tabLibrary:
-      const sbar = [fsAll, fsArtists, fsAlbums, fsPlaylists, fsRecent, fsFavourites, fsLastPlayed, fsMostPlayed, fsLeastPlayed, fsDownloads]
+      const sbar = [fsAll, fsArtists, fsAlbums, fsPlaylists, fsRecent, fsFavourites, fsLastPlayed, fsMostPlayed, fsLeastPlayed, fsDownloads, fsSpotify]
       state.filterScope = sbar[(state.librarySidebarSelect - 1 + sbar.len) mod sbar.len]
       state.librarySidebarSelect = (state.librarySidebarSelect - 1 + sbar.len) mod sbar.len
       state.selectIndex = 0; state.rebuildItems()
@@ -2295,7 +2392,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     state.lastCommandName = "Navigate Left"
   of iw.Key.L:
     if state.tab == tabLibrary:
-      const sbar = [fsAll, fsArtists, fsAlbums, fsPlaylists, fsRecent, fsFavourites, fsLastPlayed, fsMostPlayed, fsLeastPlayed, fsDownloads]
+      const sbar = [fsAll, fsArtists, fsAlbums, fsPlaylists, fsRecent, fsFavourites, fsLastPlayed, fsMostPlayed, fsLeastPlayed, fsDownloads, fsSpotify]
       state.filterScope = sbar[(state.librarySidebarSelect + 1) mod sbar.len]
       state.librarySidebarSelect = (state.librarySidebarSelect + 1) mod sbar.len
       state.selectIndex = 0; state.rebuildItems()
@@ -2340,7 +2437,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         state.needsRedraw = true
     elif state.tab == tabLibrary:
       if state.libraryFocusPanel == lpSidebar:
-        const scopeMap2 = [fsAll, fsArtists, fsAlbums, fsPlaylists, fsRecent, fsFavourites, fsLastPlayed, fsMostPlayed, fsLeastPlayed, fsDownloads]
+        const scopeMap2 = [fsAll, fsArtists, fsAlbums, fsPlaylists, fsRecent, fsFavourites, fsLastPlayed, fsMostPlayed, fsLeastPlayed, fsDownloads, fsSpotify]
         state.filterScope = scopeMap2[state.librarySidebarSelect]
         state.libraryFocusPanel = lpContent
         state.selectIndex = 0
@@ -2494,10 +2591,17 @@ proc processEvents(state: var AppState) =
   if state.player of DaemonClient:
     state.audioAvailable = DaemonClient(state.player).working
   for ev in events:
+    if ev.version > 0:
+      state.daemonStateVersion = ev.version
     case ev.kind
     of evPositionChanged:
       state.timePos = ev.floatVal
       state.markDirty(cePosition)
+      if state.currentLyrics.lines.len > 0:
+        let newIdx = currentLrcLine(state.currentLyrics, state.timePos)
+        if newIdx != state.lyricsLineIdx:
+          state.lyricsLineIdx = newIdx
+          state.markDirty(ceTrack)
     of evDurationChanged:
       state.duration = ev.floatVal
       state.markDirty(ceTrack)
@@ -2545,9 +2649,26 @@ proc processEvents(state: var AppState) =
             let cli = DaemonClient(state.player)
             let resp = cli.getCoverArt(state.currentPlayingPath)
             if resp.hasKey("cover_data") and resp["cover_data"].getStr("").len > 0:
-              state.coverCache[cacheKey] = resp["cover_data"].getStr("")
+              let mime = resp{"cover_mime"}.getStr("image/jpeg")
+              state.coverCache[cacheKey] = (cast[seq[byte]](decode(resp["cover_data"].getStr(""))), mime)
             state.coverFetching = false
             state.markDirty(ceTrack)
+      # Fetch lyrics when track changes
+      if not isSameTrack and state.currentPlayingPath.len > 0:
+        state.currentLyrics = LrcData(lines: @[])
+        state.lyricsLineIdx = -1
+        if state.player of DaemonClient:
+          let cli = DaemonClient(state.player)
+          let lrcResp = cli.getLyrics(state.currentPlayingPath, state.currentPlayingTitle,
+            state.currentPlayingChannel, "", state.duration)
+          if lrcResp.hasKey("ok") and lrcResp["ok"].getBool():
+            var lrcData = LrcData(title: lrcResp{"title"}.getStr(""), artist: lrcResp{"artist"}.getStr(""),
+              album: lrcResp{"album"}.getStr(""), lines: @[])
+            for ln in lrcResp["lines"].items:
+              lrcData.lines.add(LrcLine(timestamp: ln{"ts"}.getFloat(), text: ln{"text"}.getStr("")))
+            state.currentLyrics = lrcData
+          else:
+            state.currentLyrics = LrcData(lines: @[])
       # Show Now Playing notification — skip if same track (play/pause resume) or auto-advanced
       if not isSameTrack and not autoAdvanced:
         if state.currentPlayingTitle.len > 0:
@@ -2572,40 +2693,13 @@ proc processEvents(state: var AppState) =
       state.status = psStopped
       state.markDirty(cePlayState)
     of evTrackEnded:
-      # Save current path before clearing so we can sync selectIndex
-      let prevPath = state.currentPlayingPath
-      state.duration = 0.0
-      state.timePos = 0.0
-      state.currentPlayingPath = ""
-      state.currentPlayingTitle = ""
-      state.currentPlayingChannel = ""
       state.notificationTimer = 0
       state.notificationMsg = ""
       state.nowPlayingCueTimer = 0
       state.nowPlayingCueMsg = ""
       state.upNextTimer = 0
       state.upNextMsg = ""
-      state.ytStreamTitle = ""
-      state.ytStreamChannel = ""
-      # Consume queue — daemon already advanced
-      if state.playbackQueue.len > 0:
-        state.playbackQueue.delete(0)
-        if state.queuePaths.len > 0:
-          state.queuePaths.delete(0)
-        state.markDirty(ceQueue)
-      # Sync selectIndex to next track if available, else fall back to previous
-      var foundNext = false
-      if state.playbackQueue.len > 0:
-        let nextIdx = state.playbackQueue[0]
-        if nextIdx >= 0 and nextIdx < state.libraryTracks.len:
-          state.selectIndex = nextIdx
-          foundNext = true
-      if not foundNext and prevPath.len > 0:
-        for i, t in state.libraryTracks:
-          if t.path == prevPath:
-            state.selectIndex = i
-            break
-      state.markDirtyBatch(cePlayState, cePosition, ceTrack)
+      # Daemon advances queue — trust queue_changed event to update state
     of evMetadataChanged:
       if ev.strVal == "crossfade_started":
         state.crossfadeStarted = true
@@ -2702,6 +2796,10 @@ proc processEvents(state: var AppState) =
               break
           state.rebuildItems()
           state.showNotification("Downloaded: " & (if dlTitle.len > 0: dlTitle else: splitFile(dlPath).name), nkSuccess)
+          if "spotify.com" in dlUrl:
+            state.spDownloaded[dlUrl] = dlPath
+            state.spDownloadCount = state.spDownloaded.len
+            state.rebuildItems()
       elif ev.strVal == "yt_search_partial" or ev.strVal == "yt_search_done":
         if ev.metadata.hasKey("results"):
           try:
@@ -2841,6 +2939,10 @@ proc runTui(args: seq[string]) =
   dClient.ipcTimeoutSec = float(ctx.data.config.ipcTimeout)
   if ctx.data.ytCookieSource.len == 0:
     ctx.data.ytCookieSource = detectBrowserCookieSource()
+  if ctx.data.spCookieSource.len == 0:
+    ctx.data.spCookieSource = detectBrowserCookieSource()
+  if dClient.connected:
+    discard dClient.spSetConfig(ctx.data.spCookieSource, ctx.data.spCookieFilePath, ctx.data.spAudioFormat)
   ctx.data.player.setVolume(ctx.data.volume)
   ctx.data.initCommands()
   ctx.data.applyKeybindings()
@@ -2874,6 +2976,15 @@ proc runTui(args: seq[string]) =
           ctx.data.markDirty(ceQueue)
         except: discard
     except: discard
+  if dClient.connected:
+    try:
+      let spResp = dClient.spListDownloads()
+      if spResp.hasKey("downloads"):
+        let arr = spResp["downloads"]
+        ctx.data.spDownloadCount = arr.len
+        for item in arr:
+          ctx.data.spDownloaded[item{"url"}.getStr("")] = item{"path"}.getStr("")
+    except: discard
   ctx.data.rebuildItems()
   if dClient.connected and ctx.data.currentPlayingPath.len > 0:
     for i, t in ctx.data.libraryTracks:
@@ -2896,6 +3007,7 @@ proc runTui(args: seq[string]) =
   var lastH = terminal.terminalHeight()
   var resized = false
   var frameNo = 0
+  var lastRenderTime = 0.0
   while true:
     try:
       var rfds: TFdSet
@@ -3060,8 +3172,10 @@ proc runTui(args: seq[string]) =
           oldTimeDisplay = newDisplay
           ctx.data.markDirty(cePosition)
         oldTimePos = ctx.data.timePos
+      let now = epochTime()
       let shouldDraw = resized or ctx.data.needsRedraw or ctx.data.dirtyFlags.card > 0
-      if shouldDraw:
+      if shouldDraw and (resized or now - lastRenderTime > 0.016):
+        lastRenderTime = now
         ctx.tb = iw.initTerminalBuffer(curW, curH)
         renderApp(ctx)
         if resized:

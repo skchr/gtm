@@ -13,23 +13,34 @@ proc supportsKittyGraphics*(): bool =
     return true
   false
 
-proc transmitImage*(data: string, imageId: int) =
+proc mimeToFormat*(mime: string): int =
+  case mime.toLowerAscii()
+  of "image/png": 100
+  of "image/jpeg", "image/jpg": 38
+  of "image/gif": 32
+  of "image/webp": 57
+  of "image/bmp": 0
+  of "image/tiff": 41
+  else: 100
+
+proc transmitImage*(data: seq[byte], mime: string, imageId: int) =
+  let fmt = mimeToFormat(mime)
+  let encoded = encode(data)
   var offset = 0
-  while offset < data.len:
-    let chunkSize = min(KittyChunkSize, data.len - offset)
-    let chunk = data[offset ..< offset + chunkSize]
-    let b64 = encode(chunk)
-    let isLast = (offset + chunkSize >= data.len)
+  while offset < encoded.len:
+    let chunkSize = min(KittyChunkSize, encoded.len - offset)
+    let chunk = encoded[offset ..< offset + chunkSize]
+    let isLast = (offset + chunkSize >= encoded.len)
     var esc: string
     if offset == 0:
-      esc = "\e_Ga=T,i=" & $imageId & ",f=100,m="
+      esc = "\e_Ga=T,i=" & $imageId & ",f=" & $fmt & ",m="
     else:
       esc = "\e_Ga=T,i=" & $imageId & ",m="
     if isLast:
       esc &= "0;"
     else:
       esc &= "1;"
-    stdout.write(esc & b64 & "\e\\")
+    stdout.write(esc & chunk & "\e\\")
     offset += chunkSize
   flushFile(stdout)
 

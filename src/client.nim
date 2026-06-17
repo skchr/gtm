@@ -86,6 +86,7 @@ proc drainEventLinesFromJson(j: JsonNode, cli: DaemonClient) =
     var ev = AudioEvent()
     let k = evJson{"kind"}.getInt(0)
     ev.kind = AudioEventKind(k)
+    ev.version = evJson{"version"}.getInt(0)
     case ev.kind
     of evPositionChanged: ev.floatVal = evJson{"time_pos"}.getFloat(0.0)
     of evDurationChanged: ev.floatVal = evJson{"duration"}.getFloat(0.0)
@@ -546,9 +547,25 @@ proc ytClearSearchHistory*(cli: DaemonClient): JsonNode =
   cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "yt_clear_search_history"})
 
+proc spSetConfig*(cli: DaemonClient, cookieSource, cookiePath, audioFormat: string): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "sp_set_config", "cookie_source": cookieSource, "cookie_path": cookiePath, "audio_format": audioFormat})
+
+proc spListDownloads*(cli: DaemonClient): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "sp_list_downloads"})
+
 proc getCoverArt*(cli: DaemonClient, path: string): JsonNode =
   cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "get_cover_art", "path": path})
+
+proc getLyrics*(cli: DaemonClient, path, title, artist, album: string, duration: float): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "get_lyrics", "path": path, "title": title, "artist": artist, "album": album, "duration": duration})
+
+proc searchLyrics*(cli: DaemonClient, title, artist: string): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "search_lyrics", "title": title, "artist": artist})
 
 proc getEqPresets*(cli: DaemonClient): JsonNode =
   cli.ensureDaemon()

@@ -127,7 +127,7 @@ type
   FilterScope* = enum
     fsAll, fsArtists, fsAlbums, fsPlaylists, fsTracks,
     fsRecent, fsFavourites, fsLastPlayed, fsMostPlayed, fsLeastPlayed,
-    fsDownloads
+    fsDownloads, fsSpotify
 
   DownloadsTab* = enum
     dtDownloading, dtDownloaded
@@ -157,6 +157,14 @@ type
     trashedAt*: int
     expiresAt*: int
 
+  LrcLine* = object
+    timestamp*: float
+    text*: string
+
+  LrcData* = object
+    title*, artist*, album*: string
+    lines*: seq[LrcLine]
+
   OverlayKind* = enum
     okNone
     okYtSearch
@@ -170,6 +178,7 @@ type
     okEqPresetPicker
     okTrashView
     okFooterModulePicker
+    okSpotifyUrlInput
 
   YtSubTab* = enum ystAll, ystPlaylists
 
@@ -237,7 +246,7 @@ type
     fmKeyPressed
 
   SettingsCategory* = enum
-    scAudio, scYouTube, scAppearance, scSystem
+    scAudio, scYouTube, scAppearance, scSystem, scSpotify
 
   AppState* = object
     theme*: Theme
@@ -328,6 +337,11 @@ type
     ytDownloadTasks*: seq[DownloadTask]
     ytDownloaded*: Table[string, string]
     downloadCount*: int
+    spCookieSource*: string
+    spCookieFilePath*: string
+    spAudioFormat*: string
+    spDownloaded*: Table[string, string]
+    spDownloadCount*: int
     downloadsTab*: DownloadsTab
     downloadProgress*: Table[string, int]
     ytMaxConcurrentDownloads*: int
@@ -382,11 +396,14 @@ type
     cursorVisible*: bool
     deviceName*: string
     hasKittyGraphics*: bool
-    coverCache*: Table[string, string]
+    coverCache*: Table[string, tuple[data: seq[byte], mime: string]]
     coverPendingPath*: string
     trashItems*: seq[TrashItem]
     coverFetching*: bool
     coverImageId*: int
+    daemonStateVersion*: int
+    currentLyrics*: LrcData
+    lyricsLineIdx*: int
 
 const
   GTM_VERSION* {.strdefine.} = staticExec("git describe --tags --abbrev=0 2>/dev/null").strip
@@ -409,7 +426,8 @@ const
     "Configure audio playback: volume, crossfade between tracks, and audio backend.",
     "YouTube integration: JS runtime, download limits, search preferences, cookies.",
     "Customize the UI appearance: theme colors, footer layout, and refresh behavior.",
-    "System settings: idle timeout, daemon IPC, and factory reset options."
+    "System settings: idle timeout, daemon IPC, and factory reset options.",
+    "Spotify integration: cookies, audio format, download management, and playlist import."
   ]
 
   SettingDescs*: array[SettingsCategory, seq[string]] = [
@@ -438,6 +456,15 @@ const
       "Seconds of inactivity before auto-shutdown (0 = never).",
       "Timeout in seconds for daemon IPC communication (1\u201330).",
       "Restore all settings to factory defaults (cannot be undone)."
+    ],
+    scSpotify: @[
+      "Browser cookie source for Spotify authentication.",
+      "Path to a custom Netscape-format cookie file for Spotify.",
+      "Preferred audio format for Spotify-sourced downloads.",
+      "Maximum concurrent Spotify downloads (1\u201310).",
+      "View download history for all Spotify-sourced tracks.",
+      "Remove all Spotify download history permanently.",
+      "Import a Spotify playlist URL to fetch and download tracks."
     ]
   ]
 

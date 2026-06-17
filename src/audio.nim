@@ -14,6 +14,7 @@ type
     floatVal*: float
     intVal*: int
     strVal*: string
+    version*: int
     metadata*: Table[string, string]
 
   TrackMetadata* = object
@@ -189,7 +190,7 @@ when defined(useFFmpeg):
       result.add(AudioEvent(kind: evPlaybackStopped))
     elif b.lastState == 0 and nowState == 1:
       result.add(AudioEvent(kind: evPlaybackStarted))
-    if nowState == 1 and abs(nowTime - b.lastTime) > 0.25:
+    if nowState == 1 and abs(nowTime - b.lastTime) > 0.1:
       result.add(AudioEvent(kind: evPositionChanged, floatVal: nowTime))
       b.lastTime = nowTime
     b.lastPlaying = nowPlaying
@@ -346,7 +347,7 @@ when defined(useFFmpeg):
       result.add(AudioEvent(kind: evPlaybackStopped))
     elif b.lastState == 0 and nowState == 1:
       result.add(AudioEvent(kind: evPlaybackStarted))
-    if nowState == 1 and abs(nowTime - b.lastTime) > 0.25:
+    if nowState == 1 and abs(nowTime - b.lastTime) > 0.1:
       result.add(AudioEvent(kind: evPositionChanged, floatVal: nowTime))
       b.lastTime = nowTime
     if nowCrossfading and not b.lastCrossfading:

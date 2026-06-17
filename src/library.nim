@@ -178,6 +178,13 @@ when defined(useSqlite):
         expires_at INTEGER NOT NULL
       )
     """)
+    discard execRaw(lib.db, """
+      CREATE TABLE IF NOT EXISTS lyrics_cache (
+        track_path TEXT PRIMARY KEY,
+        lyrics TEXT NOT NULL,
+        cached_at TEXT DEFAULT (datetime('now'))
+      )
+    """)
 
   proc addFavourite*(lib: LibraryDb, trackId: int64) =
     let stmt = prepare(lib.db, "INSERT OR IGNORE INTO favourites (track_id) VALUES (?)")
@@ -808,6 +815,14 @@ proc rebuildItems*(state: var AppState) =
               dlIndices.add(i)
               break
       state.addTrackItems(dlIndices)
+    elif state.filterScope == fsSpotify:
+      var spIndices: seq[int] = @[]
+      for i, t in state.libraryTracks:
+        for v in state.spDownloaded.values:
+          if v == t.path:
+            spIndices.add(i)
+            break
+      state.addTrackItems(spIndices)
     else:
       state.addTrackItems(toSeq(0..<state.libraryTracks.len))
   of tabSettings:

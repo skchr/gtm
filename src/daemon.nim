@@ -1,7 +1,7 @@
 import os, json, strutils, net, posix, random, osproc, times, base64
 from nativesockets import setBlocking, selectRead, SocketHandle
 proc prctl(option: cint, arg2: cstring): cint {.importc, header: "<sys/prctl.h>".}
-import audio, state, library, ytdlp
+import audio, state, library, ytdlp, lyrics
 
 proc parseFilenameForMetadata(path: string): tuple[title, artist: string] =
   let (_, stem, _) = path.splitFile()
@@ -36,10 +36,13 @@ type
     dckYtDownload, dckYtDownloadPoll, dckYtCancelDownload,
     dckYtListDownloads, dckYtFetchPlaylist, dckYtFetchPlaylistPoll,
     dckYtSetConfig, dckYtGetSearchHistory, dckYtClearSearchHistory,
+    dckSpSetConfig, dckSpListDownloads,
     dckListEqPresets,
     dckSetCrossfadeDuration,
     dckSetCrossfadeCurve,
     dckGetCoverArt,
+    dckGetLyrics,
+    dckSearchLyrics,
     dckPing,
     dckDeleteTrack, dckRestoreTrack, dckPermanentDelete, dckListTrash, dckPurgeTrash
 
@@ -97,6 +100,10 @@ type
     ytJsRuntime: string
     ytDownloadDir: string
     ytMaxConcurrentDownloads: int
+    # Spotify state
+    spCookieSource: string
+    spCookieFilePath: string
+    spAudioFormat: string
     ytSearchProcess: Process
     ytSearchBuf: string
     ytSearchActive: bool
@@ -124,6 +131,7 @@ type
     ytPlaylistResult: YtPlaylistDetail
     ytPlaylistUrl: string
     lastTrackDuration: float
+    stateVersion*: int
 
 proc flock(fd: cint, op: cint): cint {.importc, header: "<sys/file.h>".}
 const LOCK_EX = 2
@@ -156,6 +164,12 @@ proc setupSignalHandlers() =
     quit(0)
   signal(SIGINT, handler)
   signal(SIGTERM, handler)
+
+proc cookiesForUrl(d: Daemon, url: string): tuple[source, filePath: string] =
+  if "spotify.com" in url:
+    (d.spCookieSource, d.spCookieFilePath)
+  else:
+    (d.ytCookieSource, d.ytCookieFilePath)
 
 proc parseDaemonCommand(line: string): DaemonCmd =
   try:
@@ -274,12 +288,24 @@ proc parseDaemonCommand(line: string): DaemonCmd =
       result.kind = dckYtGetSearchHistory
     of "yt_clear_search_history":
       result.kind = dckYtClearSearchHistory
+    of "sp_set_config":
+      result.kind = dckSpSetConfig; result.strArg = j{"cookie_source"}.getStr("")
+      result.strArg2 = j{"cookie_path"}.getStr("")
+      result.strArg3 = j{"audio_format"}.getStr("")
+    of "sp_list_downloads":
+      result.kind = dckSpListDownloads
     of "list_eq_presets":
       result.kind = dckListEqPresets
     of "ping":
       result.kind = dckPing
     of "get_cover_art":
       result.kind = dckGetCoverArt; result.strArg = j{"path"}.getStr("")
+    of "get_lyrics":
+      result.kind = dckGetLyrics; result.strArg = j{"path"}.getStr("")
+      result.strArg2 = j{"title"}.getStr(""); result.strArg3 = j{"artist"}.getStr("")
+      result.strArg4 = j{"album"}.getStr(""); result.floatArg = j{"duration"}.getFloat(0.0)
+    of "search_lyrics":
+      result.kind = dckSearchLyrics; result.strArg = j{"title"}.getStr(""); result.strArg2 = j{"artist"}.getStr("")
     of "delete_track":
       result.kind = dckDeleteTrack; result.intArg = j{"track_id"}.getInt(0); result.intArg2 = j{"permanent"}.getInt(0)
     of "restore_track":
@@ -317,6 +343,8 @@ proc serializeEvents(events: seq[AudioEvent]; d: Daemon = nil): JsonNode =
     of evMetadataChanged:
       if ev.strVal.len > 0: obj["event"] = %ev.strVal
     else: discard
+    if d != nil:
+      obj["version"] = %d.stateVersion
     result.add(obj)
 
 proc broadcastAll(d: Daemon, data: string) =
@@ -340,6 +368,7 @@ proc sendQueueEvent(d: Daemon) =
 
 proc pushFullState(d: Daemon) =
   if d.clients.len == 0: return
+  d.stateVersion.inc
   var ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "full_state_sync",
     "state": $(d.player.state),
     "track_path": d.currentTrackPath,
@@ -350,7 +379,8 @@ proc pushFullState(d: Daemon) =
     "volume": %d.player.volume,
     "shuffle": %d.shuffleEnabled,
     "repeat": %d.repeatMode,
-    "sleep_timer": %d.sleepTimerRemaining}]}
+    "sleep_timer": %d.sleepTimerRemaining,
+    "version": %d.stateVersion}]}
   d.broadcastAll($ev & "\n")
 
 proc savePlaybackState(d: Daemon) =
@@ -371,6 +401,9 @@ proc savePlaybackState(d: Daemon) =
     d.lib.setPlaybackState("yt_js_runtime", d.ytJsRuntime)
     d.lib.setPlaybackState("yt_download_dir", d.ytDownloadDir)
     d.lib.setPlaybackState("yt_max_concurrent", $(d.ytMaxConcurrentDownloads))
+    d.lib.setPlaybackState("sp_cookie_source", d.spCookieSource)
+    d.lib.setPlaybackState("sp_cookie_file_path", d.spCookieFilePath)
+    d.lib.setPlaybackState("sp_audio_format", d.spAudioFormat)
     var qArr = newJArray()
     for p in d.playbackQueue:
       qArr.add(%p)
@@ -470,7 +503,8 @@ proc advanceToNextTrack(d: Daemon, forward: bool = true): bool =
           if t.url == nextCandidate: alreadyDL = true; break
         if not alreadyDL and d.lib != nil:
           var task: DownloadTask
-          if startDownload(YtSearchResult(url: nextCandidate, title: dlTitle, channel: dlChannel), d.ytDownloadDir, task.process, d.ytCookieSource, d.ytJsRuntime, d.ytCookieFilePath):
+          let (cSrc, cPath) = cookiesForUrl(d, nextCandidate)
+          if startDownload(YtSearchResult(url: nextCandidate, title: dlTitle, channel: dlChannel), d.ytDownloadDir, task.process, cSrc, d.ytJsRuntime, cPath):
             task.title = dlTitle; task.url = nextCandidate; task.channel = dlChannel
             task.outputDir = d.ytDownloadDir; task.completed = false; task.startedAt = epochTime()
             d.ytDownloadTasks.add(task)
@@ -480,8 +514,8 @@ proc advanceToNextTrack(d: Daemon, forward: bool = true): bool =
           try: d.ytStreamResolveProcess.terminate() except: discard
           close(d.ytStreamResolveProcess)
           d.ytStreamResolveBuf = ""
-          d.ytStreamResolveUrl = nextCandidate
-          discard startStreamUrlFetch(nextCandidate, d.ytStreamResolveProcess, d.ytCookieSource, d.ytJsRuntime, d.ytCookieFilePath)
+          let (cSrc, cPath) = cookiesForUrl(d, nextCandidate)
+          discard startStreamUrlFetch(nextCandidate, d.ytStreamResolveProcess, cSrc, d.ytJsRuntime, cPath)
           d.ytStreamResolving = true
         return false
       if dlTitle.len > 0:
@@ -914,7 +948,8 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
                     break
                 if not alreadyDL:
                   var task: DownloadTask
-                  if startDownload(YtSearchResult(url: path, title: title, channel: channel), d.ytDownloadDir, task.process, d.ytCookieSource, d.ytJsRuntime, d.ytCookieFilePath):
+                  let (cSrc, cPath) = cookiesForUrl(d, path)
+                  if startDownload(YtSearchResult(url: path, title: title, channel: channel), d.ytDownloadDir, task.process, cSrc, d.ytJsRuntime, cPath):
                     task.title = title
                     task.url = path
                     task.channel = channel
@@ -926,7 +961,8 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
               if d.ytStreamResolvedFor != path and not d.ytStreamResolving:
                 d.ytStreamResolveBuf = ""
                 d.ytStreamResolveUrl = path
-                discard startStreamUrlFetch(path, d.ytStreamResolveProcess, d.ytCookieSource, d.ytJsRuntime, d.ytCookieFilePath)
+                let (cSrc, cPath) = cookiesForUrl(d, path)
+                discard startStreamUrlFetch(path, d.ytStreamResolveProcess, cSrc, d.ytJsRuntime, cPath)
                 d.ytStreamResolving = true
         result["queue_length"] = %d.playbackQueue.len
         d.regenShuffleIfNeeded()
@@ -1013,6 +1049,7 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
       soArr.add(%i)
     result["shuffleOrder"] = soArr
     result["shuffleIndex"] = %d.shuffleIndex
+    result["version"] = %d.stateVersion
     result["crossfadeDuration"] = %d.crossfadeDuration
     result["crossfadeCurve"] = %d.crossfadeCurve
     result["crossfadePrepared"] = %d.crossfadePrepared
@@ -1054,7 +1091,8 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     d.ytStreamResultUrl = ""
     d.ytStreamPendingTitle = cmd.strArg2
     d.ytStreamPendingChannel = cmd.strArg3
-    d.ytStreamActive = startStreamUrlFetch(cmd.strArg, d.ytStreamProcess, d.ytCookieSource, d.ytJsRuntime, d.ytCookieFilePath)
+    let (cSrc, cPath) = cookiesForUrl(d, cmd.strArg)
+    d.ytStreamActive = startStreamUrlFetch(cmd.strArg, d.ytStreamProcess, cSrc, d.ytJsRuntime, cPath)
     result["active"] = %d.ytStreamActive
   of dckYtResolveStreamPoll:
     # Main loop auto-polls; just return current state
@@ -1065,7 +1103,8 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
   of dckYtDownload:
     if cmd.strArg.len > 0:
       var task: DownloadTask
-      if startDownload(YtSearchResult(url: cmd.strArg, title: cmd.strArg2, channel: cmd.strArg3), d.ytDownloadDir, task.process, d.ytCookieSource, d.ytJsRuntime, d.ytCookieFilePath):
+      let (cSrc, cPath) = cookiesForUrl(d, cmd.strArg)
+      if startDownload(YtSearchResult(url: cmd.strArg, title: cmd.strArg2, channel: cmd.strArg3), d.ytDownloadDir, task.process, cSrc, d.ytJsRuntime, cPath):
         task.title = cmd.strArg2
         task.url = cmd.strArg
         task.channel = cmd.strArg3
@@ -1113,7 +1152,8 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
       result["ok"] = %false
       result["error"] = %"playlist fetch already in progress"
     else:
-      if startPlaylistFetch(cmd.strArg, d.ytPlaylistProcess, d.ytCookieSource, d.ytJsRuntime, d.ytCookieFilePath):
+      let (cSrc, cPath) = cookiesForUrl(d, cmd.strArg)
+      if startPlaylistFetch(cmd.strArg, d.ytPlaylistProcess, cSrc, d.ytJsRuntime, cPath):
         d.ytPlaylistActive = true
         d.ytPlaylistBuf = ""
         d.ytPlaylistUrl = cmd.strArg
@@ -1148,6 +1188,20 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     result["js_runtime"] = %d.ytJsRuntime
     result["download_dir"] = %d.ytDownloadDir
     result["max_concurrent"] = %d.ytMaxConcurrentDownloads
+  of dckSpSetConfig:
+    d.spCookieSource = cmd.strArg
+    d.spCookieFilePath = cmd.strArg2
+    if cmd.strArg3.len > 0: d.spAudioFormat = cmd.strArg3
+    result["cookie_source"] = %d.spCookieSource
+    result["cookie_path"] = %d.spCookieFilePath
+    result["audio_format"] = %d.spAudioFormat
+  of dckSpListDownloads:
+    var arr = newJArray()
+    if d.lib != nil:
+      for dl in d.lib.getDownloads():
+        if "spotify.com" in dl.url:
+          arr.add(%*{"url": %dl.url, "path": %dl.path, "title": %dl.title})
+    result["downloads"] = arr
   of dckYtGetSearchHistory:
     var arr = newJArray()
     if d.lib != nil:
@@ -1167,6 +1221,25 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
         result["cover_mime"] = %coverMime
     else:
       result["cover_data"] = %""
+  of dckGetLyrics:
+    let lrc = resolveLyrics(cmd.strArg, cmd.strArg2, cmd.strArg3, cmd.strArg4, cmd.floatArg)
+    if lrc.lines.len > 0:
+      result["ok"] = %true
+      result["title"] = %lrc.title
+      result["artist"] = %lrc.artist
+      result["album"] = %lrc.album
+      var arr = newJArray()
+      for ln in lrc.lines:
+        arr.add(%*{"ts": %ln.timestamp, "text": %ln.text})
+      result["lines"] = arr
+    else:
+      result["ok"] = %false
+  of dckSearchLyrics:
+    let results = searchLrclib(cmd.strArg, cmd.strArg2)
+    var arr = newJArray()
+    for r in results:
+      arr.add(%*{"id": %r.id, "artist": %r.artist, "title": %r.title, "album": %r.album, "duration": %r.duration})
+    result["results"] = arr
   of dckDeleteTrack:
     if d.lib == nil or cmd.intArg <= 0:
       result["ok"] = %false
@@ -1362,6 +1435,9 @@ proc runDaemon*() =
     ytJsRuntime: "",
     ytDownloadDir: defaultDownloadDir,
     ytMaxConcurrentDownloads: 4,
+    spCookieSource: "",
+    spCookieFilePath: "",
+    spAudioFormat: "opus",
     ytSearchActive: false,
     ytStreamActive: false,
     ytStreamResultUrl: "",
@@ -1375,7 +1451,8 @@ proc runDaemon*() =
     ytSearchResults: @[],
     ytDownloadTasks: @[],
     lastConsumedFromQueue: @[],
-    lastTrackDuration: 0.0
+    lastTrackDuration: 0.0,
+    stateVersion: 0
   )
   when defined(useMpris):
     initMpris(daemon)
@@ -1418,6 +1495,12 @@ proc runDaemon*() =
     let ytMax = daemon.lib.getPlaybackState("yt_max_concurrent")
     if ytMax.len > 0:
       try: daemon.ytMaxConcurrentDownloads = parseInt(ytMax) except: discard
+    let spCookie = daemon.lib.getPlaybackState("sp_cookie_source")
+    if spCookie.len > 0: daemon.spCookieSource = spCookie
+    let spCookieFile = daemon.lib.getPlaybackState("sp_cookie_file_path")
+    if spCookieFile.len > 0: daemon.spCookieFilePath = spCookieFile
+    let spAudio = daemon.lib.getPlaybackState("sp_audio_format")
+    if spAudio.len > 0: daemon.spAudioFormat = spAudio
     # Completed downloads are queried from DB on demand
     let queueStr = daemon.lib.getPlaybackState("queue_json")
     if queueStr.len > 0:
@@ -1520,9 +1603,11 @@ proc runDaemon*() =
         ci.inc
     try:
       let daemonEvents = if daemon.player != nil: daemon.player.pollEvents() else: @[]
-      if daemonEvents.len > 0 and daemon.clients.len > 0:
-        let evJson = %*{"events": serializeEvents(daemonEvents, daemon)}
-        daemon.broadcastAll($evJson & "\n")
+      if daemonEvents.len > 0:
+        daemon.stateVersion.inc
+        if daemon.clients.len > 0:
+          let evJson = %*{"events": serializeEvents(daemonEvents, daemon)}
+          daemon.broadcastAll($evJson & "\n")
       # Reset auto-advance flag after playback started event is broadcast
       for ev in daemonEvents:
         if ev.kind == evPlaybackStarted:
@@ -1568,7 +1653,8 @@ proc runDaemon*() =
       let currentDur = daemon.player.duration
       if currentDur > 0 and abs(currentDur - daemon.lastTrackDuration) > 0.5:
         daemon.lastTrackDuration = currentDur
-        let durEv = %*{"events": [%*{"kind": %evDurationChanged.int, "duration": %currentDur}]}
+        daemon.stateVersion.inc
+        let durEv = %*{"events": [%*{"kind": %evDurationChanged.int, "duration": %currentDur, "version": %daemon.stateVersion}]}
         daemon.broadcastAll($durEv & "\n")
     except Exception as ex:
       if debugMode: stderr.writeLine("[gtmd] event processing error: " & ex.msg)

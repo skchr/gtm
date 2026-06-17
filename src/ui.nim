@@ -221,7 +221,7 @@ method render*(node: TabBar, ctx: var nw.Context[AppState]) =
 var gCursorX, gCursorY: int = -1
 
 proc showInputCursor*(state: var AppState, w, h: int) =
-  let shouldShow = state.overlay.kind in {okYtSearch, okCommandPalette, okThemePicker, okEqPresetPicker, okQueuePicker, okPlaylistSearch, okQueueOverlay, okFuzzyFinder} or
+  let shouldShow = state.overlay.kind in {okYtSearch, okCommandPalette, okThemePicker, okEqPresetPicker, okQueuePicker, okPlaylistSearch, okQueueOverlay, okFuzzyFinder, okSpotifyUrlInput} or
     (state.overlay.kind == okNone and (state.playlistInputActive or state.mode == imFilter or state.mode == imLeaderMode))
   if shouldShow == state.cursorVisible: return
   state.cursorVisible = shouldShow
@@ -229,7 +229,7 @@ proc showInputCursor*(state: var AppState, w, h: int) =
     var cx = 1
     var cy = 1
     case state.overlay.kind
-    of okYtSearch, okCommandPalette, okThemePicker, okQueuePicker, okPlaylistSearch, okQueueOverlay:
+    of okYtSearch, okCommandPalette, okThemePicker, okQueuePicker, okPlaylistSearch, okQueueOverlay, okSpotifyUrlInput:
       let boxW = min(60, w - 4)
       let boxH = min(h - 4, 20)
       let boxX = (w - boxW) div 2
@@ -339,19 +339,34 @@ method render*(node: NowPlayingView, ctx: var nw.Context[AppState]) =
   if state.hasKittyGraphics:
     if state.currentPlayingPath.len > 0:
       let cacheKey = hash(state.currentPlayingPath).toHex
-      if state.coverCache.hasKey(cacheKey) and state.coverCache[cacheKey].len > 0:
-        let coverData = state.coverCache[cacheKey]
+      if state.coverCache.hasKey(cacheKey) and state.coverCache[cacheKey].data.len > 0:
+        let (coverBytes, coverMime) = state.coverCache[cacheKey]
         let coverW = min(18, (w div 3) - 1)
         if coverW >= 8:
           let coverX = w - coverW - 1
           let coverY = 1
           if ctx.data.coverImageId < 0:
-            transmitImage(coverData, CoverImageId)
+            deleteImage(CoverImageId)
+            transmitImage(coverBytes, coverMime, CoverImageId)
             ctx.data.coverImageId = CoverImageId
           placeImage(coverX, coverY, ctx.data.coverImageId, coverW)
     elif ctx.data.coverImageId >= 0:
       deleteImage(ctx.data.coverImageId)
       ctx.data.coverImageId = -1
+  # Lyrics — synced
+  if state.currentLyrics.lines.len > 0:
+    let maxLyricLines = 6
+    let startLine = max(0, state.lyricsLineIdx - 2)
+    let endLine = min(state.currentLyrics.lines.len - 1, startLine + maxLyricLines - 1)
+    for idx in startLine..endLine:
+      if idx > state.currentLyrics.lines.high: break
+      let lyr = state.currentLyrics.lines[idx]
+      let isCurrent = idx == state.lyricsLineIdx
+      let lyrColor = if isCurrent: theme.green else: theme.overlay1
+      let prefix = if isCurrent: "\u25B6 " else: "  "
+      writeStr(ctx.tb, artPad, line, prefix & lyr.text, lyrColor)
+      line.inc
+    line.inc
   # Up Next — scrollable
   if w >= 40:
     writeStr(ctx.tb, artPad, line, "Up Next", theme.sky)
@@ -419,6 +434,7 @@ method render*(node: LibrarySidebar, ctx: var nw.Context[AppState]) =
     SidebarEntry(scope: fsMostPlayed, label: "Most Played", count: state.libraryTracks.len),
     SidebarEntry(scope: fsLeastPlayed, label: "Least Played", count: state.libraryTracks.len),
     SidebarEntry(scope: fsDownloads, label: "Downloads", count: state.downloadCount),
+    SidebarEntry(scope: fsSpotify, label: "Spotify", count: state.spDownloadCount),
   ]
   template treePrefix(idx: int): string =
     if idx < 4: ""
@@ -598,6 +614,7 @@ const settingsCategories* = [
   SettingsCategoryInfo(id: scYouTube, label: "YouTube", icon: "\u25B6"),
   SettingsCategoryInfo(id: scAppearance, label: "Appearance", icon: "\u2726"),
   SettingsCategoryInfo(id: scSystem, label: "System", icon: "\u2699"),
+  SettingsCategoryInfo(id: scSpotify, label: "Spotify", icon: "\u266C"),
 ]
 
 type SettingsView = ref object of nw.Node
@@ -752,6 +769,32 @@ method render*(node: SettingsView, ctx: var nw.Context[AppState]) =
     line.inc
     settingsRow("Reset All Settings")
     writeStr(ctx.tb, contentX + contentW - 8, line, "[Reset]", theme.peach)
+    line.inc
+  of scSpotify:
+    sectionHeader("═══ Spotify ═══")
+    settingsRow("Cookie Source")
+    let spCookieLabel = truncateAt(if state.spCookieSource.len == 0: "none" else: state.spCookieSource, max(0, contentW - 14))
+    writeStr(ctx.tb, contentX + contentW - spCookieLabel.runeLen - 11, line, "[ " & spCookieLabel & " \u25B8]", theme.subtext0)
+    line.inc
+    settingsRow("Cookie File")
+    let spCfLabel = if state.spCookieFilePath.len == 0: "(none)" else: state.spCookieFilePath
+    writeStr(ctx.tb, contentX + contentW - spCfLabel.runeLen - 11, line, "[ " & spCfLabel & " \u25B8]", theme.subtext0)
+    line.inc
+    settingsRow("Audio Format")
+    let fmtLabel = if state.spAudioFormat.len == 0: "opus" else: state.spAudioFormat
+    writeStr(ctx.tb, contentX + contentW - fmtLabel.runeLen - 11, line, "[ " & fmtLabel & " ▸]", theme.subtext0)
+    line.inc
+    settingsRow("Max Downloads")
+    sliderWidget(state.ytMaxConcurrentDownloads, 10, 14)
+    line.inc
+    settingsRow("Download History")
+    writeStr(ctx.tb, contentX + contentW - 15, line, "[" & $state.spDownloadCount & " tracks ▸]", theme.subtext0)
+    line.inc
+    settingsRow("Clear History")
+    writeStr(ctx.tb, contentX + contentW - 8, line, "[Clear]", theme.peach)
+    line.inc
+    settingsRow("Import Playlist")
+    writeStr(ctx.tb, contentX + contentW - 10, line, "[Import]", theme.green)
     line.inc
 
   # Description panel at bottom of right pane
@@ -1076,6 +1119,11 @@ method render*(node: GenericOverlay, ctx: var nw.Context[AppState]) =
     queryLine = false
   of okFuzzyFinder:
     title = "Fuzzy Finder"
+    queryLine = true
+  of okSpotifyUrlInput:
+    boxW = min(52, w - 8)
+    boxH = 7
+    title = "Import Spotify Playlist URL"
     queryLine = true
   of okTrashView:
     title = "Trash"
@@ -1929,10 +1977,13 @@ proc initApp*(state: var AppState) =
   state.selectionAnchor = 0
   state.overlay.clear()
   state.hasKittyGraphics = false
-  state.coverCache = initTable[string, string]()
+  state.coverCache = initTable[string, tuple[data: seq[byte], mime: string]]()
   state.coverImageId = -1
   state.coverPendingPath = ""
   state.coverFetching = false
+  state.currentLyrics = LrcData(lines: @[])
+  state.lyricsLineIdx = -1
+  state.daemonStateVersion = 0
   state.daemonConnected = false
   state.daemonPid = 0
   state.audioAvailable = false
