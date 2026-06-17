@@ -56,7 +56,7 @@ proc detectBrowserCookieSource*(): string =
           if fileExists(path & "/cookies.sqlite"):
             return "firefox"
   except: discard
-  for dir in ["chromium", "google-chrome", "BraveSoftware/Brave-Browser"]:
+  for dir in ["chromium", "google-chrome", "google-chrome-stable", "chromium-browser", "microsoft-edge", "BraveSoftware/Brave-Browser"]:
     if fileExists(home & "/.config/" & dir & "/Default/Cookies"):
       let name = dir.substr(dir.rfind('/') + 1)
       return name
@@ -68,16 +68,18 @@ proc detectBrowserCookieSource*(): string =
           if fileExists(path & "/cookies.sqlite"):
             return "firefox"
   except: discard
-  for dir in ["chromium", "google-chrome", "BraveSoftware/Brave-Browser"]:
+  for dir in ["chromium", "google-chrome", "google-chrome-stable", "chromium-browser", "microsoft-edge", "BraveSoftware/Brave-Browser"]:
     let snap = home & "/snap/" & dir & "/current/.config/" & dir & "/Default/Cookies"
     if fileExists(snap):
       let name = dir.substr(dir.rfind('/') + 1)
       return name
   result = ""
 
-proc cookieFlags*(source: string): string =
-  if source.len == 0: return ""
-  if source.contains("/") or source.contains("."):
+proc cookieFlags*(source: string; filePath: string = ""): string =
+  if filePath.len > 0 and fileExists(filePath):
+    result = " --cookies " & quoteShell(filePath)
+  elif source.len == 0: return ""
+  elif source.contains("/") or source.contains("."):
     result = " --cookies " & quoteShell(source)
   else:
     result = " --cookies-from-browser " & source
@@ -86,11 +88,11 @@ proc jsRuntimeFlags*(runtime: string): string =
   if runtime.len == 0: return ""
   result = " --js-runtimes " & runtime & " --remote-components ejs:github"
 
-proc startYoutubeSearch*(query: string; p: var Process; cookieSource: string = ""; pageSize: int = 20): bool =
+proc startYoutubeSearch*(query: string; p: var Process; cookieSource: string = ""; pageSize: int = 20; cookieFilePath: string = ""): bool =
   let yt = findYtdlp()
   if yt.len == 0: return false
   let searchQuery = "ytsearch" & $pageSize & ":" & query
-  let cmd = yt & " " & quoteShell(searchQuery) & " --dump-json --no-warnings" & cookieFlags(cookieSource) & " 2>/dev/null"
+  let cmd = yt & " " & quoteShell(searchQuery) & " --dump-json --no-warnings" & cookieFlags(cookieSource, cookieFilePath) & " 2>/dev/null"
   try:
     p = startProcess(cmd, options = {poUsePath, poEvalCommand})
     return true
@@ -142,10 +144,10 @@ proc finishYoutubeSearch*(p: var Process, buf: var string): seq[YtSearchResult] 
   close(p)
   result = parseYtJsonLines(buf)
 
-proc startStreamUrlFetch*(url: string; p: var Process; cookieSource: string = ""; jsRuntime: string = "node"): bool =
+proc startStreamUrlFetch*(url: string; p: var Process; cookieSource: string = ""; jsRuntime: string = "node"; cookieFilePath: string = ""): bool =
   let yt = findYtdlp()
   if yt.len == 0: return false
-  let cmd = yt & " -f \"ba\" -g --no-playlist --no-check-formats --no-warnings" & cookieFlags(cookieSource) & jsRuntimeFlags(jsRuntime) & " --user-agent \"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36\" --add-headers \"Referer:https://www.youtube.com/\" " & quoteShell(url) & " 2>/dev/null"
+  let cmd = yt & " -f \"ba\" -g --no-playlist --no-check-formats --no-warnings" & cookieFlags(cookieSource, cookieFilePath) & jsRuntimeFlags(jsRuntime) & " --user-agent \"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36\" --add-headers \"Referer:https://www.youtube.com/\" " & quoteShell(url) & " 2>/dev/null"
   try:
     p = startProcess(cmd, options = {poUsePath, poEvalCommand})
     return true
@@ -176,11 +178,11 @@ proc pollStreamUrlFetch*(p: var Process, buf: var string): string =
       return trimmed
   result = ""
 
-proc startDownload*(item: YtSearchResult; outputDir: string; p: var Process; cookieSource: string = ""; jsRuntime: string = "node"): bool =
+proc startDownload*(item: YtSearchResult; outputDir: string; p: var Process; cookieSource: string = ""; jsRuntime: string = "node"; cookieFilePath: string = ""): bool =
   let yt = findYtdlp()
   if yt.len == 0: return false
   if not dirExists(outputDir): createDir(outputDir)
-  let cmd = yt & " -f bestaudio --extract-audio --audio-format opus --no-playlist --print after_move:filepath --no-check-formats --no-warnings --user-agent \"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36\" --add-headers \"Referer:https://www.youtube.com/\"" & cookieFlags(cookieSource) & jsRuntimeFlags(jsRuntime) & " -o " &
+  let cmd = yt & " -f bestaudio --extract-audio --audio-format opus --no-playlist --print after_move:filepath --no-check-formats --no-warnings --user-agent \"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36\" --add-headers \"Referer:https://www.youtube.com/\"" & cookieFlags(cookieSource, cookieFilePath) & jsRuntimeFlags(jsRuntime) & " -o " &
     quoteShell(outputDir / "%(title)s.%(ext)s") & " " & quoteShell(item.url) & " 2>&1"
   try:
     p = startProcess(cmd, options = {poUsePath, poEvalCommand})
@@ -204,10 +206,10 @@ proc pollDownload*(p: var Process, buf: var string): string =
       return trimmed
   result = ""
 
-proc startPlaylistFetch*(url: string; p: var Process; cookieSource: string = ""; jsRuntime: string = "node"): bool =
+proc startPlaylistFetch*(url: string; p: var Process; cookieSource: string = ""; jsRuntime: string = "node"; cookieFilePath: string = ""): bool =
   let yt = findYtdlp()
   if yt.len == 0: return false
-  let cmd = yt & " --dump-json --no-playlist --flat-playlist --no-warnings" & cookieFlags(cookieSource) & jsRuntimeFlags(jsRuntime) & " " & quoteShell(url) & " 2>/dev/null"
+  let cmd = yt & " --dump-json --no-playlist --flat-playlist --no-warnings" & cookieFlags(cookieSource, cookieFilePath) & jsRuntimeFlags(jsRuntime) & " " & quoteShell(url) & " 2>/dev/null"
   try:
     p = startProcess(cmd, options = {poUsePath, poEvalCommand})
     return true

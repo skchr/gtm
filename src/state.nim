@@ -149,6 +149,14 @@ type
     trackCount*: int
     tracks*: seq[YtSearchResult]
 
+  TrashItem* = object
+    id*: int
+    trackId*: int64
+    originalPath*: string
+    trashPath*: string
+    trashedAt*: int
+    expiresAt*: int
+
   OverlayKind* = enum
     okNone
     okYtSearch
@@ -160,6 +168,7 @@ type
     okQueueOverlay
     okFuzzyFinder
     okEqPresetPicker
+    okTrashView
 
   YtSubTab* = enum ystAll, ystPlaylists
 
@@ -278,6 +287,7 @@ type
     currentPlayingId*: int64
     volumeCueTimer*: int
     volumeCueVolume*: int
+    highVolAccumFrames*: int
     notificationMsg*: string
     notificationBody*: string
     notificationKind*: NotificationKind
@@ -319,6 +329,7 @@ type
     ytMaxConcurrentDownloads*: int
     ytBatchDownloadMode*: bool
     ytCookieSource*: string
+    ytCookieFilePath*: string
     ytJsRuntime*: string
     ytSearchHistory*: seq[string]
     ytSearchHistoryLower*: seq[string]
@@ -343,6 +354,7 @@ type
     spinnerFrame*: int
     queueCursor*: int
     queuePendingConfirm*: int
+    deleteConfirmPending*: int
     eqVisible*: bool
     eqBands*: array[10, float]
     eqPreset*: string
@@ -368,11 +380,12 @@ type
     hasKittyGraphics*: bool
     coverCache*: Table[string, string]
     coverPendingPath*: string
+    trashItems*: seq[TrashItem]
     coverFetching*: bool
     coverImageId*: int
 
 const
-  GTM_VERSION* {.strdefine.} = "0.4.7"
+  GTM_VERSION* {.strdefine.} = "0.5.4"
   GTM_BUILD_TIME* {.strdefine.} = ""
 
   FooterPresets*: Table[FooterPresetName, set[FooterModule]] = {

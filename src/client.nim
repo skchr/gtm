@@ -80,6 +80,45 @@ proc ensureDaemon*(cli: DaemonClient) =
     startDaemonProcess()
     cli.reconnectCooldown = 10
 
+proc drainEventLinesFromJson(j: JsonNode, cli: DaemonClient) =
+  if not j.hasKey("events"): return
+  for evJson in j["events"]:
+    var ev = AudioEvent()
+    let k = evJson{"kind"}.getInt(0)
+    ev.kind = AudioEventKind(k)
+    case ev.kind
+    of evPositionChanged: ev.floatVal = evJson{"time_pos"}.getFloat(0.0)
+    of evDurationChanged: ev.floatVal = evJson{"duration"}.getFloat(0.0)
+    of evVolumeChanged: ev.intVal = evJson{"volume"}.getInt(0)
+    of evPlaybackStarted:
+      if evJson.hasKey("track_path"):
+        ev.metadata["track_path"] = evJson{"track_path"}.getStr("")
+        ev.metadata["track_title"] = evJson{"track_title"}.getStr("")
+        ev.metadata["track_channel"] = evJson{"track_channel"}.getStr("")
+      ev.metadata["auto_advanced"] = $(evJson{"auto_advanced"}.getBool(false))
+    of evMetadataChanged: ev.strVal = evJson{"event"}.getStr("")
+    of evCustomEvent:
+      ev.strVal = evJson{"event"}.getStr("")
+      if evJson.hasKey("shuffleIndex"): ev.intVal = evJson["shuffleIndex"].getInt(0)
+      for key in ["url", "path", "title", "channel", "next_path", "next_title", "next_channel"]:
+        if evJson.hasKey(key): ev.metadata[key] = evJson[key].getStr("")
+      for key in ["queue", "results", "tracks"]:
+        if evJson.hasKey(key): ev.metadata[key] = $evJson[key]
+      if evJson.hasKey("shuffle"): ev.metadata["shuffle"] = $(evJson["shuffle"].getBool(false))
+      if evJson.hasKey("repeat"): ev.metadata["repeat"] = $(evJson["repeat"].getInt(0))
+      # Extract full_state_sync fields from the event itself
+      if ev.strVal == "full_state_sync":
+        for f in ["state", "track_path", "track_title", "track_channel"]:
+          if evJson.hasKey(f): ev.metadata[f] = evJson[f].getStr("")
+        for f in ["time_pos", "duration"]:
+          if evJson.hasKey(f): ev.metadata[f] = $evJson[f].getFloat(0.0)
+        for f in ["volume", "sleep_timer"]:
+          if evJson.hasKey(f): ev.metadata[f] = $evJson[f].getInt(0)
+        if evJson.hasKey("shuffle"): ev.metadata["full_shuffle"] = $(evJson["shuffle"].getBool(false))
+        if evJson.hasKey("repeat"): ev.metadata["full_repeat"] = $(evJson["repeat"].getInt(0))
+    else: discard
+    cli.drainedEvents.add(ev)
+
 proc drainEventLines(cli: DaemonClient, buf: var string) =
   cli.drainedEvents = @[]
   while true:
@@ -93,51 +132,7 @@ proc drainEventLines(cli: DaemonClient, buf: var string) =
       if not j.hasKey("events"):
         buf = line & "\n" & buf
         break
-      for evJson in j["events"]:
-        var ev = AudioEvent()
-        let k = evJson{"kind"}.getInt(0)
-        ev.kind = AudioEventKind(k)
-        case ev.kind
-        of aekPositionChanged: ev.floatVal = evJson{"time_pos"}.getFloat(0.0)
-        of aekDurationChanged: ev.floatVal = evJson{"duration"}.getFloat(0.0)
-        of aekVolumeChanged: ev.intVal = evJson{"volume"}.getInt(0)
-        of aekPlaybackStarted:
-          if evJson.hasKey("track_path"):
-            ev.metadata["track_path"] = evJson{"track_path"}.getStr("")
-            ev.metadata["track_title"] = evJson{"track_title"}.getStr("")
-            ev.metadata["track_channel"] = evJson{"track_channel"}.getStr("")
-          ev.metadata["auto_advanced"] = $(evJson{"auto_advanced"}.getBool(false))
-        of aekMetadataChanged: ev.strVal = evJson{"event"}.getStr("")
-        of aekCustomEvent:
-          ev.strVal = evJson{"event"}.getStr("")
-          if evJson.hasKey("shuffleIndex"):
-            ev.intVal = evJson["shuffleIndex"].getInt(0)
-          if evJson.hasKey("url"):
-            ev.metadata["url"] = evJson["url"].getStr("")
-          if evJson.hasKey("path"):
-            ev.metadata["path"] = evJson["path"].getStr("")
-          if evJson.hasKey("title"):
-            ev.metadata["title"] = evJson["title"].getStr("")
-          if evJson.hasKey("channel"):
-            ev.metadata["channel"] = evJson["channel"].getStr("")
-          if evJson.hasKey("next_path"):
-            ev.metadata["next_path"] = evJson["next_path"].getStr("")
-          if evJson.hasKey("next_title"):
-            ev.metadata["next_title"] = evJson["next_title"].getStr("")
-          if evJson.hasKey("next_channel"):
-            ev.metadata["next_channel"] = evJson["next_channel"].getStr("")
-          if evJson.hasKey("queue"):
-            ev.metadata["queue"] = $evJson["queue"]
-          if evJson.hasKey("results"):
-            ev.metadata["results"] = $evJson["results"]
-          if evJson.hasKey("tracks"):
-            ev.metadata["tracks"] = $evJson["tracks"]
-          if evJson.hasKey("shuffle"):
-            ev.metadata["shuffle"] = $(evJson["shuffle"].getBool(false))
-          if evJson.hasKey("repeat"):
-            ev.metadata["repeat"] = $(evJson["repeat"].getInt(0))
-        else: discard
-        cli.drainedEvents.add(ev)
+      drainEventLinesFromJson(j, cli)
     except:
       buf = line & "\n" & buf
       break
@@ -181,7 +176,10 @@ proc sendDaemonCmd*(cli: DaemonClient, cmd: JsonNode): JsonNode =
         let j = parseJson(line)
         if j.hasKey("seq") and j["seq"].getInt(-1) == seqNo:
           return j
-        if j.hasKey("events"): continue
+        # Drain events into drainedEvents instead of discarding them
+        if j.hasKey("events"):
+          drainEventLinesFromJson(j, cli)
+          continue
         if j.hasKey("state"): continue
       totalWait += 0.1
   except:
@@ -202,6 +200,7 @@ proc sendOnly*(cli: DaemonClient, cmd: JsonNode) =
     cli.clearPending()
 
 proc daemonSimpleCmd*(cli: DaemonClient, cmd: string): JsonNode =
+  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": cmd})
 
 proc sendAsync*(cli: DaemonClient, cmd: JsonNode, callback: proc(resp: JsonNode) {.closure.}) =
@@ -311,43 +310,18 @@ method pollEvents*(cli: DaemonClient): seq[AudioEvent] =
       if line.len == 0: continue
       let json = parseJson(line)
       if json.hasKey("events"):
-        for evJson in json["events"]:
-          var ev = AudioEvent()
-          let k = evJson{"kind"}.getInt(0)
-          ev.kind = AudioEventKind(k)
-          case ev.kind
-          of aekPositionChanged:
-            ev.floatVal = evJson{"time_pos"}.getFloat(0.0)
+        let prevDrained = cli.drainedEvents.len
+        drainEventLinesFromJson(json, cli)
+        # Newly drained events go to result, and update cli state fields
+        for i in prevDrained..<cli.drainedEvents.len:
+          let ev = cli.drainedEvents[i]
+          if ev.kind == evPositionChanged:
             cli.timePos = ev.floatVal
-          of aekDurationChanged: ev.floatVal = evJson{"duration"}.getFloat(0.0)
-          of aekVolumeChanged: ev.intVal = evJson{"volume"}.getInt(0)
-          of aekPlaybackStarted:
-            if evJson.hasKey("track_path"):
-              ev.metadata["track_path"] = evJson{"track_path"}.getStr("")
-              ev.metadata["track_title"] = evJson{"track_title"}.getStr("")
-              ev.metadata["track_channel"] = evJson{"track_channel"}.getStr("")
-          of aekMetadataChanged: ev.strVal = evJson{"event"}.getStr("")
-          of aekCustomEvent:
-            ev.strVal = evJson{"event"}.getStr("")
-            if evJson.hasKey("shuffleIndex"):
-              ev.intVal = evJson["shuffleIndex"].getInt(0)
-            if evJson.hasKey("url"):
-              ev.metadata["url"] = evJson["url"].getStr("")
-            if evJson.hasKey("path"):
-              ev.metadata["path"] = evJson["path"].getStr("")
-            if evJson.hasKey("title"):
-              ev.metadata["title"] = evJson["title"].getStr("")
-            if evJson.hasKey("channel"):
-              ev.metadata["channel"] = evJson["channel"].getStr("")
-            if evJson.hasKey("results"):
-              ev.metadata["results"] = $evJson["results"]
-            if evJson.hasKey("tracks"):
-              ev.metadata["tracks"] = $evJson["tracks"]
-            if evJson.hasKey("shuffle"):
-              ev.metadata["shuffle"] = $(evJson["shuffle"].getBool(false))
-            if evJson.hasKey("repeat"):
-              ev.metadata["repeat"] = $(evJson["repeat"].getInt(0))
-          else: discard
+          elif ev.kind == evPlaybackStarted:
+            if ev.metadata.hasKey("time_pos"):
+              try: cli.timePos = parseFloat(ev.metadata["time_pos"]) except: discard
+            if ev.metadata.hasKey("duration"):
+              try: cli.duration = parseFloat(ev.metadata["duration"]) except: discard
           result.add(ev)
       elif json.hasKey("state"):
         let s = json["state"].getStr()
@@ -391,12 +365,12 @@ proc clearPending*(cli: DaemonClient) =
 
 method shutdown*(cli: DaemonClient) =
   cli.clearPending()
-  discard daemonSimpleCmd(cli, "quit")
   if cli.sock != nil:
-    try: cli.sock.close() except: stderr.writeLine("[gtm] shutdown close: " & getCurrentExceptionMsg())
+    try: cli.sock.close() except: discard
+  cli.connected = false
 
 proc sendQuitDaemon*(cli: DaemonClient) =
-  discard daemonSimpleCmd(cli, "quit")
+  sendOnly(cli, %*{"cmd": "quit"})
 
 proc createPlaylist*(cli: DaemonClient, name: string): JsonNode =
   cli.ensureDaemon()
@@ -579,6 +553,26 @@ proc getCoverArt*(cli: DaemonClient, path: string): JsonNode =
 proc getEqPresets*(cli: DaemonClient): JsonNode =
   cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "list_eq_presets"})
+
+proc deleteTrack*(cli: DaemonClient, trackId: int64, permanent: bool = false): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "delete_track", "track_id": trackId, "permanent": permanent.int})
+
+proc restoreTrack*(cli: DaemonClient, trashId: int): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "restore_track", "trash_id": trashId})
+
+proc permanentDeleteTrash*(cli: DaemonClient, trashId: int): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "permanent_delete_trash", "trash_id": trashId})
+
+proc listTrash*(cli: DaemonClient): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "list_trash"})
+
+proc purgeTrash*(cli: DaemonClient): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "purge_trash"})
 
 proc newDaemonClient*(): DaemonClient =
   DaemonClient(

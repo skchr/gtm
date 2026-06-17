@@ -14,11 +14,11 @@ type
 
 proc nerdFontIcons*(): IconPack =
   IconPack(
-    play: "\uF04B", pause: "\uF04C", stop: "\uF04D",
+    play: " \uF04B ", pause: " \uF04C ", stop: " \uF04D ",
     nextTrack: "\uF050", prevTrack: "\uF049",
     volumeHigh: "\uF028", volumeMedium: "\uF027", volumeLow: "\uF026", volumeMuted: "\uF6A9",
     music: "\uF001", artist: "\uF007", album: "\uF0A0", playlist: "\uF0CA",
-    search: "\uF002", heart: "\uF004", shuffle: "\uF049D", repeatOne: "\uF0B6", repeatAll: "\uF01E",
+    search: "\uF002", heart: "\uF004", shuffle: " \uF049D ", repeatOne: " \uF0B6 ", repeatAll: " \uF01E ",
     queue: "\uF0C9", library: "\uF02D", settings: "\uF013", help: "\uF059",
     checkmark: "\uF00C", cross: "\uF00D", arrowUp: "\uF062", arrowDown: "\uF063", arrowLeft: "\uF060", arrowRight: "\uF061",
     musicNote: "\uF3B5", disk: "\uF0A0", headphone: "\uF025", speaker: "\uF028",
@@ -28,11 +28,11 @@ proc nerdFontIcons*(): IconPack =
 
 proc emojiIcons*(): IconPack =
   IconPack(
-    play: "\u25B6", pause: "\u23F8", stop: "\u23F9",
+    play: " \u25B6 ", pause: " \u23F8 ", stop: " \u23F9 ",
     nextTrack: "\u23ED", prevTrack: "\u23EE",
     volumeHigh: "\U0001F50A", volumeMedium: "\U0001F509", volumeLow: "\U0001F508", volumeMuted: "\U0001F507",
     music: "\U0001F3B5", artist: "\U0001F464", album: "\U0001F4BF", playlist: "\U0001F4CB",
-    search: "\U0001F50D", heart: "\u2764", shuffle: "\U0001F500", repeatOne: "\U0001F502", repeatAll: "\U0001F501",
+    search: "\U0001F50D", heart: "\u2764", shuffle: " \U0001F500 ", repeatOne: " \U0001F502 ", repeatAll: " \U0001F501 ",
     queue: "\U0001F4DC", library: "\U0001F4DA", settings: "\u2699", help: "\u2753",
     checkmark: "\u2714", cross: "\u274C", arrowUp: "\u2B06", arrowDown: "\u2B07", arrowLeft: "\u2B05", arrowRight: "\u27A1",
     musicNote: "\u266B", disk: "\U0001F4BF", headphone: "\U0001F3A7", speaker: "\U0001F509",
