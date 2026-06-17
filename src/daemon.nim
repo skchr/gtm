@@ -595,12 +595,13 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
       emitMprisSeeked(pos)
   of dckNext:
     d.autoAdvancing = false
-    if not d.advanceToNextTrack(true):
+    if d.advanceToNextTrack(true):
+      d.sendQueueEvent()
+      d.pushFullState()
+      when defined(useMpris):
+        emitMprisPlayerChanged(d)
+    else:
       result = %*{"ok": false, "error": "no next track"}
-    d.sendQueueEvent()
-    d.pushFullState()
-    when defined(useMpris):
-      emitMprisPlayerChanged(d)
   of dckPrev:
     d.autoAdvancing = false
     var prevPath = ""
@@ -914,6 +915,10 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
         result["queue_length"] = %d.playbackQueue.len
         d.regenShuffleIfNeeded()
         d.sendQueueEvent()
+        if d.player != nil and d.player.state == 0 and d.playbackQueue.len > 0:
+          if d.advanceToNextTrack(true):
+            d.sendQueueEvent()
+            d.pushFullState()
       except: stderr.writeLine("[gtm] queueAdd error: " & getCurrentExceptionMsg())
   of dckQueueRemove:
     if cmd.intArg >= 0 and cmd.intArg < d.playbackQueue.len:
@@ -1351,6 +1356,9 @@ proc runDaemon*() =
     ytPlaylistActive: false,
     ytPlaylistBuf: "",
     ytPlaylistUrl: "",
+    ytSearchResults: @[],
+    ytDownloadTasks: @[],
+    lastConsumedFromQueue: @[],
     lastTrackDuration: 0.0
   )
   when defined(useMpris):
@@ -1491,7 +1499,7 @@ proc runDaemon*() =
                 if not daemon.running: break
         ci.inc
     try:
-      let daemonEvents = daemon.player.pollEvents()
+      let daemonEvents = if daemon.player != nil: daemon.player.pollEvents() else: @[]
       if daemonEvents.len > 0 and daemon.clients.len > 0:
         let evJson = %*{"events": serializeEvents(daemonEvents, daemon)}
         daemon.broadcastAll($evJson & "\n")

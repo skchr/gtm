@@ -10,7 +10,7 @@
 # No CI/CD is set up yet — ask the maintainer to publish builds before using.
 set -eu
 
-REPO="skchr/gtm"
+REPO="prjctimg/gtm"
 VERSION="${VERSION:-latest}"
 PREFIX="${PREFIX:-$HOME/.local}"
 
@@ -19,18 +19,24 @@ OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
 
 case "$OS" in
-  linux) ;;
-  darwin) ;;
-  *) echo "gtm: unsupported OS '$OS' (expected linux or darwin)"; exit 1 ;;
+linux) ;;
+darwin) ;;
+*)
+  echo "gtm does not support '$OS' yet. Expected Linux or Darwin"
+  exit 1
+  ;;
+
 esac
 
 case "$ARCH" in
-  x86_64|amd64)  ARCH="amd64" ;;
-  aarch64|arm64) ARCH="arm64" ;;
-  *) echo "gtm: unsupported architecture '$ARCH' (expected amd64 or arm64)"; exit 1 ;;
+x86_64 | amd64) ARCH="amd64" ;;
+aarch64 | arm64) ARCH="arm64" ;;
+*)
+  echo "gtm: unsupported architecture '$ARCH' (expected amd64 or arm64)"
+  exit 1
+  ;;
 esac
 
-# --- Determine download URL ---
 if [ "$VERSION" = "latest" ]; then
   DOWNLOAD_URL="https://github.com/$REPO/releases/latest/download/gtm-${OS}-${ARCH}.tar.gz"
 else
@@ -56,5 +62,5 @@ chmod +x "$PREFIX/bin/gtm" "$PREFIX/bin/gtmd"
 echo "gtm: done — installed successfully"
 echo "  gtm  -> $PREFIX/bin/gtm"
 echo "  gtmd -> $PREFIX/bin/gtmd"
-echo ""
 echo "Make sure $PREFIX/bin is in your \$PATH"
+echo ""

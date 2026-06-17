@@ -296,9 +296,19 @@ proc setFeedback(state: var AppState, msg: string, kind: NotificationKind = nkIn
   state.feedbackTimer = 60
   state.markDirty(ceFeedback)
 
+proc queueLog(msg: string) =
+  let cacheDir = getEnv("XDG_CACHE_HOME", getEnv("HOME", "") & "/.cache") & "/gtm"
+  if not dirExists(cacheDir): createDir(cacheDir)
+  let logPath = cacheDir / "gtm.log"
+  var f: File
+  if f.open(logPath, fmAppend):
+    f.writeLine("[" & getTime().format("yyyy-MM-dd HH:mm:ss") & "] " & msg)
+    f.close()
+
 proc playSelected(state: var AppState) =
   let track = state.getCurrentTrack()
   if track.path.len > 0:
+    queueLog("playSelected: track=" & track.path & " title=" & track.title & " id=" & $track.id)
     state.timePos = 0.0
     state.duration = 0.0
     discard state.player.loadFile(track.path, track.title, track.artist)
@@ -310,22 +320,28 @@ proc playSelected(state: var AppState) =
       let tid = DaemonClient(state.player).lastTrackId
       if tid > 0:
         state.currentPlayingId = tid
+    state.markDirtyBatch(cePlayState, ceTrack)
+    if state.duration == 0.0 and track.duration > 0:
+      state.duration = track.duration
     # Queue up remaining tracks from the current library view (all scopes)
     if state.tab == tabLibrary:
       state.playbackQueue = @[]
       state.queuePaths = @[]
       var started = false
+      var likTrackCount = 0
       for item in state.displayItems:
-        if item.kind != likTrack: continue
-        if not started and item.id == track.id:
-          started = true
-          continue
-        if started:
-          state.playbackQueue.add(item.trackIdx)
+        if item.kind == likTrack:
+          likTrackCount.inc
+          if not started and item.id == track.id:
+            started = true
+            continue
+          if started:
+            state.playbackQueue.add(item.trackIdx)
       # Sync to daemon
       if state.player of DaemonClient:
         let cli = DaemonClient(state.player)
         if cli.connected:
+          queueLog("playSelected: displayItems.len=" & $state.displayItems.len & " likTrackCount=" & $likTrackCount & " playbackQueue.len=" & $state.playbackQueue.len)
           discard daemonSimpleCmd(cli, "queue_clear")
           if state.playbackQueue.len > 0:
             var items: seq[(string, string, string)] = @[]
@@ -334,11 +350,13 @@ proc playSelected(state: var AppState) =
                 let t = state.libraryTracks[idx]
                 items.add((t.path, t.title, t.artist))
             if items.len > 0:
+              queueLog("playSelected: sending " & $items.len & " tracks to daemon queue")
               discard cli.queueAdd(items)
+          else:
+            queueLog("playSelected: queue_clear sent, no items to queue")
+      else:
+        queueLog("playSelected: player is not DaemonClient (tabLibrary but no daemon)")
       state.markDirty(ceQueue)
-    state.markDirtyBatch(cePlayState, ceTrack)
-    if state.duration == 0.0 and track.duration > 0:
-      state.duration = track.duration
 
 proc nextTrack(state: var AppState) =
   state.upNextTimer = 0
@@ -2891,12 +2909,10 @@ proc runTui(args: seq[string]) =
           ctx.data.reconnectAttempts.inc
           if not ctx.data.reconnecting:
             ctx.data.reconnecting = true
-            ctx.data.setFeedback("[Daemon disconnected — reconnecting...]", nkWarning)
             ctx.data.markDirty(ceReconnecting)
           if ctx.data.reconnectAttempts mod 30 == 0:
             cli.ensureDaemon()
             if cli.connected:
-              ctx.data.setFeedback("[Daemon reconnected]")
               let daemonState = cli.getFullState()
               fullStateSync(ctx.data, daemonState)
               if daemonState.hasKey("queue"):
@@ -2941,7 +2957,6 @@ proc runTui(args: seq[string]) =
         elif ctx.data.reconnecting:
           ctx.data.reconnecting = false
           ctx.data.reconnectAttempts = 0
-          ctx.data.setFeedback("[Daemon connected]")
 
       if ctx.data.overlay.kind == okYtSearch and ctx.data.player of DaemonClient:
         let cli = DaemonClient(ctx.data.player)
@@ -3045,6 +3060,12 @@ when isMainModule:
   for a in rawArgs:
     if a == "--debug":
       debugMode = true
+      let cacheDir = getEnv("XDG_CACHE_HOME", getEnv("HOME", "") & "/.cache") & "/gtm"
+      if not dirExists(cacheDir): createDir(cacheDir)
+      let debugPath = cacheDir / "debug.log"
+      var debugFile: File
+      if debugFile.open(debugPath, fmAppend):
+        discard dup2(cint(debugFile.getFileHandle), cint(2))
     else:
       args.add(a)
   if args.len > 0 and args[0] == "daemon":

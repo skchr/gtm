@@ -336,7 +336,8 @@ when defined(useFFmpeg):
     let nowPlaying = ffmpeg_mixer_is_playing(b.ctx) != 0
     let nowTime = ffmpeg_mixer_get_time(b.ctx)
     let nowCrossfading = ffmpeg_mixer_is_crossfading(b.ctx) != 0
-    let nowState = if nowPlaying: 1 elif b.state != 0: 2 else: 0
+    let masterEnded = ffmpeg_mixer_master_ended(b.ctx) != 0
+    let nowState = if nowPlaying: 1 elif masterEnded: 0 elif b.state != 0: 2 else: 0
     if b.lastState == 1 and nowState == 2:
       result.add(AudioEvent(kind: evPlaybackPaused))
     elif b.lastState == 2 and nowState == 1:

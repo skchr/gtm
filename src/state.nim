@@ -1,5 +1,5 @@
 import illwave as iw
-import os, tables, sets, osproc, audio, theme, math, json, options, colors
+import os, tables, sets, osproc, audio, theme, math, json, options, colors, strutils
 
 var debugMode*: bool
 
@@ -389,8 +389,8 @@ type
     coverImageId*: int
 
 const
-  GTM_VERSION* {.strdefine.} = "0.5.4"
-  GTM_BUILD_TIME* {.strdefine.} = ""
+  GTM_VERSION* {.strdefine.} = staticExec("git describe --tags --abbrev=0 2>/dev/null").strip
+  GTM_BUILD_TIME* {.strdefine.} = staticExec("date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null").strip
 
   FooterPresets*: Table[FooterPresetName, set[FooterModule]] = {
     fpnMinimal:   {fmPlayStatus},

@@ -45,20 +45,21 @@ proc buildBinary(src, label: string, version:string ) =
   if not fileExists(src):
     echo "  " & src & " not found"
     return
-  let flags = "-d:release" &
+  let flags = "-f -d:release" &
     " -d:gtmVersion:" & version &
     " -d:gtmBuildTime:"
   sh("nim c " & flags & " " & src & " 2>&1")
 
 when isMainModule:
-  var buildTui = true
-  var buildDmd = true
-  if paramCount() > 0:
-    buildTui = false
-    buildDmd = false
-    for i in 1..paramCount():
-      if paramStr(i) == "-t": buildTui = true
-      if paramStr(i) == "-d": buildDmd = true
+  var buildTui = false
+  var buildDmd = false
+  for i in 1..paramCount():
+    let p = paramStr(i)
+    if p == "-t": buildTui = true
+    if p == "-d": buildDmd = true
+  if not buildTui and not buildDmd:
+    buildTui = true
+    buildDmd = true
 
   echo ""
   echo "build gtm"

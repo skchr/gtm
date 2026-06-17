@@ -581,6 +581,8 @@ typedef struct {
   int               crossfade_curve; /* 0=equal-power, 1=quadratic, 2=cubic, 3=asymmetric */
   volatile int      priming;        /* accumulate frames before first write */
   int               prime_target;   /* samples to accumulate before writing */
+  volatile int      fade_out_remaining;
+  int               fade_out_total;
   Equalizer         eq;
 } MixerCtx;
 
@@ -744,6 +746,26 @@ static void* mixer_thread(void* arg) {
         if (mx->volume != 1.0f)
           for (int i = 0; i < nsamples; i++) mixbuf[i] *= mx->volume;
 
+        // Apply pause fade-out
+        if (mx->fade_out_remaining > 0) {
+          int to_fade = nsamples < mx->fade_out_remaining ? nsamples : mx->fade_out_remaining;
+          for (int i = 0; i < nsamples; i++) {
+            if (i < to_fade) {
+              float gain = (float)mx->fade_out_remaining / mx->fade_out_total;
+              mixbuf[i] *= gain;
+              mx->fade_out_remaining--;
+            } else {
+              mixbuf[i] = 0.0f;
+            }
+          }
+          if (mx->fade_out_remaining <= 0) {
+            mx->paused = 1;
+            mx->playing = 0;
+            if (mx->alsa_open) { snd_pcm_drop(mx->alsa_handle); snd_pcm_prepare(mx->alsa_handle); }
+            continue;
+          }
+        }
+
         if (mx->alsa_open) {
           int fw = snd_pcm_writei(mx->alsa_handle, mixbuf, nsamples / ch);
           if (fw < 0) snd_pcm_recover(mx->alsa_handle, fw, 1);
@@ -794,10 +816,30 @@ static void* mixer_thread(void* arg) {
       // Apply EQ to master output
       eq_apply(&mx->eq, mbuf, mtotal);
       // Apply volume
-      if (mx->volume != 1.0f)
-        for (int i = 0; i < mtotal; i++) mbuf[i] *= mx->volume;
+        if (mx->volume != 1.0f)
+          for (int i = 0; i < mtotal; i++) mbuf[i] *= mx->volume;
 
-      if (mx->alsa_open && mx->priming) {
+        // Apply pause fade-out
+        if (mx->fade_out_remaining > 0) {
+          int to_fade = mtotal < mx->fade_out_remaining ? mtotal : mx->fade_out_remaining;
+          for (int i = 0; i < mtotal; i++) {
+            if (i < to_fade) {
+              float gain = (float)mx->fade_out_remaining / mx->fade_out_total;
+              mbuf[i] *= gain;
+              mx->fade_out_remaining--;
+            } else {
+              mbuf[i] = 0.0f;
+            }
+          }
+          if (mx->fade_out_remaining <= 0) {
+            mx->paused = 1;
+            mx->playing = 0;
+            if (mx->alsa_open) { snd_pcm_drop(mx->alsa_handle); snd_pcm_prepare(mx->alsa_handle); }
+            continue;
+          }
+        }
+
+        if (mx->alsa_open && mx->priming) {
         // Accumulate samples to prevent ALSA underrun on slow streams
         if (prime_filled + mtotal > prime_cap) {
           prime_cap = prime_filled + mtotal + 4096;
@@ -860,6 +902,8 @@ MixerCtx* ffmpeg_mixer_init(void) {
   mx->volume = 1.0f;
   mx->priming = 0;
   mx->prime_target = 8192; /* ~93ms at 44100Hz stereo */
+  mx->fade_out_remaining = 0;
+  mx->fade_out_total = 0;
   avformat_network_init();
   return mx;
 }
@@ -913,6 +957,7 @@ void ffmpeg_mixer_start(MixerCtx* mx) {
   mx->playing = 1;
   mx->paused = 0;
   mx->priming = 1;
+  mx->fade_out_remaining = 0;
   if (!mx->thread_started) {
     mx->thread_stop = 0;
     pthread_create(&mx->decode_thread, NULL, mixer_thread, mx);
@@ -922,9 +967,11 @@ void ffmpeg_mixer_start(MixerCtx* mx) {
 
 void ffmpeg_mixer_pause(MixerCtx* mx) {
   if (!mx) return;
-  mx->playing = 0;
-  mx->paused = 1;
-  if (mx->alsa_open) { snd_pcm_drop(mx->alsa_handle); snd_pcm_prepare(mx->alsa_handle); }
+  if (mx->playing && !mx->paused && mx->fade_out_remaining <= 0) {
+    mx->fade_out_remaining = 4410; /* ~50ms at 44100Hz stereo */
+    mx->fade_out_total = 4410;
+    mx->priming = 0;
+  }
 }
 
 void ffmpeg_mixer_stop(MixerCtx* mx) {
@@ -937,6 +984,7 @@ void ffmpeg_mixer_stop(MixerCtx* mx) {
   mx->crossfade_active = 0;
   mx->crossfade_reverse = 0;
   mx->priming = 0;
+  mx->fade_out_remaining = 0;
 }
 
 void ffmpeg_mixer_start_crossfade(MixerCtx* mx, int duration_frames, int reverse) {
