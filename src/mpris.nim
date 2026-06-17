@@ -296,7 +296,7 @@ proc mprisHandlePlayerMethod(conn: ptr DBusConnection, msg: ptr DBusMessage, d: 
         d.player.startCrossfade(float(d.crossfadeDuration))
         d.currentTrackPath = prevPath
       else:
-        d.player.stop(); d.player.loadFile(prevPath); d.currentTrackPath = prevPath; d.player.play()
+        d.player.stop(); discard d.player.loadFile(prevPath); d.currentTrackPath = prevPath; d.player.play()
       d.idleFrames = 0
     else: d.player.stop(); d.idleFrames = 0
     d.sendQueueEvent()
@@ -329,7 +329,7 @@ proc mprisHandlePlayerMethod(conn: ptr DBusConnection, msg: ptr DBusMessage, d: 
         if d.currentTrackPath.len > 0 and d.currentTrackPath != path:
           d.trackHistory.add(d.currentTrackPath)
           if d.trackHistory.len > 50: d.trackHistory.delete(0)
-        d.player.stop(); d.player.loadFile(path)
+        d.player.stop(); discard d.player.loadFile(path)
         d.currentTrackPath = path; d.currentTrackTitle = ""; d.currentTrackChannel = ""
         d.player.play(); d.idleFrames = 0
         if d.lib != nil:

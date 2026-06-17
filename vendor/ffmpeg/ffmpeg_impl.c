@@ -754,6 +754,7 @@ static void* mixer_thread(void* arg) {
             mx->slave = NULL;
             mx->slave_loaded = 0;
             mx->master_ended = 0;
+            mx->master_duration = mx->master->duration;
             ffmpeg_audio_uninit(old);
             // Reopen ALSA for new master's sample rate/channels
             mixer_alsa_close(mx);
@@ -826,6 +827,7 @@ static void* mixer_thread(void* arg) {
   av_frame_free(&mframe);
   av_packet_free(&spkt);
   av_frame_free(&sframe);
+  mx->thread_started = 0;
   free(mbuf); free(sbuf); free(mixbuf); free(prime_buf);
   return NULL;
 }
@@ -1009,6 +1011,60 @@ int ffmpeg_mixer_set_eq_band(MixerCtx* mx, int band, float gain_db) {
   if (mx->eq.sample_rate != sr) eq_init(&mx->eq, sr);
   eq_set_band(&mx->eq, band, gain_db);
   return 1;
+}
+
+// === Album cover extraction ===
+
+int ffmpeg_extract_cover(const char* path, unsigned char** out_data, unsigned int* out_size, char** out_mime) {
+  AVFormatContext* fmt_ctx = NULL;
+  *out_data = NULL;
+  *out_size = 0;
+  if (out_mime) *out_mime = NULL;
+
+  int ret = avformat_open_input(&fmt_ctx, path, NULL, NULL);
+  if (ret < 0) return 0;
+  ret = avformat_find_stream_info(fmt_ctx, NULL);
+  if (ret < 0) { avformat_close_input(&fmt_ctx); return 0; }
+
+  for (unsigned i = 0; i < fmt_ctx->nb_streams; i++) {
+    AVStream* st = fmt_ctx->streams[i];
+    if (st->disposition & AV_DISPOSITION_ATTACHED_PIC) {
+      AVPacket* pkt = &st->attached_pic;
+      if (pkt->size > 0 && pkt->data) {
+        *out_data = malloc(pkt->size);
+        if (!*out_data) { avformat_close_input(&fmt_ctx); return 0; }
+        memcpy(*out_data, pkt->data, pkt->size);
+        *out_size = pkt->size;
+
+        if (out_mime) {
+          // Detect MIME type from magic bytes
+          if (pkt->size >= 3 && pkt->data[0] == 0xFF && pkt->data[1] == 0xD8 && pkt->data[2] == 0xFF)
+            *out_mime = strdup("image/jpeg");
+          else if (pkt->size >= 4 && pkt->data[0] == 0x89 && pkt->data[1] == 'P' && pkt->data[2] == 'N' && pkt->data[3] == 'G')
+            *out_mime = strdup("image/png");
+          else if (pkt->size >= 12 && pkt->data[0] == 'R' && pkt->data[1] == 'I' && pkt->data[2] == 'F' && pkt->data[3] == 'F' &&
+                   pkt->data[8] == 'W' && pkt->data[9] == 'E' && pkt->data[10] == 'B' && pkt->data[11] == 'P')
+            *out_mime = strdup("image/webp");
+          else
+            *out_mime = strdup("image/jpeg"); // best guess
+        }
+        avformat_close_input(&fmt_ctx);
+        return 1;
+      }
+    }
+    // Also check for video stream that might be album art (some formats embed it differently)
+    if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && i > 0) {
+      // Not a cover — skip; we only want attached_pic
+      continue;
+    }
+  }
+  avformat_close_input(&fmt_ctx);
+  return 0;
+}
+
+void ffmpeg_free_cover_data(unsigned char* data, char* mime) {
+  if (data) free(data);
+  if (mime) free(mime);
 }
 
 int ffmpeg_mixer_set_eq_preset(MixerCtx* mx, const char* name) {

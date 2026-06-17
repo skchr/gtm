@@ -132,6 +132,10 @@ proc drainEventLines(cli: DaemonClient, buf: var string) =
             ev.metadata["results"] = $evJson["results"]
           if evJson.hasKey("tracks"):
             ev.metadata["tracks"] = $evJson["tracks"]
+          if evJson.hasKey("shuffle"):
+            ev.metadata["shuffle"] = $(evJson["shuffle"].getBool(false))
+          if evJson.hasKey("repeat"):
+            ev.metadata["repeat"] = $(evJson["repeat"].getInt(0))
         else: discard
         cli.drainedEvents.add(ev)
     except:
@@ -213,9 +217,9 @@ proc sendAsync*(cli: DaemonClient, cmd: JsonNode, callback: proc(resp: JsonNode)
   except:
     discard
 
-method loadFile*(cli: DaemonClient, path: string, title: string = "", channel: string = "", thumbnail: string = ""): bool =
+method loadFile*(cli: DaemonClient, path: string, title: string = "", channel: string = ""): bool =
   cli.ensureDaemon()
-  let resp = sendDaemonCmd(cli, %*{"cmd": "load_file", "path": path, "title": title, "channel": channel, "thumbnail": thumbnail})
+  let resp = sendDaemonCmd(cli, %*{"cmd": "load_file", "path": path, "title": title, "channel": channel})
   cli.lastTrackId = 0
   if resp.hasKey("track_id"):
     cli.lastTrackId = resp["track_id"].getInt().int64
@@ -269,6 +273,10 @@ method setEqBand*(cli: DaemonClient, band: int, gainDb: float) =
 method setEqPreset*(cli: DaemonClient, name: string) =
   cli.ensureDaemon()
   cli.sendOnly(%*{"cmd": "set_eq_preset", "name": name})
+
+method setCrossfadeDuration*(cli: DaemonClient, duration: int) =
+  cli.ensureDaemon()
+  cli.sendOnly(%*{"cmd": "set_crossfade_duration", "duration": duration})
 
 method setCrossfadeCurve*(cli: DaemonClient, curveType: int) =
   cli.ensureDaemon()
@@ -335,6 +343,10 @@ method pollEvents*(cli: DaemonClient): seq[AudioEvent] =
               ev.metadata["results"] = $evJson["results"]
             if evJson.hasKey("tracks"):
               ev.metadata["tracks"] = $evJson["tracks"]
+            if evJson.hasKey("shuffle"):
+              ev.metadata["shuffle"] = $(evJson["shuffle"].getBool(false))
+            if evJson.hasKey("repeat"):
+              ev.metadata["repeat"] = $(evJson["repeat"].getInt(0))
           else: discard
           result.add(ev)
       elif json.hasKey("state"):
@@ -559,6 +571,10 @@ proc ytGetSearchHistory*(cli: DaemonClient): JsonNode =
 proc ytClearSearchHistory*(cli: DaemonClient): JsonNode =
   cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "yt_clear_search_history"})
+
+proc getCoverArt*(cli: DaemonClient, path: string): JsonNode =
+  cli.ensureDaemon()
+  sendDaemonCmd(cli, %*{"cmd": "get_cover_art", "path": path})
 
 proc getEqPresets*(cli: DaemonClient): JsonNode =
   cli.ensureDaemon()

@@ -33,7 +33,7 @@ type
     backendType*: AudioBackendType
     working*: bool
 
-method loadFile*(b: AudioBackend, path: string, title: string = "", channel: string = "", thumbnail: string = ""): bool {.base.} = false
+method loadFile*(b: AudioBackend, path: string, title: string = "", channel: string = ""): bool {.base.} = false
 method play*(b: AudioBackend) {.base.} = discard
 method pause*(b: AudioBackend) {.base.} = discard
 method stop*(b: AudioBackend) {.base.} = discard
@@ -73,7 +73,21 @@ when defined(useFFmpeg):
   proc ffmpeg_audio_is_playing(ctx: FfmpegCtx): cint {.importc.}
   proc ffmpeg_audio_read_pcm(ctx: FfmpegCtx, output: ptr float32, count: cint): cint {.importc.}
   proc ffmpeg_audio_get_metadata(ctx: FfmpegCtx, title, artist, album: ptr cstring, duration: ptr cdouble) {.importc.}
+  proc ffmpeg_extract_cover(path: cstring, outData: ptr pointer, outSize: ptr cuint, outMime: ptr cstring): cint {.importc.}
+  proc ffmpeg_free_cover_data(data: pointer, mime: cstring) {.importc.}
 
+  proc extractCoverArt*(path: string): tuple[data: seq[byte], mime: string] =
+    var outData: pointer
+    var outSize: cuint
+    var outMime: cstring
+    if ffmpeg_extract_cover(path.cstring, addr outData, addr outSize, addr outMime) != 0:
+      if outData != nil and outSize > 0:
+        var bytes = newSeq[byte](outSize)
+        copyMem(addr bytes[0], outData, outSize)
+        let mime = if outMime != nil: $outMime else: "image/jpeg"
+        ffmpeg_free_cover_data(outData, outMime)
+        return (bytes, mime)
+      if outMime != nil: ffmpeg_free_cover_data(nil, outMime)
 
   proc ffmpeg_mixer_init(): FfmpegCtx {.importc.}
   proc ffmpeg_mixer_uninit(ctx: FfmpegCtx) {.importc.}
@@ -112,7 +126,7 @@ when defined(useFFmpeg):
     else:
       output.setLen(0)
 
-  method loadFile*(b: FfmpegBackend, path: string, title: string = "", channel: string = "", thumbnail: string = ""): bool =
+  method loadFile*(b: FfmpegBackend, path: string, title: string = "", channel: string = ""): bool =
     b.stop()
     b.timePos = 0.0
     b.duration = 0.0
@@ -174,7 +188,7 @@ when defined(useFFmpeg):
       result.add(AudioEvent(kind: aekPlaybackStopped))
     elif b.lastState == 0 and nowState == 1:
       result.add(AudioEvent(kind: aekPlaybackStarted))
-    if nowState == 1 and abs(nowTime - b.lastTime) > 1.0:
+    if nowState == 1 and abs(nowTime - b.lastTime) > 0.25:
       result.add(AudioEvent(kind: aekPositionChanged, floatVal: nowTime))
       b.lastTime = nowTime
     b.lastPlaying = nowPlaying
@@ -237,7 +251,7 @@ when defined(useFFmpeg):
     else:
       output.setLen(0)
 
-  method loadFile*(b: MixerBackend, path: string, title: string = "", channel: string = "", thumbnail: string = ""): bool =
+  method loadFile*(b: MixerBackend, path: string, title: string = "", channel: string = ""): bool =
     b.stop()
     b.timePos = 0.0
     b.duration = 0.0
@@ -292,8 +306,10 @@ when defined(useFFmpeg):
 
   method startCrossfade*(b: MixerBackend, durationSeconds: float, reverse: bool = false) =
     if b.ctx == nil or b.duration <= 0: return
-    let sampleRate = ffmpeg_mixer_get_sample_rate(b.ctx).int
-    let frames = if sampleRate > 0: (durationSeconds * sampleRate.float32).cint else: 0
+    let sampleRate = ffmpeg_mixer_get_sample_rate(b.ctx)
+    if sampleRate <= 0: return
+    let framesFloat = durationSeconds * sampleRate.float32
+    let frames = if framesFloat <= 0.0: 0.cint else: framesFloat.cint
     if frames <= 0: return
     ffmpeg_mixer_start_crossfade(b.ctx, frames, reverse.cint)
 
@@ -328,7 +344,7 @@ when defined(useFFmpeg):
       result.add(AudioEvent(kind: aekPlaybackStopped))
     elif b.lastState == 0 and nowState == 1:
       result.add(AudioEvent(kind: aekPlaybackStarted))
-    if nowState == 1 and abs(nowTime - b.lastTime) > 1.0:
+    if nowState == 1 and abs(nowTime - b.lastTime) > 0.25:
       result.add(AudioEvent(kind: aekPositionChanged, floatVal: nowTime))
       b.lastTime = nowTime
     if nowCrossfading and not b.lastCrossfading:
@@ -337,6 +353,11 @@ when defined(useFFmpeg):
       result.add(AudioEvent(kind: aekMetadataChanged, strVal: "crossfade_ended"))
     if ffmpeg_mixer_master_ended(b.ctx) != 0 and b.lastPlaying:
       result.add(AudioEvent(kind: aekTrackEnded))
+      # After crossfade auto-promotion, the new master is already playing
+      # but no PlaybackStarted is emitted because state stays 1→1
+      if ffmpeg_mixer_is_playing(b.ctx) != 0:
+        result.add(AudioEvent(kind: aekPlaybackStarted))
+      b.duration = ffmpeg_mixer_get_duration(b.ctx)
     b.lastPlaying = nowPlaying
     b.lastCrossfading = nowCrossfading
     b.timePos = nowTime

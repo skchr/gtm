@@ -1,4 +1,4 @@
-import os, json, strutils, net, posix, random, osproc, times
+import os, json, strutils, net, posix, random, osproc, times, base64
 from nativesockets import setBlocking, selectRead, SocketHandle
 proc prctl(option: cint, arg2: cstring): cint {.importc, header: "<sys/prctl.h>".}
 import audio, state, library, ytdlp
@@ -37,7 +37,9 @@ type
     dckYtListDownloads, dckYtFetchPlaylist, dckYtFetchPlaylistPoll,
     dckYtSetConfig, dckYtGetSearchHistory, dckYtClearSearchHistory,
     dckListEqPresets,
+    dckSetCrossfadeDuration,
     dckSetCrossfadeCurve,
+    dckGetCoverArt,
     dckPing
 
   DaemonCmd* = object
@@ -62,7 +64,6 @@ type
     currentTrackPath: string
     currentTrackTitle: string
     currentTrackChannel: string
-    currentTrackThumbnail: string
     trackHistory: seq[string]
     idleFrames: int
     idleTimeout: int
@@ -118,6 +119,24 @@ type
     ytPlaylistActive: bool
     ytPlaylistResult: YtPlaylistDetail
     ytPlaylistUrl: string
+    lastTrackDuration: float
+
+proc flock(fd: cint, op: cint): cint {.importc, header: "<sys/file.h>".}
+const LOCK_EX = 2
+const LOCK_NB = 4
+
+var gPidLockFd: cint = -1
+
+proc acquirePidLock(): bool =
+  let dir = stateDir()
+  if not dirExists(dir): createDir(dir)
+  let fd = open(pidPath().cstring, O_RDWR or O_CREAT, 0o644)
+  if fd < 0: return false
+  if flock(fd, LOCK_EX or LOCK_NB) < 0:
+    discard close(fd)
+    return false
+  gPidLockFd = fd
+  result = true
 
 proc writePidFile() =
   let dir = stateDir()
@@ -154,7 +173,6 @@ proc parseDaemonCommand(line: string): DaemonCmd =
       result.kind = dckLoadFile; result.strArg = j{"path"}.getStr("")
       result.strArg2 = j{"title"}.getStr("")
       result.strArg3 = j{"channel"}.getStr("")
-      result.strArg4 = j{"thumbnail"}.getStr("")
     of "quit": result.kind = dckQuit
     of "status": result.kind = dckStatus
     of "now_playing": result.kind = dckNowPlaying
@@ -189,6 +207,8 @@ proc parseDaemonCommand(line: string): DaemonCmd =
       result.kind = dckSetEqBand; result.intArg = j{"band"}.getInt(0); result.floatArg = j{"gain_db"}.getFloat(0.0)
     of "set_eq_preset":
       result.kind = dckSetEqPreset; result.strArg = j{"name"}.getStr("")
+    of "set_crossfade_duration":
+      result.kind = dckSetCrossfadeDuration; result.intArg = j{"duration"}.getInt(0)
     of "set_crossfade_curve":
       result.kind = dckSetCrossfadeCurve; result.intArg = j{"curve_type"}.getInt(1)
     of "get_library": result.kind = dckGetLibrary
@@ -254,6 +274,8 @@ proc parseDaemonCommand(line: string): DaemonCmd =
       result.kind = dckListEqPresets
     of "ping":
       result.kind = dckPing
+    of "get_cover_art":
+      result.kind = dckGetCoverArt; result.strArg = j{"path"}.getStr("")
     else: result.kind = dckStatus
   except:
     result.kind = dckStatus
@@ -272,7 +294,6 @@ proc serializeEvents(events: seq[AudioEvent]; d: Daemon = nil): JsonNode =
         obj["track_path"] = %d.currentTrackPath
         obj["track_title"] = %d.currentTrackTitle
         obj["track_channel"] = %d.currentTrackChannel
-        obj["track_thumbnail"] = %d.currentTrackThumbnail
         obj["auto_advanced"] = %d.autoAdvancing
     of aekPlaybackPaused: obj["state"] = %"paused"
     of aekPlaybackStopped: obj["state"] = %"stopped"
@@ -401,18 +422,14 @@ proc advanceToNextTrack(d: Daemon, forward: bool = true): bool =
     # Resolve YouTube watch URLs: prefer downloaded file, fall back to stream URL
     var loadPath = nextCandidate
     if isYtWatchUrl(nextCandidate):
-      var dlPath = ""
       var dlTitle = ""
       var dlChannel = ""
       if d.lib != nil:
         let meta = d.lib.getDownloadMetaByUrl(nextCandidate)
-        dlPath = meta.path; dlTitle = meta.title; dlChannel = meta.channel
-      if dlPath.len > 0:
-        loadPath = dlPath
-        if dlTitle.len > 0:
-          d.currentTrackTitle = dlTitle
-          d.currentTrackChannel = dlChannel
-      elif d.ytStreamResolvedFor == nextCandidate and d.ytStreamResolvedUrl.len > 0:
+        dlTitle = meta.title; dlChannel = meta.channel
+        if meta.path.len > 0:
+          loadPath = meta.path
+      if d.ytStreamResolvedFor == nextCandidate and d.ytStreamResolvedUrl.len > 0:
         loadPath = d.ytStreamResolvedUrl
         # Ensure download is running in background
         var alreadyDL = false
@@ -434,6 +451,12 @@ proc advanceToNextTrack(d: Daemon, forward: bool = true): bool =
           discard startStreamUrlFetch(nextCandidate, d.ytStreamResolveProcess, d.ytCookieSource, d.ytJsRuntime)
           d.ytStreamResolving = true
         return false
+      if dlTitle.len > 0:
+        d.currentTrackTitle = dlTitle
+        d.currentTrackChannel = dlChannel
+    else:
+      # Local file — title already set from earlier metadata or defaults
+      discard
     # Consume and play
     let consumed = d.nextTrackFromQueue()
     if consumed.len == 0: return false
@@ -450,11 +473,11 @@ proc advanceToNextTrack(d: Daemon, forward: bool = true): bool =
     else:
       d.player.stop()
       if not d.player.loadFile(loadPath):
-        # File failed to load — skip it; retry loop will pick up next queue item
         return false
       d.currentTrackPath = loadPath
       d.player.play()
     d.idleFrames = 0
+    d.lastTrackDuration = 0.0
     if d.lib != nil:
       let trackId = d.lib.findTrackByPath(loadPath)
       if trackId > 0:
@@ -488,7 +511,6 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
       d.currentTrackPath = cmd.strArg
       d.currentTrackTitle = cmd.strArg2
       d.currentTrackChannel = cmd.strArg3
-      d.currentTrackThumbnail = cmd.strArg4
       d.player.play()
       d.idleFrames = 0
       # Poll events once so state reflects actual playback status
@@ -619,6 +641,9 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     d.player.setEqBand(cmd.intArg, cmd.floatArg)
   of dckSetEqPreset:
     d.player.setEqPreset(cmd.strArg)
+  of dckSetCrossfadeDuration:
+    d.crossfadeDuration = cmd.intArg
+    d.lib.setPlaybackState("crossfade_duration", $(d.crossfadeDuration))
   of dckSetCrossfadeCurve:
     d.crossfadeCurve = cmd.intArg
     d.player.setCrossfadeCurve(cmd.intArg)
@@ -742,11 +767,19 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
       d.shuffleOrder = shuffleOrder(d.playbackQueue.len)
       d.shuffleIndex = 0
     result["shuffle"] = %d.shuffleEnabled
+    if d.lib != nil:
+      d.lib.setPlaybackState("shuffle", $(d.shuffleEnabled))
+    let ev = %*{"events": [%*{"kind": %aekCustomEvent.int, "event": "shuffle_changed", "shuffle": %d.shuffleEnabled}]}
+    d.broadcastAll($ev & "\n")
     when defined(useMpris):
       emitMprisPlayerChanged(d)
   of dckSetRepeat:
     d.repeatMode = cmd.intArg
     result["repeat"] = %d.repeatMode
+    if d.lib != nil:
+      d.lib.setPlaybackState("repeat", $(d.repeatMode))
+    let ev = %*{"events": [%*{"kind": %aekCustomEvent.int, "event": "repeat_changed", "repeat": %d.repeatMode}]}
+    d.broadcastAll($ev & "\n")
     when defined(useMpris):
       emitMprisPlayerChanged(d)
   of dckSetSleepTimer:
@@ -759,7 +792,6 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     result["time_pos"] = %d.player.timePos
     result["duration"] = %d.player.duration
     result["track_path"] = %d.currentTrackPath
-    result["track_thumbnail"] = %d.currentTrackThumbnail
     if d.currentTrackPath.len > 0:
       if d.currentTrackTitle.len > 0:
         result["track_title"] = %d.currentTrackTitle
@@ -903,7 +935,6 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     result["track_path"] = %d.currentTrackPath
     result["track_title"] = %d.currentTrackTitle
     result["track_channel"] = %d.currentTrackChannel
-    result["track_thumbnail"] = %d.currentTrackThumbnail
     result["track_album"] = %d.player.metadata.album
     result["crossfading"] = %d.player.getStatusFlags().crossfading
     result["master_ended"] = %d.player.getStatusFlags().masterEnded
@@ -1062,6 +1093,14 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
       d.lib.clearSearchHistory()
   of dckListEqPresets:
     result["presets"] = %["Flat", "Rock", "Pop", "Classical", "Jazz", "HipHop", "Vocal", "BassBoost", "Headphones", "Laptop", "Electronic", "Acoustic", "Podcast", "Dance"]
+  of dckGetCoverArt:
+    if cmd.strArg.len > 0 and fileExists(cmd.strArg):
+      let (coverData, coverMime) = extractCoverArt(cmd.strArg)
+      if coverData.len > 0:
+        result["cover_data"] = %encode(coverData)
+        result["cover_mime"] = %coverMime
+    else:
+      result["cover_data"] = %""
   of dckPing:
     result["pong"] = %true
 
@@ -1122,6 +1161,9 @@ proc runDaemon*() =
       discard dup2(cint(crashFd), cint(1))
       discard dup2(cint(crashFd), cint(2))
   discard prctl(15.cint, "gtmd")
+  if not acquirePidLock():
+    stderr.writeLine("[gtmd] Another daemon instance is already running")
+    quit(1)
   writePidFile()
   setupSignalHandlers()
   var player: AudioBackend
@@ -1151,8 +1193,8 @@ proc runDaemon*() =
     trackHistory: @[],
     shuffleOrder: @[],
     shuffleIndex: 0,
-    crossfadeDuration: 0,
-    crossfadeCurve: 1,
+    crossfadeDuration: 6,
+    crossfadeCurve: 3,
     crossfadePrepared: false,
     crossfadeStarted: false,
     crossfadeNextPath: "",
@@ -1172,7 +1214,8 @@ proc runDaemon*() =
     ytLastCompletedUrl: "",
     ytPlaylistActive: false,
     ytPlaylistBuf: "",
-    ytPlaylistUrl: ""
+    ytPlaylistUrl: "",
+    lastTrackDuration: 0.0
   )
   when defined(useMpris):
     initMpris(daemon)
@@ -1313,43 +1356,58 @@ proc runDaemon*() =
                   break
                 if not daemon.running: break
         ci.inc
-    let daemonEvents = daemon.player.pollEvents()
-    if daemonEvents.len > 0 and daemon.clients.len > 0:
-      let evJson = %*{"events": serializeEvents(daemonEvents, daemon)}
-      daemon.broadcastAll($evJson & "\n")
-    # Reset auto-advance flag after playback started event is broadcast
-    for ev in daemonEvents:
-      if ev.kind == aekPlaybackStarted:
-        daemon.autoAdvancing = false
-    # Auto-advance on track ended
-    for ev in daemonEvents:
-      if ev.kind == aekTrackEnded:
-        if daemon.crossfadeNextPath.len > 0:
-          daemon.currentTrackPath = daemon.crossfadeNextPath
-          daemon.upNextSent = false
-          if daemon.lib != nil:
-            let cfId = daemon.lib.findTrackByPath(daemon.crossfadeNextPath)
-            if cfId > 0:
-              daemon.lib.updatePlayCount(cfId)
-          # Consume queue now that crossfade completed
-          if daemon.repeatMode == 2:
-            daemon.crossfadeNextPath = ""
+    try:
+      let daemonEvents = daemon.player.pollEvents()
+      if daemonEvents.len > 0 and daemon.clients.len > 0:
+        let evJson = %*{"events": serializeEvents(daemonEvents, daemon)}
+        daemon.broadcastAll($evJson & "\n")
+      # Reset auto-advance flag after playback started event is broadcast
+      for ev in daemonEvents:
+        if ev.kind == aekPlaybackStarted:
+          daemon.autoAdvancing = false
+      # Auto-advance on track ended
+      for ev in daemonEvents:
+        if ev.kind == aekTrackEnded:
+          if daemon.crossfadeNextPath.len > 0:
+            daemon.currentTrackPath = daemon.crossfadeNextPath
+            daemon.upNextSent = false
+            # Fetch metadata for the crossfaded track
+            if daemon.lib != nil and isYtWatchUrl(daemon.crossfadeNextPath):
+              let meta = daemon.lib.getDownloadMetaByUrl(daemon.crossfadeNextPath)
+              if meta.title.len > 0:
+                daemon.currentTrackTitle = meta.title
+                daemon.currentTrackChannel = meta.channel
+            elif daemon.lib != nil:
+              let cfId = daemon.lib.findTrackByPath(daemon.crossfadeNextPath)
+              if cfId > 0:
+                daemon.lib.updatePlayCount(cfId)
+            # Consume queue now that crossfade completed
+            if daemon.repeatMode == 2:
+              daemon.crossfadeNextPath = ""
+              daemon.crossfadePrepared = false
+              daemon.crossfadeConsumed = false
+            elif not daemon.shuffleEnabled and daemon.playbackQueue.len > 0:
+              daemon.playbackQueue.delete(0)
+              if daemon.repeatMode == 1:
+                daemon.playbackQueue.add(daemon.crossfadeNextPath)
             daemon.crossfadePrepared = false
+            daemon.crossfadeStarted = false
             daemon.crossfadeConsumed = false
-          elif not daemon.shuffleEnabled and daemon.playbackQueue.len > 0:
-            daemon.playbackQueue.delete(0)
-            if daemon.repeatMode == 1:
-              daemon.playbackQueue.add(daemon.crossfadeNextPath)
-          daemon.crossfadePrepared = false
-          daemon.crossfadeStarted = false
-          daemon.crossfadeConsumed = false
-          daemon.crossfadeNextPath = ""
-          daemon.sendQueueEvent()
-        elif daemon.playbackQueue.len > 0:
-          discard daemon.advanceToNextTrack(true)
-          daemon.sendQueueEvent()
-        when defined(useMpris):
-          emitMprisPlayerChanged(daemon)
+            daemon.crossfadeNextPath = ""
+            daemon.sendQueueEvent()
+          elif daemon.playbackQueue.len > 0:
+            discard daemon.advanceToNextTrack(true)
+            daemon.sendQueueEvent()
+          when defined(useMpris):
+            emitMprisPlayerChanged(daemon)
+      # Monitor duration changes — broadcast if duration becomes known during playback (e.g. streams)
+      let currentDur = daemon.player.duration
+      if currentDur > 0 and abs(currentDur - daemon.lastTrackDuration) > 0.5:
+        daemon.lastTrackDuration = currentDur
+        let durEv = %*{"events": [%*{"kind": %aekDurationChanged.int, "duration": %currentDur}]}
+        daemon.broadcastAll($durEv & "\n")
+    except Exception as ex:
+      if debugMode: stderr.writeLine("[gtmd] event processing error: " & ex.msg)
 
     # yt-dlp download task management (poll BEFORE retry so completed downloads are visible)
     let dlTimeout = 600.0
@@ -1460,9 +1518,12 @@ proc runDaemon*() =
         daemon.broadcastAll($ev & "\n")
 
     # Retry advancing if player stopped with items pending (e.g. waiting for YT download)
-    if daemon.currentTrackPath.len > 0 and daemon.player.state == 0 and daemon.playbackQueue.len > 0:
-      if daemon.advanceToNextTrack(true):
-        daemon.sendQueueEvent()
+    try:
+      if daemon.currentTrackPath.len > 0 and daemon.player.state == 0 and daemon.playbackQueue.len > 0:
+        if daemon.advanceToNextTrack(true):
+          daemon.sendQueueEvent()
+    except Exception as ex:
+      if debugMode: stderr.writeLine("[gtmd] retry advance error: " & ex.msg)
 
     # Determine next queue path for up_next and crossfade scheduling
     var nextQueuedPath = ""
@@ -1473,48 +1534,54 @@ proc runDaemon*() =
         nextQueuedPath = daemon.playbackQueue[0]
 
     # Send "up_next" notification when near end of current track
-    if nextQueuedPath.len > 0 and not daemon.upNextSent:
-      let dur = daemon.player.duration
-      let tpos = daemon.player.timePos
-      if dur > 0.0 and tpos >= 0.0:
-        let timeRemaining = dur - tpos
-        if timeRemaining <= 8.0 and timeRemaining > 0.0:
-          daemon.upNextSent = true
-          var nextTitle = ""; var nextChannel = ""
-          if isYtWatchUrl(nextQueuedPath) and daemon.lib != nil:
-            let meta = daemon.lib.getDownloadMetaByUrl(nextQueuedPath)
-            nextTitle = meta.title; nextChannel = meta.channel
-          let ev = %*{"events": [%*{"kind": %aekCustomEvent.int, "event": "up_next",
-            "next_path": %nextQueuedPath, "next_title": %nextTitle, "next_channel": %nextChannel}]}
-          daemon.broadcastAll($ev & "\n")
-
-    # Crossfade scheduling
-    if daemon.player.state == 1 and daemon.crossfadeDuration > 0:
-      if nextQueuedPath.len > 0:
+    try:
+      if nextQueuedPath.len > 0 and not daemon.upNextSent:
         let dur = daemon.player.duration
         let tpos = daemon.player.timePos
         if dur > 0.0 and tpos >= 0.0:
           let timeRemaining = dur - tpos
-          if timeRemaining > 0.0:
-            let prepareThreshold = float(daemon.crossfadeDuration) + 2.0
-            if not daemon.crossfadePrepared and timeRemaining <= prepareThreshold:
-              var loadNextPath = nextQueuedPath
-              if isYtWatchUrl(nextQueuedPath) and daemon.lib != nil:
-                let meta = daemon.lib.getDownloadMetaByUrl(nextQueuedPath)
-                if meta.path.len > 0:
-                  loadNextPath = meta.path
-                elif daemon.ytStreamResolvedFor == nextQueuedPath and daemon.ytStreamResolvedUrl.len > 0:
-                  loadNextPath = daemon.ytStreamResolvedUrl
-              daemon.player.prepareNext(loadNextPath)
-              daemon.crossfadePrepared = true
-              daemon.crossfadeNextPath = loadNextPath
-            if daemon.crossfadePrepared and not daemon.crossfadeStarted and timeRemaining <= float(daemon.crossfadeDuration):
-              daemon.upNextSent = true
-              if daemon.shuffleEnabled and not daemon.crossfadeConsumed:
-                daemon.crossfadeConsumed = true
-                daemon.shuffleIndex.inc
-              daemon.player.startCrossfade(float(daemon.crossfadeDuration))
-              daemon.crossfadeStarted = true
+          if timeRemaining <= 8.0 and timeRemaining > 0.0:
+            daemon.upNextSent = true
+            var nextTitle = ""; var nextChannel = ""
+            if isYtWatchUrl(nextQueuedPath) and daemon.lib != nil:
+              let meta = daemon.lib.getDownloadMetaByUrl(nextQueuedPath)
+              nextTitle = meta.title; nextChannel = meta.channel
+            let ev = %*{"events": [%*{"kind": %aekCustomEvent.int, "event": "up_next",
+              "next_path": %nextQueuedPath, "next_title": %nextTitle, "next_channel": %nextChannel}]}
+            daemon.broadcastAll($ev & "\n")
+    except Exception as ex:
+      if debugMode: stderr.writeLine("[gtmd] up_next error: " & ex.msg)
+
+    # Crossfade scheduling
+    try:
+      if daemon.player.state == 1 and daemon.crossfadeDuration > 0:
+        if nextQueuedPath.len > 0:
+          let dur = daemon.player.duration
+          let tpos = daemon.player.timePos
+          if dur > 0.0 and tpos >= 0.0:
+            let timeRemaining = dur - tpos
+            if timeRemaining > 0.0:
+              let prepareThreshold = float(daemon.crossfadeDuration) + 2.0
+              if not daemon.crossfadePrepared and timeRemaining <= prepareThreshold:
+                var loadNextPath = nextQueuedPath
+                if isYtWatchUrl(nextQueuedPath) and daemon.lib != nil:
+                  let meta = daemon.lib.getDownloadMetaByUrl(nextQueuedPath)
+                  if meta.path.len > 0:
+                    loadNextPath = meta.path
+                  elif daemon.ytStreamResolvedFor == nextQueuedPath and daemon.ytStreamResolvedUrl.len > 0:
+                    loadNextPath = daemon.ytStreamResolvedUrl
+                daemon.player.prepareNext(loadNextPath)
+                daemon.crossfadePrepared = true
+                daemon.crossfadeNextPath = loadNextPath
+              if daemon.crossfadePrepared and not daemon.crossfadeStarted and timeRemaining <= float(daemon.crossfadeDuration):
+                daemon.upNextSent = true
+                if daemon.shuffleEnabled and not daemon.crossfadeConsumed:
+                  daemon.crossfadeConsumed = true
+                  daemon.shuffleIndex.inc
+                daemon.player.startCrossfade(float(daemon.crossfadeDuration))
+                daemon.crossfadeStarted = true
+    except Exception as ex:
+      if debugMode: stderr.writeLine("[gtmd] crossfade error: " & ex.msg)
     # Background scan: process up to 10 files per iteration
     if daemon.scanningDir.len > 0 and daemon.scanningFiles.len > 0:
       let batchEnd = min(daemon.scanningIdx + 10, daemon.scanningFiles.len)

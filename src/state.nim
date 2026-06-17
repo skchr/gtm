@@ -139,7 +139,6 @@ type
     url*: string
     duration*: string
     channel*: string
-    thumbnail*: string
     playlistTitle*: string
     kind*: YtSearchResultKind
 
@@ -147,7 +146,6 @@ type
     title*: string
     url*: string
     channel*: string
-    thumbnail*: string
     trackCount*: int
     tracks*: seq[YtSearchResult]
 
@@ -216,6 +214,7 @@ type
     fmPlayStatus
     fmVolume
     fmBackend
+    fmDeviceName
     fmSelectCount
     fmTime
     fmDate
@@ -305,6 +304,7 @@ type
     feedbackMsg*: string
     feedbackTimer*: int
     playbackQueue*: seq[int]
+    queuePaths*: seq[string]
     ytDebounceAt*: float
     ytStreamPendingItem*: YtSearchResult
     ytStreamTitle*: string
@@ -322,6 +322,8 @@ type
     ytJsRuntime*: string
     ytSearchHistory*: seq[string]
     ytSearchHistoryLower*: seq[string]
+    ytSearchCache*: TableRef[string, seq[YtSearchResult]]
+    ytSearchCacheKeys*: seq[string]
     ytSearchQuery*: string
     ytSearchPage*: int
     ytSearchPageSize*: int
@@ -358,17 +360,16 @@ type
     ytPlaylistFetching*: bool
     currentPlayingTitle*: string
     currentPlayingChannel*: string
-    currentThumbnail*: string
     upNextMsg*: string
     upNextTimer*: int
     upNextScrollOffset*: int
     cursorVisible*: bool
-    artAnsi*: string
-    artAnsiLines*: int
-    artAnsiKey*: string
-    artAnsiWritten*: bool
-    artBoxX*, artBoxY*, artBoxW*, artBoxH*: int
-    artLoading*: bool
+    deviceName*: string
+    hasKittyGraphics*: bool
+    coverCache*: Table[string, string]
+    coverPendingPath*: string
+    coverFetching*: bool
+    coverImageId*: int
 
 const
   GTM_VERSION* {.strdefine.} = "0.4.7"
@@ -377,7 +378,7 @@ const
   FooterPresets*: Table[FooterPresetName, set[FooterModule]] = {
     fpnMinimal:   {fmPlayStatus},
     fpnCompact:   {fmPlayStatus, fmTime, fmBackend, fmQueueCount, fmEqPreset},
-    fpnFull:      {fmPlayStatus, fmVolume, fmBackend, fmSelectCount, fmTime, fmDate, fmRepeatShuffle, fmSleepTimer, fmQueueCount, fmEqPreset, fmCurrentPlaylist},
+    fpnFull:      {fmPlayStatus, fmVolume, fmBackend, fmDeviceName, fmSelectCount, fmTime, fmDate, fmRepeatShuffle, fmSleepTimer, fmQueueCount, fmEqPreset, fmCurrentPlaylist},
     fpnInfo:      {fmPlayStatus, fmVolume, fmBackend, fmQueueCount},
     fpnNavigator: {fmPlayStatus, fmRepeatShuffle, fmSelectCount, fmTime, fmDate},
     fpnDebug:     {fmPlayStatus, fmTime, fmDate, fmSleepTimer, fmBackend, fmVolume, fmQueueCount, fmEqPreset},
