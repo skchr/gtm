@@ -512,7 +512,10 @@ static void eq_apply(Equalizer* eq, float* data, int samples) {
 static const char* EQ_PRESET_NAMES[] = {
   "Flat", "Rock", "Pop", "Classical", "Jazz", "HipHop", "Vocal",
   "BassBoost", "Headphones", "Laptop",
-  "Electronic", "Acoustic", "Podcast", "Dance", NULL
+  "Electronic", "Acoustic", "Podcast", "Dance",
+  "Soul", "Metal", "Reggae", "Blues", "Country", "Folk",
+  "ClassicalAlt", "Speech", "Loudness", "TrebleBoost",
+  "FullBass", "Soft", "Custom", NULL
 };
 
 static const float EQ_PRESETS[][EQ_BANDS] = {
@@ -530,6 +533,19 @@ static const float EQ_PRESETS[][EQ_BANDS] = {
   { 2, 2, 1, 2, 3, 3, 2, 2, 2, 2 },          // Acoustic — slight low-mid warmth, natural top
   { -3, -2, -1, 2, 4, 5, 3, 1, 0, -1 },      // Podcast — cut rumble/sub, boost speech clarity 1-4kHz
   { 5, 4, 2, 0, -1, -1, 1, 3, 5, 5 },        // Dance — punchy low end, presence for percussion
+  { 4, 4, 3, 1, 0, 1, 2, 3, 3, 2 },          // Soul/R&B — warm bass, smooth highs
+  { 3, 4, 4, 2, 0, 2, 3, 4, 5, 4 },          // Metal — aggressive mid-high push
+  { 4, 3, 2, 1, 2, 3, 2, 1, 1, 1 },          // Reggae — emphasis on bass+mid
+  { 2, 2, 2, 4, 4, 3, 2, 2, 2, 2 },          // Blues — vocal midrange focus
+  { 1, 2, 3, 3, 3, 2, 3, 4, 4, 3 },          // Country — clean, slightly bright
+  { 2, 2, 1, 3, 4, 4, 3, 2, 1, 1 },          // Folk — natural acoustic focus
+  { 1, 1, 1, 1, 2, 3, 3, 4, 5, 5 },          // ClassicalAlt — brighter classical variant
+  { -4, -3, -2, 0, 3, 5, 4, 2, 0, -1 },      // Speech — maximum speech clarity
+  { 5, 4, 2, 1, 0, -1, 0, 2, 3, 4 },         // Loudness — Fletcher-Munson curve
+  { 0, 0, 0, 0, 0, 0, 2, 4, 6, 6 },          // TrebleBoost — high-frequency emphasis
+  { 8, 7, 5, 3, 1, 0, 0, 0, 1, 2 },          // FullBass — maximum low-end
+  { -2, -1, 0, 1, 2, 2, 1, 0, -1, -2 },      // Soft — gentle, easy listening
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },          // Custom — user-defined, flat to start
 };
 
 // --- MixerCtx for PCM crossfade ---
@@ -1052,11 +1068,9 @@ int ffmpeg_extract_cover(const char* path, unsigned char** out_data, unsigned in
         return 1;
       }
     }
-    // Also check for video stream that might be album art (some formats embed it differently)
-    if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && i > 0) {
-      // Not a cover — skip; we only want attached_pic
+    // Skip video streams that aren't attached pictures
+    if (i > 0 && st->codecpar && st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO)
       continue;
-    }
   }
   avformat_close_input(&fmt_ctx);
   return 0;

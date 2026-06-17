@@ -18,6 +18,37 @@ A terminal-based music player with tabbed interface, daemon architecture, and co
 - **Configurable**: JSON config with JSON Schema validation
 - **Remote Control**: CLI commands for daemon control (`gtm play`, `gtm pause`, etc.)
 
+## Demos
+
+| Overlay | Trigger | Recording |
+|---------|---------|-----------|
+| **Now Playing** | default view | `your-asciicast-id` |
+| **Library** | `2` | `your-asciicast-id` |
+| **Playlists** | `3` | `your-asciicast-id` |
+| **Settings** | `4` | `your-asciicast-id` |
+| **Help Overlay** | `?` / `Alt+H` | `your-asciicast-id` |
+| **About Overlay** | `Alt+A` | `your-asciicast-id` |
+| **Trash Overlay** | `Alt+T` | `your-asciicast-id` |
+| **Equalizer** | `Alt+E` | `your-asciicast-id` |
+| **EQ Presets** | `:` → "EQ Presets" | `your-asciicast-id` |
+| **Theme Picker** | `Alt+C` | `your-asciicast-id` |
+| **Command Palette** | `:` | `your-asciicast-id` |
+| **Leader Menu** | `Ctrl+L` | `your-asciicast-id` |
+| **YouTube Search** | `Alt+Y` | `your-asciicast-id` |
+| **Fuzzy Finder** | `Alt+F` | `your-asciicast-id` |
+| **Enqueue** | `Alt+I` | `your-asciicast-id` |
+| **Queue Overlay** | `Alt+Q` | `your-asciicast-id` |
+| **Playlist Input** | `Alt+P` / `a` | `your-asciicast-id` |
+| **Volume Cue** | `+` / `-` | `your-asciicast-id` |
+| **Now Playing Cue** | track change | `your-asciicast-id` |
+| **Up Next Cue** | queue advance | `your-asciicast-id` |
+
+Replace each `your-asciicast-id` with your asciinema recording ID:
+
+```markdown
+[![asciicast](https://asciinema.org/a/your-asciicast-id.svg)](https://asciinema.org/a/your-asciicast-id)
+```
+
 ## Quick Start
 
 ```bash
@@ -40,6 +71,8 @@ gtm daemon            # Start daemon manually
 | `/` | Filter items |
 | `v` | Toggle select mode |
 | `?` | Help |
+| `Alt+T` | Trash (browse/restore/delete) |
+| `Alt+X` | Delete selected tracks |
 | `q` | Quit |
 
 ## Tabs
@@ -51,9 +84,23 @@ gtm daemon            # Start daemon manually
 
 ## Installation
 
+### From source
+
 ```bash
 nim c -d:release src/gtm.nim
 cp bin/gtm ~/.local/bin/
+```
+
+### One-liner (requires published releases)
+
+```bash
+curl -sf https://raw.githubusercontent.com/skchr/gtm/main/install.sh | sh
+```
+
+Override version or prefix:
+
+```bash
+VERSION=0.5.3 PREFIX=/usr/local curl -sf https://raw.githubusercontent.com/skchr/gtm/main/install.sh | sh
 ```
 
 ## Configuration

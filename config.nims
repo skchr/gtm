@@ -9,25 +9,9 @@ switch("define", "ssl")
 let projectDir = currentSourcePath().parentDir()
 
 switch("path", projectDir / "src")
-
-proc findDepPath(name: string): string =
-  let envVar = name.toUpperAscii() & "_PATH"
-  if existsEnv(envVar):
-    return getEnv(envVar)
-  let relative = projectDir / ".." / ".." / "sources" / name / "src"
-  if dirExists(relative):
-    return relative
-  let vendorPath = projectDir / "vendor" / name
-  if dirExists(vendorPath):
-    let vendorSrc = vendorPath / "src"
-    return if dirExists(vendorSrc): vendorSrc else: vendorPath
-  for p in [getHomeDir() / ".nimble" / "pkgs", getHomeDir() / ".nimble" / "pkgs2"]:
-    for kind, dir in walkDir(p):
-      if kind == pcDir and dir.startsWith(p / name):
-        let srcDir = dir / "src"
-        if dirExists(srcDir):
-          return srcDir
-  quit("Cannot find dependency '" & name & "'. Set the " & envVar & " environment variable or install the package via nimble.")
+switch("path", projectDir / "vendor/nimwave")
+switch("path", projectDir / "vendor/illwave")
+switch("path", projectDir / "vendor/ansiutils")
 
 proc gitVersion(): string =
   when defined(release):
@@ -37,10 +21,6 @@ proc gitVersion(): string =
   if result.len == 0:
     result = "0.2.0"
 switch("define", "gtmVersion:" & gitVersion())
-
-switch("path", findDepPath("nimwave"))
-switch("path", findDepPath("illwave"))
-switch("path", findDepPath("ansiutils"))
 
 when defined(useSqlite):
   switch("passC", "-I" & projectDir / "vendor/sqlite")

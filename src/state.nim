@@ -65,7 +65,7 @@ type
     EqualizerBar*: HighlightAttr
 
   FooterPresetName* = enum
-    fpnMinimal, fpnCompact, fpnFull, fpnInfo, fpnNavigator, fpnDebug, fpnMusic, fpnClock
+    fpnMinimal, fpnCompact, fpnFull, fpnInfo, fpnNavigator, fpnDebug, fpnMusic, fpnClock, fpnCustom
 
   CrossfadeCurveType* = enum
     cctEqualPower, cctQuadratic, cctCubic, cctAsymmetric
@@ -169,6 +169,7 @@ type
     okFuzzyFinder
     okEqPresetPicker
     okTrashView
+    okFooterModulePicker
 
   YtSubTab* = enum ystAll, ystPlaylists
 
@@ -233,6 +234,7 @@ type
     fmQueueCount
     fmEqPreset
     fmCurrentPlaylist
+    fmKeyPressed
 
   SettingsCategory* = enum
     scAudio, scYouTube, scAppearance, scSystem
@@ -310,6 +312,8 @@ type
     addingToPlaylistId*: int64
     addingToPlaylistName*: string
     footerModules*: set[FooterModule]
+    footerLeftModules*: set[FooterModule]
+    footerRightModules*: set[FooterModule]
     rawKeybindingsJson*: JsonNode
     feedbackMsg*: string
     feedbackTimer*: int
@@ -427,7 +431,8 @@ const
     scAppearance: @[
       "Color theme seed. Type a name or use a preset (mocha/latte).",
       "Randomize the theme seed on each application launch.",
-      "Choose a preset layout for the status bar footer modules."
+      "Choose a preset layout for the status bar footer modules.",
+      "Individually enable/disable footer modules and assign them to left or right side."
     ],
     scSystem: @[
       "Seconds of inactivity before auto-shutdown (0 = never).",

@@ -2,39 +2,39 @@ import unittest, json, tables, strutils
 import ../src/audio, ../src/state
 
 suite "Event serialization round-trip":
-  test "construct and parse aekPositionChanged event":
+  test "construct and parse evPositionChanged event":
     let evJson = %*{"kind": 5, "time_pos": 123.5}
     let k = evJson["kind"].getInt(0)
     let kind = AudioEventKind(k)
-    check kind == aekPositionChanged
+    check kind == evPositionChanged
     check evJson["time_pos"].getFloat(0.0) == 123.5
 
-  test "construct and parse aekDurationChanged event":
+  test "construct and parse evDurationChanged event":
     let evJson = %*{"kind": 6, "duration": 245.0}
     let k = evJson["kind"].getInt(0)
     let kind = AudioEventKind(k)
-    check kind == aekDurationChanged
+    check kind == evDurationChanged
     check evJson["duration"].getFloat(0.0) == 245.0
 
-  test "construct and parse aekVolumeChanged event":
+  test "construct and parse evVolumeChanged event":
     let evJson = %*{"kind": 7, "volume": 80}
     let k = evJson["kind"].getInt(0)
     let kind = AudioEventKind(k)
-    check kind == aekVolumeChanged
+    check kind == evVolumeChanged
     check evJson["volume"].getInt(0) == 80
 
-  test "construct and parse aekPlaybackStarted event":
+  test "construct and parse evPlaybackStarted event":
     let evJson = %*{"kind": 1, "state": "playing"}
     let k = evJson["kind"].getInt(0)
     let kind = AudioEventKind(k)
-    check kind == aekPlaybackStarted
+    check kind == evPlaybackStarted
     check evJson["state"].getStr("") == "playing"
 
-  test "construct and parse aekTrackEnded event":
+  test "construct and parse evTrackEnded event":
     let evJson = %*{"kind": 4, "reason": "eof"}
     let k = evJson["kind"].getInt(0)
     let kind = AudioEventKind(k)
-    check kind == aekTrackEnded
+    check kind == evTrackEnded
     check evJson["reason"].getStr("") == "eof"
 
 suite "Event batch parsing (pollEvents style)":

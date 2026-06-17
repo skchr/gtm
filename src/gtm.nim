@@ -35,9 +35,40 @@ proc loadConfig(state: var AppState) =
       if json.hasKey("highlight_overrides"):
         state.userHighlightOverrides = json["highlight_overrides"]
       if json.hasKey("crossfade_duration"):
-        state.crossfadeDuration = json["crossfade_duration"].getInt(0)
+        state.crossfadeDuration = json["crossfade_duration"].getInt(state.crossfadeDuration)
       if json.hasKey("crossfade_curve"):
-        state.crossfadeCurve = CrossfadeCurveType(json["crossfade_curve"].getInt(1))
+        state.crossfadeCurve = CrossfadeCurveType(json["crossfade_curve"].getInt(state.crossfadeCurve.ord))
+      if json.hasKey("eq_preset"):
+        state.eqPreset = json["eq_preset"].getStr("Flat")
+      if json.hasKey("eq_bands"):
+        let arr = json["eq_bands"]
+        if arr.kind == JArray:
+          for i in 0..min(9, arr.len - 1):
+            state.eqBands[i] = arr[i].getFloat(0.0)
+      if json.hasKey("yt_js_runtime"):
+        state.ytJsRuntime = json["yt_js_runtime"].getStr("node")
+      if json.hasKey("yt_cookie_source"):
+        state.ytCookieSource = json["yt_cookie_source"].getStr("")
+      if json.hasKey("yt_cookie_file_path"):
+        state.ytCookieFilePath = json["yt_cookie_file_path"].getStr("")
+      if json.hasKey("yt_max_concurrent"):
+        state.ytMaxConcurrentDownloads = json["yt_max_concurrent"].getInt(4)
+      if json.hasKey("yt_batch_mode"):
+        state.ytBatchDownloadMode = json["yt_batch_mode"].getBool(false)
+      if json.hasKey("footer_left_modules"):
+        let arr = json["footer_left_modules"]
+        if arr.kind == JArray:
+          for v in arr:
+            try:
+              state.footerLeftModules.incl(parseEnum[FooterModule]("fm" & v.getStr("").capitalizeAscii()))
+            except: discard
+      if json.hasKey("footer_right_modules"):
+        let arr = json["footer_right_modules"]
+        if arr.kind == JArray:
+          for v in arr:
+            try:
+              state.footerRightModules.incl(parseEnum[FooterModule]("fm" & v.getStr("").capitalizeAscii()))
+            except: discard
       let refreshSeed = state.config.refreshTheme or state.config.theme == "random"
       state.theme = getTheme(state.config.theme, refreshSeed)
       state.highlightGroups = initHighlightGroups(state.theme)
@@ -63,7 +94,7 @@ proc saveConfig(state: AppState) =
   if state.configPath.len == 0: return
   let dir = state.configPath.parentDir()
   if not dirExists(dir): createDir(dir)
-  let json = %{
+  var j = %{
     "theme": %state.config.theme,
     "volume": %state.volume,
     "last_tab": %(state.tab.ord),
@@ -72,9 +103,29 @@ proc saveConfig(state: AppState) =
     "crossfade_duration": %state.crossfadeDuration,
     "crossfade_curve": %state.crossfadeCurve.ord,
     "yt_search_page_size": %state.ytSearchPageSize,
-    "ipc_timeout": %state.config.ipcTimeout
+    "ipc_timeout": %state.config.ipcTimeout,
+    "idle_timeout": %state.config.idleTimeout,
+    "eq_preset": %state.eqPreset,
+    "yt_js_runtime": %state.ytJsRuntime,
+    "yt_cookie_source": %state.ytCookieSource,
+    "yt_cookie_file_path": %state.ytCookieFilePath,
+    "yt_max_concurrent": %state.ytMaxConcurrentDownloads,
+    "yt_batch_mode": %state.ytBatchDownloadMode
   }
-  var j = json
+  # Save EQ bands
+  var eqBands = newJArray()
+  for b in state.eqBands:
+    eqBands.add(%b)
+  j["eq_bands"] = eqBands
+  # Save footer left/right module sets
+  var leftMods = newJArray()
+  for m in state.footerLeftModules:
+    leftMods.add(%($m).substr(2).toLowerAscii())
+  j["footer_left_modules"] = leftMods
+  var rightMods = newJArray()
+  for m in state.footerRightModules:
+    rightMods.add(%($m).substr(2).toLowerAscii())
+  j["footer_right_modules"] = rightMods
   if state.rawKeybindingsJson != nil:
     j["keybindings"] = state.rawKeybindingsJson
   try:
@@ -259,6 +310,32 @@ proc playSelected(state: var AppState) =
       let tid = DaemonClient(state.player).lastTrackId
       if tid > 0:
         state.currentPlayingId = tid
+    # Queue up remaining tracks from the current library view (all scopes)
+    if state.tab == tabLibrary:
+      state.playbackQueue = @[]
+      state.queuePaths = @[]
+      var started = false
+      for item in state.displayItems:
+        if item.kind != likTrack: continue
+        if not started and item.id == track.id:
+          started = true
+          continue
+        if started:
+          state.playbackQueue.add(item.trackIdx)
+      # Sync to daemon
+      if state.player of DaemonClient:
+        let cli = DaemonClient(state.player)
+        if cli.connected:
+          discard daemonSimpleCmd(cli, "queue_clear")
+          if state.playbackQueue.len > 0:
+            var items: seq[(string, string, string)] = @[]
+            for idx in state.playbackQueue:
+              if idx >= 0 and idx < state.libraryTracks.len:
+                let t = state.libraryTracks[idx]
+                items.add((t.path, t.title, t.artist))
+            if items.len > 0:
+              discard cli.queueAdd(items)
+      state.markDirty(ceQueue)
     state.markDirtyBatch(cePlayState, ceTrack)
     if state.duration == 0.0 and track.duration > 0:
       state.duration = track.duration
@@ -282,7 +359,6 @@ proc nextTrack(state: var AppState) =
             items.add((t.path, t.title, t.artist))
         if items.len > 0:
           discard cli.queueAdd(items)
-  state.player.stop()
   let nextResp = daemonSimpleCmd(DaemonClient(state.player), "next")
   if nextResp.hasKey("ok") and not nextResp["ok"].getBool(false):
     state.showNotification(nextResp{"error"}.getStr("No next track"))
@@ -333,7 +409,7 @@ proc moveSelection(state: var AppState, delta: int) =
       let maxIdx = case state.settingsCategory
         of scAudio: 3
         of scYouTube: 6
-        of scAppearance: 3
+        of scAppearance: 4
         of scSystem: 2
       state.selectIndex = max(0, min(maxIdx, state.selectIndex + delta))
     return
@@ -907,6 +983,7 @@ proc adjustSetting(state: var AppState, delta: int) =
       state.saveConfig()
     of 2: # Max Downloads
       state.ytMaxConcurrentDownloads = max(1, min(10, state.ytMaxConcurrentDownloads + delta))
+      state.saveConfig()
     of 3: # Results Per Page
       state.ytSearchPageSize = max(5, min(50, state.ytSearchPageSize + delta * 5))
       state.saveConfig()
@@ -914,6 +991,7 @@ proc adjustSetting(state: var AppState, delta: int) =
       discard
     of 5: # Batch Mode
       state.ytBatchDownloadMode = not state.ytBatchDownloadMode
+      state.saveConfig()
     of 6: # Clear Search History — action on Enter only
       discard
     else: discard
@@ -923,6 +1001,7 @@ proc adjustSetting(state: var AppState, delta: int) =
       discard
     of 1: # Refresh Theme
       state.config.refreshTheme = not state.config.refreshTheme
+      state.saveConfig()
     of 2: # Footer Preset
       let vals = [fpnMinimal, fpnCompact, fpnFull, fpnInfo, fpnNavigator, fpnDebug, fpnMusic, fpnClock]
       var i = 0
@@ -937,6 +1016,7 @@ proc adjustSetting(state: var AppState, delta: int) =
     case state.selectIndex
     of 0: # Idle Timeout
       state.config.idleTimeout = max(30, min(600, state.config.idleTimeout + delta * 30))
+      state.saveConfig()
     of 1: # Daemon IPC Timeout
       state.config.ipcTimeout = max(1, min(30, state.config.ipcTimeout + delta))
       if state.player of DaemonClient:
@@ -1548,6 +1628,34 @@ proc handleTrashOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
   if state.overlay.results.len > 0:
     state.overlay.cursor = min(state.overlay.cursor, state.overlay.results.len - 1)
 
+proc handleFooterModulePickerOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
+  let allModules = [fmPlayStatus, fmVolume, fmBackend, fmDeviceName, fmSelectCount, fmTime, fmDate, fmRepeatShuffle, fmSleepTimer, fmKeyPressed, fmQueueCount, fmEqPreset, fmCurrentPlaylist]
+  case key
+  of iw.Key.Escape:
+    state.footerPreset = fpnCustom
+    state.saveConfig()
+    state.overlay.clear()
+  of iw.Key.Down:
+    state.overlay.cursor = min(allModules.high, state.overlay.cursor + 1)
+  of iw.Key.Up:
+    state.overlay.cursor = max(0, state.overlay.cursor - 1)
+  of iw.Key.Left, iw.Key.R:
+    if state.overlay.cursor >= 0 and state.overlay.cursor < allModules.len:
+      let m = allModules[state.overlay.cursor]
+      state.footerLeftModules.incl(m)
+      state.footerRightModules.excl(m)
+  of iw.Key.Right, iw.Key.L:
+    if state.overlay.cursor >= 0 and state.overlay.cursor < allModules.len:
+      let m = allModules[state.overlay.cursor]
+      state.footerRightModules.incl(m)
+      state.footerLeftModules.excl(m)
+  of iw.Key.Space:
+    if state.overlay.cursor >= 0 and state.overlay.cursor < allModules.len:
+      let m = allModules[state.overlay.cursor]
+      state.footerLeftModules.excl(m)
+      state.footerRightModules.excl(m)
+  else: discard
+
 proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
   if key != iw.Key.None:
     state.lastKeyDisplay = keyDisplayName(key)
@@ -1562,24 +1670,28 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     case key
     of iw.Key.Escape:
       state.eqVisible = false
+      state.saveConfig()
     of iw.Key.Left:
       let b = state.eqBandSelect.clamp(0, 9)
       state.eqBands[b] = max(-12.0, state.eqBands[b] - 0.5)
       state.eqPreset = ""
       if state.player of DaemonClient:
         DaemonClient(state.player).setEqBand(b, state.eqBands[b])
+      state.saveConfig()
     of iw.Key.Right:
       let b = state.eqBandSelect.clamp(0, 9)
       state.eqBands[b] = min(12.0, state.eqBands[b] + 0.5)
       state.eqPreset = ""
       if state.player of DaemonClient:
         DaemonClient(state.player).setEqBand(b, state.eqBands[b])
+      state.saveConfig()
     of iw.Key.Down:
       state.eqBandSelect = min(9, state.eqBandSelect + 1)
     of iw.Key.Up:
       state.eqBandSelect = max(0, state.eqBandSelect - 1)
     of iw.Key.P:
       cycleEqPreset(state)
+      state.saveConfig()
     of iw.Key.ShiftP:
       if state.player of DaemonClient:
         let cli = DaemonClient(state.player)
@@ -1715,6 +1827,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     of okCommandPalette: state.handleCommandPaletteOverlay(key, chars)
     of okFuzzyFinder: state.handleFuzzyFinderOverlay(key, chars)
     of okTrashView: state.handleTrashOverlay(key, chars)
+    of okFooterModulePicker: state.handleFooterModulePickerOverlay(key, chars)
     of okNone: discard
     return
   const sidebarScopes = [fsAll, fsArtists, fsAlbums, fsPlaylists, fsRecent, fsFavourites, fsLastPlayed, fsMostPlayed, fsLeastPlayed, fsDownloads]
@@ -2112,6 +2225,11 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         of 0: # Theme
           state.overlay = OverlayState(kind: okThemePicker, query: "")
           state.updateThemePickerResults()
+        of 3: # Customize Modules — initialize left/right from current preset
+          let curModules = FooterPresets.getOrDefault(state.footerPreset, state.footerModules)
+          state.footerLeftModules = {}
+          state.footerRightModules = curModules
+          state.overlay = OverlayState(kind: okFooterModulePicker, cursor: 0)
         else: discard
       of scSystem:
         case state.selectIndex
@@ -2127,6 +2245,10 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           state.ytMaxConcurrentDownloads = 4
           state.ytBatchDownloadMode = false
           state.ytJsRuntime = "node"
+          state.ytCookieSource = ""
+          state.ytCookieFilePath = ""
+          state.eqPreset = "Flat"
+          for i in 0..9: state.eqBands[i] = 0.0
           state.mode = imNormal
           state.selectIndex = 0
           state.playlistContentsIdx = -1
@@ -2366,6 +2488,8 @@ proc processEvents(state: var AppState) =
       state.volume = ev.intVal
       state.markDirty(ceVolume)
     of evPlaybackStarted:
+      let newPath = ev.metadata.getOrDefault("track_path", "")
+      let isSameTrack = newPath.len > 0 and newPath == state.currentPlayingPath
       state.status = psPlaying
       state.notificationTimer = 0
       state.notificationMsg = ""
@@ -2407,8 +2531,8 @@ proc processEvents(state: var AppState) =
               state.coverCache[cacheKey] = resp["cover_data"].getStr("")
             state.coverFetching = false
             state.markDirty(ceTrack)
-      # Show Now Playing notification (skip if auto-advanced — "Up Next" was already shown)
-      if not autoAdvanced:
+      # Show Now Playing notification — skip if same track (play/pause resume) or auto-advanced
+      if not isSameTrack and not autoAdvanced:
         if state.currentPlayingTitle.len > 0:
           state.showNotification("Now Playing: " & state.currentPlayingTitle &
             (if state.currentPlayingChannel.len > 0: " — " & state.currentPlayingChannel else: ""))
@@ -2416,7 +2540,8 @@ proc processEvents(state: var AppState) =
           state.showNotification("Now Playing: " & state.currentPlayingPath.splitFile().name.replace(".", " "))
       state.upNextTimer = 0
       state.upNextMsg = ""
-      if state.tab != tabNowPlaying and state.currentPlayingId > 0:
+      # Suppress NowPlayingCue on Library tab (inline header already shows it)
+      if state.tab != tabNowPlaying and state.tab != tabLibrary and state.currentPlayingId > 0 and not isSameTrack:
         for i in 0..<state.libraryTracks.len:
           if state.libraryTracks[i].id == state.currentPlayingId:
             let t = state.libraryTracks[i]

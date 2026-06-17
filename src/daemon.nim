@@ -354,7 +354,7 @@ proc pushFullState(d: Daemon) =
   d.broadcastAll($ev & "\n")
 
 proc savePlaybackState(d: Daemon) =
-  if d.lib != nil:
+  if d.lib != nil and d.player != nil:
     d.lib.setPlaybackState("volume", $d.player.volume)
     d.lib.setPlaybackState("time_pos", $d.player.timePos)
     d.lib.setPlaybackState("track_path", d.currentTrackPath)
@@ -579,7 +579,12 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     when defined(useMpris):
       emitMprisPlayerChanged(d)
   of dckStop:
-    d.player.stop()
+    if d.player != nil:
+      d.player.stop()
+    d.crossfadePrepared = false
+    d.crossfadeStarted = false
+    d.crossfadeNextPath = ""
+    d.crossfadeConsumed = false
     d.pushFullState()
     when defined(useMpris):
       emitMprisPlayerChanged(d)
@@ -926,6 +931,10 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     d.playbackQueue = @[]
     d.shuffleOrder = @[]
     d.shuffleIndex = 0
+    d.crossfadePrepared = false
+    d.crossfadeStarted = false
+    d.crossfadeNextPath = ""
+    d.crossfadeConsumed = false
     d.sendQueueEvent()
   of dckQueueValidate:
     var removed = 0
@@ -1128,7 +1137,7 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     if d.lib != nil:
       d.lib.clearSearchHistory()
   of dckListEqPresets:
-    result["presets"] = %["Flat", "Rock", "Pop", "Classical", "Jazz", "HipHop", "Vocal", "BassBoost", "Headphones", "Laptop", "Electronic", "Acoustic", "Podcast", "Dance"]
+    result["presets"] = %["Flat", "Rock", "Pop", "Classical", "Jazz", "HipHop", "Vocal", "BassBoost", "Headphones", "Laptop", "Electronic", "Acoustic", "Podcast", "Dance", "Soul", "Metal", "Reggae", "Blues", "Country", "Folk", "ClassicalAlt", "Speech", "Loudness", "TrebleBoost", "FullBass", "Soft", "Custom"]
   of dckGetCoverArt:
     if cmd.strArg.len > 0 and fileExists(cmd.strArg):
       let (coverData, coverMime) = extractCoverArt(cmd.strArg)
@@ -1274,7 +1283,15 @@ proc runDaemon*() =
   if crashFile.open(crashPath, fmAppend):
     let crashFd = crashFile.getFileHandle
     if debugMode:
-      stderr.writeLine("[gtmd] GTM Daemon v" & GTM_VERSION & " starting — pid: " & $getpid() & ", socket: " & sockPath())
+      let debugPath = cacheDir / "debug.log"
+      var debugFile: File
+      if debugFile.open(debugPath, fmAppend):
+        let debugFd = debugFile.getFileHandle
+        discard dup2(cint(debugFd), cint(1))
+        discard dup2(cint(debugFd), cint(2))
+        debugFile.writeLine("[gtmd] GTM Daemon v" & GTM_VERSION & " starting — pid: " & $getpid() & ", socket: " & sockPath())
+      else:
+        stderr.writeLine("[gtmd] GTM Daemon v" & GTM_VERSION & " starting — pid: " & $getpid() & ", socket: " & sockPath())
     else:
       discard dup2(cint(crashFd), cint(1))
       discard dup2(cint(crashFd), cint(2))
@@ -1347,7 +1364,7 @@ proc runDaemon*() =
   if daemon.lib != nil:
     daemon.lib.initSchema()
     let volStr = daemon.lib.getPlaybackState("volume")
-    if volStr.len > 0:
+    if volStr.len > 0 and daemon.player != nil:
       try: daemon.player.setVolume(parseInt(volStr)) except: discard
     let shuffleStr = daemon.lib.getPlaybackState("shuffle")
     if shuffleStr.len > 0:
@@ -1364,6 +1381,8 @@ proc runDaemon*() =
     let cfcStr = daemon.lib.getPlaybackState("crossfade_curve")
     if cfcStr.len > 0:
       try: daemon.crossfadeCurve = parseInt(cfcStr) except: discard
+    if daemon.player != nil:
+      daemon.player.setCrossfadeCurve(daemon.crossfadeCurve)
     let ytCookie = daemon.lib.getPlaybackState("yt_cookie_source")
     if ytCookie.len > 0: daemon.ytCookieSource = ytCookie
     let ytCookieFile = daemon.lib.getPlaybackState("yt_cookie_file_path")
@@ -1741,7 +1760,7 @@ proc runDaemon*() =
           if fileExists(item.trashPath):
             try: removeFile(item.trashPath) except: discard
     daemon.idleFrames.inc
-    if daemon.idleFrames > daemon.idleTimeout * 60 and daemon.player.state == 0:
+    if daemon.player != nil and daemon.idleFrames > daemon.idleTimeout * 60 and daemon.player.state == 0:
       daemon.savePlaybackState()
       when defined(useMpris):
         shutdownMpris()

@@ -1,4 +1,4 @@
-import os, strutils, sequtils, algorithm, sets, tables
+import os, strutils, sequtils, algorithm, sets, tables, times
 import state, theme
 
 when defined(useSqlite):
@@ -166,6 +166,16 @@ when defined(useSqlite):
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         query TEXT NOT NULL,
         searched_at TEXT DEFAULT (datetime('now'))
+      )
+    """)
+    discard execRaw(lib.db, """
+      CREATE TABLE IF NOT EXISTS trash (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        track_id INTEGER NOT NULL,
+        original_path TEXT NOT NULL,
+        trash_path TEXT NOT NULL,
+        trashed_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
       )
     """)
 
@@ -474,6 +484,103 @@ when defined(useSqlite):
   proc clearSearchHistory*(lib: LibraryDb) =
     discard execRaw(lib.db, "DELETE FROM search_history")
 
+  proc trashTrack*(lib: LibraryDb, trackId: int64, originalPath, trashPath: string) =
+    let now = epochTime().int
+    let stmt = prepare(lib.db, "INSERT INTO trash (track_id, original_path, trash_path, trashed_at, expires_at) VALUES (?, ?, ?, ?, ?)")
+    if stmt == nil: return
+    bindInt64(stmt, 1.cint, trackId)
+    bindText(stmt, 2.cint, originalPath)
+    bindText(stmt, 3.cint, trashPath)
+    bindInt(stmt, 4.cint, now)
+    bindInt(stmt, 5.cint, now + 604800)
+    discard sqlite3_step(stmt)
+    finalize(stmt)
+
+  proc restoreTrack*(lib: LibraryDb, trashId: int): tuple[trackId: int64, originalPath, trashPath: string] =
+    let stmt = prepare(lib.db, "SELECT track_id, original_path, trash_path FROM trash WHERE id = ?")
+    if stmt == nil: return
+    bindInt(stmt, 1.cint, trashId)
+    if sqlite3_step(stmt) == SQLITE_ROW:
+      result.trackId = colInt64(stmt, 0.cint)
+      result.originalPath = colText(stmt, 1.cint)
+      result.trashPath = colText(stmt, 2.cint)
+    finalize(stmt)
+    if result.originalPath.len > 0:
+      let del = prepare(lib.db, "DELETE FROM trash WHERE id = ?")
+      if del != nil:
+        bindInt(del, 1.cint, trashId)
+        discard sqlite3_step(del)
+        finalize(del)
+
+  proc permanentDeleteTrash*(lib: LibraryDb, trashId: int) =
+    let stmt = prepare(lib.db, "DELETE FROM trash WHERE id = ?")
+    if stmt == nil: return
+    bindInt(stmt, 1.cint, trashId)
+    discard sqlite3_step(stmt)
+    finalize(stmt)
+
+  proc listTrash*(lib: LibraryDb): seq[tuple[id: int, trackId: int64, originalPath, trashPath: string, trashedAt, expiresAt: int]] =
+    let stmt = prepare(lib.db, "SELECT id, track_id, original_path, trash_path, trashed_at, expires_at FROM trash ORDER BY trashed_at DESC")
+    if stmt == nil: return
+    while sqlite3_step(stmt) == SQLITE_ROW:
+      result.add((
+        colInt(stmt, 0.cint),
+        colInt64(stmt, 1.cint),
+        colText(stmt, 2.cint),
+        colText(stmt, 3.cint),
+        colInt(stmt, 4.cint),
+        colInt(stmt, 5.cint)
+      ))
+    finalize(stmt)
+
+  proc purgeExpiredTrash*(lib: LibraryDb): seq[tuple[trashPath, originalPath: string]] =
+    let now = epochTime().int
+    let stmt = prepare(lib.db, "SELECT id, trash_path, original_path FROM trash WHERE expires_at <= ?")
+    if stmt == nil: return
+    bindInt(stmt, 1.cint, now)
+    while sqlite3_step(stmt) == SQLITE_ROW:
+      result.add((colText(stmt, 1.cint), colText(stmt, 2.cint)))
+      let tid = colInt(stmt, 0.cint)
+      let del = prepare(lib.db, "DELETE FROM trash WHERE id = ?")
+      if del != nil:
+        bindInt(del, 1.cint, tid)
+        discard sqlite3_step(del)
+        finalize(del)
+    finalize(stmt)
+
+  proc deleteTrack*(lib: LibraryDb, trackId: int64) =
+    var stmt = prepare(lib.db, "DELETE FROM favourites WHERE track_id = ?")
+    if stmt != nil:
+      bindInt64(stmt, 1.cint, trackId)
+      discard sqlite3_step(stmt)
+      finalize(stmt)
+    stmt = prepare(lib.db, "DELETE FROM playlist_tracks WHERE track_id = ?")
+    if stmt != nil:
+      bindInt64(stmt, 1.cint, trackId)
+      discard sqlite3_step(stmt)
+      finalize(stmt)
+    stmt = prepare(lib.db, "DELETE FROM tracks WHERE id = ?")
+    if stmt != nil:
+      bindInt64(stmt, 1.cint, trackId)
+      discard sqlite3_step(stmt)
+      finalize(stmt)
+
+  proc getTrackPath*(lib: LibraryDb, trackId: int64): string =
+    let stmt = prepare(lib.db, "SELECT path FROM tracks WHERE id = ?")
+    if stmt != nil:
+      bindInt64(stmt, 1.cint, trackId)
+      if sqlite3_step(stmt) == SQLITE_ROW:
+        result = colText(stmt, 0.cint)
+      finalize(stmt)
+
+  proc getTrashPath*(lib: LibraryDb, trashId: int): string =
+    let stmt = prepare(lib.db, "SELECT trash_path FROM trash WHERE id = ?")
+    if stmt != nil:
+      bindInt(stmt, 1.cint, trashId)
+      if sqlite3_step(stmt) == SQLITE_ROW:
+        result = colText(stmt, 0.cint)
+      finalize(stmt)
+
   proc closeDb*(lib: LibraryDb) =
     if lib != nil and lib.db != nil:
       discard sqlite3_close(lib.db)
@@ -514,6 +621,14 @@ else:
   proc addSearchQuery*(lib: LibraryDb, query: string) = discard
   proc getSearchHistory*(lib: LibraryDb): seq[string] = @[]
   proc clearSearchHistory*(lib: LibraryDb) = discard
+  proc trashTrack*(lib: LibraryDb, trackId: int64, originalPath, trashPath: string) = discard
+  proc restoreTrack*(lib: LibraryDb, trashId: int): tuple[trackId: int64, originalPath, trashPath: string] = (0, "", "")
+  proc permanentDeleteTrash*(lib: LibraryDb, trashId: int) = discard
+  proc listTrash*(lib: LibraryDb): seq[tuple[id: int, trackId: int64, originalPath, trashPath: string, trashedAt, expiresAt: int]] = @[]
+  proc purgeExpiredTrash*(lib: LibraryDb): seq[tuple[trashPath, originalPath: string]] = @[]
+  proc deleteTrack*(lib: LibraryDb, trackId: int64) = discard
+  proc getTrackPath*(lib: LibraryDb, trackId: int64): string = ""
+  proc getTrashPath*(lib: LibraryDb, trashId: int): string = ""
 
 proc displayName*(track: Track): string =
   if track.title.len > 0: track.title

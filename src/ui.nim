@@ -269,6 +269,8 @@ method render*(node: NowPlayingView, ctx: var nw.Context[AppState]) =
     Track(title: state.ytStreamTitle, artist: state.ytStreamChannel, duration: 0.0, path: state.currentPlayingPath)
   elif state.currentPlayingPath.len > 0:
     state.getPlayingTrack()
+  elif state.status == psPlaying or state.status == psPaused:
+    Track()
   elif state.libraryTracks.len > 0 and
     state.selectIndex >= 0 and state.selectIndex < state.libraryTracks.len:
     state.libraryTracks[state.selectIndex]
@@ -307,7 +309,7 @@ method render*(node: NowPlayingView, ctx: var nw.Context[AppState]) =
     if state.status == psPlaying: theme.green
     elif state.status == psPaused: theme.yellow
     else: theme.surface2
-  writeStr(ctx.tb, artPad, line, statusIcon & " " & (
+  writeStr(ctx.tb, artPad, line, statusIcon & (
     if state.status == psPlaying: "Playing"
     elif state.status == psPaused: "Paused"
     else: "Stopped"), statusColor)
@@ -386,18 +388,7 @@ method render*(node: NowPlayingView, ctx: var nw.Context[AppState]) =
           let sbChar = if isThumb: "\u2588" else: "\u2591"
           writeStr(ctx.tb, w - 1, line + sy - visible, sbChar, if isThumb: theme.surface2 else: theme.surface0)
     else:
-      # Queue empty — show upcoming library tracks or empty message
-      var shownLib = 0
-      if state.playbackQueue.len == 0:
-        let libStart = state.selectIndex + 1
-        for i in libStart..<state.libraryTracks.len:
-          if shownLib >= maxLines: break
-          if i >= 0 and i < state.libraryTracks.len:
-            let t = state.libraryTracks[i]
-            writeStr(ctx.tb, artPad + 2, line, truncateAt(t.displayName(), w - artPad - 4), theme.text)
-            line.inc
-            shownLib.inc
-      if shownLib == 0 and maxLines > 0:
+      if maxLines > 0:
         writeStr(ctx.tb, artPad + 2, line, "No tracks queued", theme.subtext0)
         line.inc
 
@@ -708,6 +699,10 @@ method render*(node: SettingsView, ctx: var nw.Context[AppState]) =
     let cookieLabel = truncateAt(if state.ytCookieSource.len == 0: "none" else: state.ytCookieSource, max(0, contentW - 14))
     writeStr(ctx.tb, contentX + contentW - cookieLabel.runeLen - 11, line, "[ " & cookieLabel & " \u25B8]", theme.subtext0)
     line.inc
+    settingsRow("Cookie File")
+    let cfLabel = if state.ytCookieFilePath.len == 0: "(none)" else: state.ytCookieFilePath
+    writeStr(ctx.tb, contentX + contentW - cfLabel.runeLen - 11, line, "[ " & cfLabel & " \u25B8]", theme.subtext0)
+    line.inc
     settingsRow("JS Runtime")
     let rtLabel = if state.ytJsRuntime.len == 0: "node" else: state.ytJsRuntime
     writeStr(ctx.tb, contentX + contentW - rtLabel.runeLen - 11, line, "[ " & rtLabel & " ▸]", theme.subtext0)
@@ -739,6 +734,11 @@ method render*(node: SettingsView, ctx: var nw.Context[AppState]) =
     let fpLabel = $state.footerPreset
     let fpDisplay = if fpLabel.startsWith("fpn"): fpLabel[3..^1] else: fpLabel
     writeStr(ctx.tb, contentX + contentW - fpDisplay.runeLen - 11, line, "[ " & fpDisplay & " ▸]", theme.subtext0)
+    line.inc
+    settingsRow("Customize Modules")
+    let leftCount = state.footerLeftModules.card
+    let rightCount = state.footerRightModules.card
+    writeStr(ctx.tb, contentX + contentW - 14, line, "L:" & $leftCount & " R:" & $rightCount, theme.subtext0)
     line.inc
   of scSystem:
     sectionHeader("═══ System ═══")
@@ -827,7 +827,7 @@ method render*(node: ProgressBarComp, ctx: var nw.Context[AppState]) =
     ctx.tb[barStart + 1 + i, 0] = cell
   var rightX = w - 2
   if state.sleepTimerRemaining > 0:
-    let sleepStr = "\u23F0 " & $state.sleepTimerRemaining & "m"
+    let sleepStr = " \u23F0 " & $state.sleepTimerRemaining & "m"
     writeStr(ctx.tb, rightX - sleepStr.runeLen + 1, 0, sleepStr, theme.peach)
     rightX -= sleepStr.runeLen + 1
   if state.repeatMode > 0:
@@ -847,17 +847,42 @@ method render*(node: StatusBarComp, ctx: var nw.Context[AppState]) =
   let state = ctx.data
   let theme = state.theme
   fillBg(ctx.tb, 0, 0, w - 1, 0, theme.mantle)
+
+  # Determine active modules — custom mode uses individual left/right sets
+  let isCustom = state.footerPreset == fpnCustom
+  let activeModules = if isCustom:
+    state.footerLeftModules + state.footerRightModules
+  else:
+    FooterPresets.getOrDefault(state.footerPreset, state.footerModules)
+
+  # -- Left-aligned section (anchored at column 1, left-to-right) --
   var leftX = 1
 
-  let isOverlayActive = state.overlay.kind != okNone or state.helpVisible or state.aboutVisible or state.eqVisible or state.mode == imLeaderMode
-  let displayKey = if isOverlayActive and state.lastCommandName.len > 0: state.lastCommandName
-                   else: state.lastKeyDisplay
-  let showKey = (state.lastKeyTimer > 0 or isOverlayActive) and displayKey.len > 0
-  if showKey:
-    let keyText = " [" & displayKey & "] "
-    writeStrBg(ctx.tb, leftX, 0, keyText, theme.base, theme.surface2)
-    leftX += keyText.runeLen
+  # 1. Always show elapsed time first — CANNOT be moved
+  if state.duration > 0:
+    let elapsedText = " " & formatTime(state.timePos) & " "
+    writeStrBg(ctx.tb, leftX, 0, elapsedText, theme.base, theme.sky)
+    leftX += elapsedText.runeLen
 
+  # 2. Key pressed / command display (fmKeyPressed module, always after elapsed time)
+  let showKeyPressed = fmKeyPressed in activeModules
+  let isOverlayActive = state.overlay.kind != okNone or state.helpVisible or state.aboutVisible or state.eqVisible or state.mode == imLeaderMode
+  if showKeyPressed and isOverlayActive:
+    if state.lastKeyTimer > 0 and state.lastKeyDisplay.len > 0:
+      let keyText = " [" & state.lastKeyDisplay & "] "
+      writeStrBg(ctx.tb, leftX, 0, keyText, theme.base, theme.surface2)
+      leftX += keyText.runeLen
+    elif state.lastCommandName.len > 0:
+      let ovText = " " & state.lastCommandName & " "
+      writeStrBg(ctx.tb, leftX, 0, ovText, theme.base, theme.surface2)
+      leftX += ovText.runeLen
+  elif showKeyPressed:
+    if state.lastKeyTimer > 0 and state.lastCommandName.len > 0:
+      let cmdText = " " & state.lastCommandName & " "
+      writeStrBg(ctx.tb, leftX, 0, cmdText, theme.base, theme.surface2)
+      leftX += cmdText.runeLen
+
+  # 3. Additional left modules (filter, feedback, select mode — always shown)
   if state.mode == imFilter:
     let filterText = "Filter: " & state.filterText
     writeStrBg(ctx.tb, leftX, 0, truncateAt(filterText, w - leftX - 2), theme.text, theme.surface0)
@@ -873,13 +898,7 @@ method render*(node: StatusBarComp, ctx: var nw.Context[AppState]) =
     writeStrBg(ctx.tb, leftX, 0, selText, theme.base, theme.peach)
     leftX += selText.runeLen
 
-  # Always show elapsed time
-  if state.duration > 0:
-    let elapsedText = " " & formatTime(state.timePos) & " "
-    writeStrBg(ctx.tb, leftX, 0, elapsedText, theme.base, theme.sky)
-    leftX += elapsedText.runeLen
-
-  # Right-aligned footer modules
+  # -- Right-aligned section (right-to-left) --
   var rightX = w - 1
   template addMod(text: string, col: colors.Color, bgCol: colors.Color) =
     if rightX > text.runeLen + 2:
@@ -891,45 +910,43 @@ method render*(node: StatusBarComp, ctx: var nw.Context[AppState]) =
 
   let ic = currentIcons()
 
-  let activeModules = FooterPresets.getOrDefault(state.footerPreset, state.footerModules)
-  if fmDate in activeModules and fmTime in activeModules:
+  # Determine which modules go on the right
+  let rightModules = if isCustom: state.footerRightModules
+    else: activeModules
+
+  # Right modules rendered in fixed order (rightmost-first)
+  if fmDate in rightModules and fmTime in rightModules:
     addMod(" " & now().format("ddd dd, MMMM") & "  " & now().format("hh:mm tt"), theme.text, theme.surface2)
-  elif fmDate in activeModules:
+  elif fmDate in rightModules:
     addMod(" " & now().format("ddd dd, MMMM"), theme.text, theme.surface2)
-  elif fmTime in activeModules:
+  elif fmTime in rightModules:
     addMod(" " & now().format("hh:mm tt"), theme.text, theme.surface2)
-  if fmSleepTimer in activeModules and state.sleepTimerRemaining > 0:
+  if fmSleepTimer in rightModules and state.sleepTimerRemaining > 0:
     addMod(" " & $(state.sleepTimerRemaining) & "m", theme.base, theme.peach)
   # Group repeat, shuffle, playback status into one block with shared bg
-  let hasRepeat = fmRepeatShuffle in activeModules and state.repeatMode > 0
-  let hasShuffle = fmRepeatShuffle in activeModules and state.shuffleEnabled
-  let hasStatus = fmPlayStatus in activeModules
+  let hasRepeat = fmRepeatShuffle in rightModules and state.repeatMode > 0
+  let hasShuffle = fmRepeatShuffle in rightModules and state.shuffleEnabled
+  let hasStatus = fmPlayStatus in rightModules
   if hasRepeat or hasShuffle or hasStatus:
     var combined = ""
     if hasRepeat:
-      combined &= (if state.repeatMode == 2: ic.repeatOne else: ic.repeatAll) & " "
+      combined &= (if state.repeatMode == 2: ic.repeatOne else: ic.repeatAll)
     if hasShuffle:
-      combined &= ic.shuffle & " "
+      combined &= ic.shuffle
     let stIcon = case state.status
       of psPlaying: ic.play
       of psPaused: ic.pause
       of psStopped: ic.stop
     if hasStatus:
-      combined = " " & combined & stIcon
-    else:
-      combined = " " & combined
+      combined = combined & stIcon
     let bgCol = if hasStatus and state.status == psPlaying: theme.green else: theme.surface2
     var segments: seq[string] = @[]
     var segColors: seq[colors.Color] = @[]
     if hasRepeat:
       segments.add(if state.repeatMode == 2: ic.repeatOne else: ic.repeatAll)
       segColors.add(theme.base)
-      segments.add(" ")
-      segColors.add(theme.base)
     if hasShuffle:
       segments.add(ic.shuffle)
-      segColors.add(theme.base)
-      segments.add(" ")
       segColors.add(theme.base)
     if hasStatus:
       segments.add(stIcon)
@@ -943,22 +960,21 @@ method render*(node: StatusBarComp, ctx: var nw.Context[AppState]) =
         writeStr(ctx.tb, cx, 0, seg, segColors[i])
         cx += seg.runeLen
       ctx.tb.setBackgroundColor(iw.bgNone)
-  if fmSelectCount in activeModules and state.selectedIndices.len > 0:
+  if fmSelectCount in rightModules and state.selectedIndices.len > 0:
     addMod(" [" & $state.selectedIndices.len & "] ", theme.base, theme.peach)
-
-  if fmBackend in activeModules:
+  if fmBackend in rightModules:
     let backend = "ALSA"
     addMod(" " & backend, theme.base, theme.mauve)
-  if fmDeviceName in activeModules and state.deviceName.len > 0 and state.deviceName != "ALSA":
+  if fmDeviceName in rightModules and state.deviceName.len > 0 and state.deviceName != "ALSA":
     addMod(" " & state.deviceName, theme.base, theme.teal)
-  if fmVolume in activeModules:
+  if fmVolume in rightModules:
     addMod(" " & $state.volume & "%", theme.base, theme.teal)
-  if fmQueueCount in activeModules and state.playbackQueue.len > 0:
+  if fmQueueCount in rightModules and state.playbackQueue.len > 0:
     let qPos = min(state.queueCursor + 1, state.playbackQueue.len)
     addMod(" " & $qPos & "/" & $state.playbackQueue.len, theme.base, theme.sapphire)
-  if fmEqPreset in activeModules and state.eqPreset.len > 0:
+  if fmEqPreset in rightModules and state.eqPreset.len > 0:
     addMod(" " & state.eqPreset, theme.base, theme.teal)
-  if fmCurrentPlaylist in activeModules and state.playlistContentsIdx >= 0 and
+  if fmCurrentPlaylist in rightModules and state.playlistContentsIdx >= 0 and
      state.playlistContentsIdx < state.libraryPlaylists.len:
     addMod(" " & state.libraryPlaylists[state.playlistContentsIdx].name, theme.base, theme.sky)
 
@@ -1061,6 +1077,10 @@ method render*(node: GenericOverlay, ctx: var nw.Context[AppState]) =
   of okFuzzyFinder:
     title = "Fuzzy Finder"
     queryLine = true
+  of okTrashView:
+    title = "Trash"
+    boxW = min(60, w - 8)
+    boxH = min(24, h - 4)
   else: return
   let boxX = (w - boxW) div 2
   let boxY = (h - boxH) div 2
@@ -1246,6 +1266,27 @@ method render*(node: GenericOverlay, ctx: var nw.Context[AppState]) =
     else:
       let hint = truncateAt("> Type to filter presets...", boxW - 2)
       if hint.len > 0: writeStr(ctx.tb, boxX + 1, boxY + boxH - 1, hint, theme.subtext0)
+  #--- Trash View ---
+  elif ov.kind == okTrashView:
+    let items = ctx.data.trashItems
+    let displayCount = min(items.len, boxH - 5)
+    for i in 0..<displayCount:
+      let lineY = curY + i
+      if lineY >= boxY + boxH - 2: break
+      let isSelected = (i == ov.cursor)
+      let ovRowBg = if isSelected: theme.surface2 else: theme.surface0
+      if isSelected:
+        fillBg(ctx.tb, boxX + 1, lineY, boxX + boxW - 2, lineY, ovRowBg)
+      ctx.tb.setBackgroundColor(ovRowBg)
+      let item = items[i]
+      let name = item.originalPath.splitPath().tail
+      let dateStr = item.trashedAt.fromUnix().format("YYYY-MM-dd")
+      let label = truncateAt(name & "  (" & dateStr & ")", boxW - 4)
+      writeStr(ctx.tb, boxX + 2, lineY, label, if isSelected: theme.blue else: theme.text)
+    ctx.tb.setBackgroundColor(theme.surface0)
+    let footer = "Enter: restore  Del: permanent delete  P: purge expired  Esc: cancel"
+    let ft = truncateAt(footer, boxW - 2)
+    if ft.len > 0: writeStr(ctx.tb, boxX + 1, boxY + boxH - 1, ft, theme.subtext0)
   #--- Current Queue Overlay ---
   elif ov.kind == okQueueOverlay:
     let queue = ctx.data.playbackQueue
@@ -1607,7 +1648,7 @@ method render*(node: NowPlayingCueOverlay, ctx: var nw.Context[AppState]) =
   drawRoundedRect(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.blue)
   var curY = boxY + 1
   for idx, line in lines:
-    let prefix = if idx == 0: " " & ic.play & " " else: "    "
+    let prefix = if idx == 0: ic.play else: "   "
     writeStr(ctx.tb, boxX + 1, curY, prefix & line, theme.blue)
     curY.inc
 
@@ -1650,6 +1691,13 @@ method render*(node: PlaylistInputOverlay, ctx: var nw.Context[AppState]) =
   let footerText = truncateAt("Enter: confirm  Esc: cancel", boxW - 2)
   if footerText.len > 0:
     writeStr(ctx.tb, boxX + 1, boxY + 4, footerText, theme.subtext0)
+
+proc eqBarColor(gain: float, theme: Theme): colors.Color =
+  if gain >= 6: theme.red
+  elif gain >= 3: theme.peach
+  elif gain >= -3: theme.blue
+  elif gain >= -6: theme.sky
+  else: theme.sapphire
 
 type EqualizerOverlay* = ref object of nw.Node
 method render*(node: EqualizerOverlay, ctx: var nw.Context[AppState]) =
@@ -1707,7 +1755,7 @@ method render*(node: EqualizerOverlay, ctx: var nw.Context[AppState]) =
       elif row == sliderH div 2:
         writeStr(ctx.tb, sx + sliderW div 2, rowY, "\u2502", theme.subtext0)
       else:
-        let barCol = if i == st.eqBandSelect: theme.mauve else: theme.blue
+        let barCol = eqBarColor(gain, theme)
         writeStr(ctx.tb, sx + sliderW div 2, rowY, "\u2588", barCol)
 
     # Center dot marker
@@ -1737,6 +1785,62 @@ method render*(node: EqualizerOverlay, ctx: var nw.Context[AppState]) =
   let eqFooter = truncateAt(" \u2190\u2192 gain  \u2191/\u2193 band  h/l scroll  P preset  Esc close ", boxW - 4)
   if eqFooter.len > 0:
     writeStr(ctx.tb, boxX + 2, boxY + boxH - 2, eqFooter, theme.subtext0)
+
+type FooterModulePickerOverlay* = ref object of nw.Node
+method render*(node: FooterModulePickerOverlay, ctx: var nw.Context[AppState]) =
+  let w = iw.width(ctx.tb)
+  let h = iw.height(ctx.tb)
+  if w < 30 or h < 8: return
+  let st = ctx.data
+  let theme = st.theme
+  let allModules = [fmPlayStatus, fmVolume, fmBackend, fmDeviceName, fmSelectCount, fmTime, fmDate, fmRepeatShuffle, fmSleepTimer, fmKeyPressed, fmQueueCount, fmEqPreset, fmCurrentPlaylist]
+  let boxW = min(50, w - 4)
+  let boxH = min(allModules.len + 4, h - 4)
+  let boxX = (w - boxW) div 2
+  let boxY = (h - boxH) div 2
+  fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.surface0)
+  drawRoundedRect(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.mauve)
+  ctx.tb.setBackgroundColor(theme.surface0)
+  writeStr(ctx.tb, boxX + 2, boxY + 1, " Footer Modules ", theme.mauve)
+
+  const moduleNames: array[FooterModule, string] = [
+    fmPlayStatus: "Play Status",
+    fmVolume: "Volume",
+    fmBackend: "Audio Backend",
+    fmDeviceName: "Device Name",
+    fmSelectCount: "Selection Count",
+    fmTime: "Time",
+    fmDate: "Date",
+    fmRepeatShuffle: "Repeat/Shuffle",
+    fmSleepTimer: "Sleep Timer",
+    fmElapsedTime: "Elapsed Time",
+    fmQueueCount: "Queue Count",
+    fmEqPreset: "EQ Preset",
+    fmCurrentPlaylist: "Current Playlist",
+    fmKeyPressed: "Key Pressed"
+  ]
+
+  for i, m in allModules:
+    let rowY = boxY + 3 + i
+    let isSelected = i == st.overlay.cursor
+    let rowBg = if isSelected: theme.surface2 else: theme.surface0
+    fillBg(ctx.tb, boxX + 1, rowY, boxX + boxW - 2, rowY, rowBg)
+    ctx.tb.setBackgroundColor(rowBg)
+    let name = moduleNames[m]
+    # Module name
+    writeStr(ctx.tb, boxX + 2, rowY, name, if isSelected: theme.text else: theme.subtext0)
+    # Side indicator (Off / L / R)
+    let inLeft = m in st.footerLeftModules
+    let inRight = m in st.footerRightModules
+    let statusStr = if inLeft: " [L] " elif inRight: " [R] " else: " Off "
+    let statusCol = if inLeft or inRight: theme.green else: theme.overlay0
+    writeStr(ctx.tb, boxX + boxW - statusStr.runeLen - 2, rowY, statusStr, statusCol)
+
+  # Footer instructions
+  ctx.tb.setBackgroundColor(theme.surface0)
+  let ftr = truncateAt(" \u2191/\u2192/L:Left  \u2193/\u2190/R:Right  Space:Off  Esc:Save ", boxW - 2)
+  if ftr.len > 0:
+    writeStr(ctx.tb, boxX + 2, boxY + boxH - 2, ftr, theme.subtext0)
 
 proc renderApp*(ctx: var nw.Context[AppState]) =
   let w = iw.width(ctx.tb)
@@ -1786,6 +1890,8 @@ proc renderApp*(ctx: var nw.Context[AppState]) =
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(LeaderMenuOverlay(), sliceCtx)
   if ctx.data.playlistInputActive:
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(PlaylistInputOverlay(), sliceCtx)
+  if ctx.data.overlay.kind == okFooterModulePicker:
+    sliceCtx = nw.slice(ctx, 0, 0, w, h); render(FooterModulePickerOverlay(), sliceCtx)
   if ctx.data.overlay.kind != okNone:
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(GenericOverlay(), sliceCtx)
 

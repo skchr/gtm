@@ -4,10 +4,10 @@ type
   AudioBackendType* = enum abtNone, abtFFmpeg, abtDaemon, abtMixer
 
   AudioEventKind* = enum
-    aekNone, aekPlaybackStarted, aekPlaybackPaused, aekPlaybackStopped,
-    aekTrackEnded, aekPositionChanged, aekDurationChanged,
-    aekVolumeChanged, aekMetadataChanged, aekError,
-    aekCustomEvent
+    evNone, evPlaybackStarted, evPlaybackPaused, evPlaybackStopped,
+    evTrackEnded, evPositionChanged, evDurationChanged,
+    evVolumeChanged, evMetadataChanged, evError,
+    evCustomEvent
 
   AudioEvent* = object
     kind*: AudioEventKind
@@ -88,6 +88,7 @@ when defined(useFFmpeg):
         ffmpeg_free_cover_data(outData, outMime)
         return (bytes, mime)
       if outMime != nil: ffmpeg_free_cover_data(nil, outMime)
+    result = (@[], "")
 
   proc ffmpeg_mixer_init(): FfmpegCtx {.importc.}
   proc ffmpeg_mixer_uninit(ctx: FfmpegCtx) {.importc.}
@@ -181,15 +182,15 @@ when defined(useFFmpeg):
     let nowTime = ffmpeg_audio_get_time(b.ctx)
     let nowState = if nowPlaying: 1 elif b.state != 0: 2 else: 0
     if b.lastState == 1 and nowState == 2:
-      result.add(AudioEvent(kind: aekPlaybackPaused))
+      result.add(AudioEvent(kind: evPlaybackPaused))
     elif b.lastState == 2 and nowState == 1:
-      result.add(AudioEvent(kind: aekPlaybackStarted))
+      result.add(AudioEvent(kind: evPlaybackStarted))
     elif b.lastState == 1 and nowState == 0:
-      result.add(AudioEvent(kind: aekPlaybackStopped))
+      result.add(AudioEvent(kind: evPlaybackStopped))
     elif b.lastState == 0 and nowState == 1:
-      result.add(AudioEvent(kind: aekPlaybackStarted))
+      result.add(AudioEvent(kind: evPlaybackStarted))
     if nowState == 1 and abs(nowTime - b.lastTime) > 0.25:
-      result.add(AudioEvent(kind: aekPositionChanged, floatVal: nowTime))
+      result.add(AudioEvent(kind: evPositionChanged, floatVal: nowTime))
       b.lastTime = nowTime
     b.lastPlaying = nowPlaying
     b.timePos = nowTime
@@ -337,26 +338,26 @@ when defined(useFFmpeg):
     let nowCrossfading = ffmpeg_mixer_is_crossfading(b.ctx) != 0
     let nowState = if nowPlaying: 1 elif b.state != 0: 2 else: 0
     if b.lastState == 1 and nowState == 2:
-      result.add(AudioEvent(kind: aekPlaybackPaused))
+      result.add(AudioEvent(kind: evPlaybackPaused))
     elif b.lastState == 2 and nowState == 1:
-      result.add(AudioEvent(kind: aekPlaybackStarted))
+      result.add(AudioEvent(kind: evPlaybackStarted))
     elif b.lastState == 1 and nowState == 0:
-      result.add(AudioEvent(kind: aekPlaybackStopped))
+      result.add(AudioEvent(kind: evPlaybackStopped))
     elif b.lastState == 0 and nowState == 1:
-      result.add(AudioEvent(kind: aekPlaybackStarted))
+      result.add(AudioEvent(kind: evPlaybackStarted))
     if nowState == 1 and abs(nowTime - b.lastTime) > 0.25:
-      result.add(AudioEvent(kind: aekPositionChanged, floatVal: nowTime))
+      result.add(AudioEvent(kind: evPositionChanged, floatVal: nowTime))
       b.lastTime = nowTime
     if nowCrossfading and not b.lastCrossfading:
-      result.add(AudioEvent(kind: aekMetadataChanged, strVal: "crossfade_started"))
+      result.add(AudioEvent(kind: evMetadataChanged, strVal: "crossfade_started"))
     elif not nowCrossfading and b.lastCrossfading:
-      result.add(AudioEvent(kind: aekMetadataChanged, strVal: "crossfade_ended"))
+      result.add(AudioEvent(kind: evMetadataChanged, strVal: "crossfade_ended"))
     if ffmpeg_mixer_master_ended(b.ctx) != 0 and b.lastPlaying:
-      result.add(AudioEvent(kind: aekTrackEnded))
+      result.add(AudioEvent(kind: evTrackEnded))
       # After crossfade auto-promotion, the new master is already playing
       # but no PlaybackStarted is emitted because state stays 1→1
       if ffmpeg_mixer_is_playing(b.ctx) != 0:
-        result.add(AudioEvent(kind: aekPlaybackStarted))
+        result.add(AudioEvent(kind: evPlaybackStarted))
       b.duration = ffmpeg_mixer_get_duration(b.ctx)
     b.lastPlaying = nowPlaying
     b.lastCrossfading = nowCrossfading
