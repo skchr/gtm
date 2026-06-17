@@ -375,6 +375,7 @@ proc savePlaybackState(d: Daemon) =
     for p in d.playbackQueue:
       qArr.add(%p)
     d.lib.setPlaybackState("queue_json", $qArr)
+    d.lib.setPlaybackState("shuffle_index", $(d.shuffleIndex))
 
 
 proc shuffleOrder(count: int): seq[int] =
@@ -535,15 +536,27 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
         d.trackHistory.add(d.currentTrackPath)
         if d.trackHistory.len > 50:
           d.trackHistory.delete(0)
-      d.player.stop()
-      if not d.player.loadFile(cmd.strArg):
-        result["ok"] = %false
-        result["error"] = %"failed to load file"
-        return
-      d.currentTrackPath = cmd.strArg
-      d.currentTrackTitle = cmd.strArg2
-      d.currentTrackChannel = cmd.strArg3
-      d.player.play()
+      # Crossfade transition if a track is currently playing
+      if d.crossfadeDuration > 0 and d.player.state == 1:
+        d.crossfadeConsumed = true
+        d.player.prepareNext(cmd.strArg)
+        d.player.startCrossfade(float(d.crossfadeDuration))
+        d.currentTrackPath = cmd.strArg
+        d.currentTrackTitle = cmd.strArg2
+        d.currentTrackChannel = cmd.strArg3
+        d.crossfadePrepared = false
+        d.crossfadeStarted = true
+        d.crossfadeNextPath = cmd.strArg
+      else:
+        d.player.stop()
+        if not d.player.loadFile(cmd.strArg):
+          result["ok"] = %false
+          result["error"] = %"failed to load file"
+          return
+        d.currentTrackPath = cmd.strArg
+        d.currentTrackTitle = cmd.strArg2
+        d.currentTrackChannel = cmd.strArg3
+        d.player.play()
       d.idleFrames = 0
       # Poll events once so state reflects actual playback status
       discard d.player.pollEvents()
@@ -564,7 +577,10 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
       when defined(useMpris):
         emitMprisPlayerChanged(d)
   of dckPlay:
-    d.player.play(); d.idleFrames = 0
+    # Skip if already playing (e.g. crossfade already started by dckLoadFile)
+    if d.player.state != 1:
+      d.player.play()
+    d.idleFrames = 0
     d.pushFullState()
     when defined(useMpris):
       emitMprisPlayerChanged(d)
@@ -1411,6 +1427,10 @@ proc runDaemon*() =
         for p in qj:
           daemon.playbackQueue.add(p.getStr(""))
       except: discard
+    # Restore shuffle cursor
+    let siStr = daemon.lib.getPlaybackState("shuffle_index")
+    if siStr.len > 0:
+      try: daemon.shuffleIndex = parseInt(siStr) except: discard
     # Validate restored queue paths
     var i = 0
     while i < daemon.playbackQueue.len:

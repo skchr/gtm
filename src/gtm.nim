@@ -2180,7 +2180,6 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
                 state.queuePaths.delete(0)
           state.queueCursor = 0
           state.upNextScrollOffset = 0
-          state.player.stop()
           discard daemonSimpleCmd(DaemonClient(state.player), "next")
           state.markDirty(cePlayState)
     if state.isPlaylistView():
@@ -2852,8 +2851,29 @@ proc runTui(args: seq[string]) =
     try:
       let daemonState = dClient.getFullState()
       fullStateSync(ctx.data, daemonState)
+      # Restore queue from daemon's persisted state
+      if daemonState.hasKey("queue"):
+        try:
+          let qArr = daemonState["queue"]
+          var queue: seq[int] = @[]
+          var queuePaths: seq[string] = @[]
+          for qItem in qArr.items:
+            let qPath = qItem.getStr("")
+            var found = false
+            for i, t in ctx.data.libraryTracks:
+              if t.path == qPath:
+                queue.add(i)
+                queuePaths.add("")
+                found = true
+                break
+            if not found:
+              queue.add(-1)
+              queuePaths.add(qPath)
+          ctx.data.playbackQueue = queue
+          ctx.data.queuePaths = queuePaths
+          ctx.data.markDirty(ceQueue)
+        except: discard
     except: discard
-  # Queue is not restored from daemon's persisted state — start fresh
   ctx.data.rebuildItems()
   if dClient.connected and ctx.data.currentPlayingPath.len > 0:
     for i, t in ctx.data.libraryTracks:
@@ -2919,13 +2939,21 @@ proc runTui(args: seq[string]) =
                 try:
                   let qArr = daemonState["queue"]
                   var queue: seq[int] = @[]
+                  var queuePaths: seq[string] = @[]
                   for qItem in qArr.items:
                     let qPath = qItem.getStr("")
+                    var found = false
                     for i, t in ctx.data.libraryTracks:
                       if t.path == qPath:
                         queue.add(i)
+                        queuePaths.add("")
+                        found = true
                         break
+                    if not found:
+                      queue.add(-1)
+                      queuePaths.add(qPath)
                   ctx.data.playbackQueue = queue
+                  ctx.data.queuePaths = queuePaths
                   ctx.data.markDirtyBatch(ceQueue, cePlayState)
                 except: discard
               # Re-fetch library from daemon to pick up any metadata changes

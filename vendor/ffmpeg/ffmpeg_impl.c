@@ -50,6 +50,10 @@ typedef struct {
   char              artist[256];
   char              album[256];
   double            duration;
+  volatile int      fade_out_remaining;
+  int               fade_out_total;
+  volatile int      fade_in_remaining;
+  int               fade_in_total;
 
   pthread_mutex_t   mutex;
 } FfmpegAudioCtx;
@@ -318,6 +322,36 @@ static void* decode_thread(void* arg) {
           conv_buf[i] *= ctx->volume;
       }
 
+      // Apply pause fade-in
+      if (ctx->fade_in_remaining > 0) {
+        int to_fade = total < ctx->fade_in_remaining ? total : ctx->fade_in_remaining;
+        for (int i = 0; i < to_fade; i++) {
+          float gain = 1.0f - (float)ctx->fade_in_remaining / ctx->fade_in_total;
+          conv_buf[i] *= gain;
+          ctx->fade_in_remaining--;
+        }
+      }
+
+      // Apply pause fade-out
+      if (ctx->fade_out_remaining > 0) {
+        int to_fade = total < ctx->fade_out_remaining ? total : ctx->fade_out_remaining;
+        for (int i = 0; i < total; i++) {
+          if (i < to_fade) {
+            float gain = (float)ctx->fade_out_remaining / ctx->fade_out_total;
+            conv_buf[i] *= gain;
+            ctx->fade_out_remaining--;
+          } else {
+            conv_buf[i] = 0.0f;
+          }
+        }
+        if (ctx->fade_out_remaining <= 0) {
+          ctx->paused = 1;
+          ctx->playing = 0;
+          if (ctx->alsa_open) { snd_pcm_drop(ctx->alsa_handle); snd_pcm_prepare(ctx->alsa_handle); }
+          break;
+        }
+      }
+
       if (ctx->alsa_open) {
         int fw = snd_pcm_writei(ctx->alsa_handle, conv_buf, conv);
         if (fw < 0) snd_pcm_recover(ctx->alsa_handle, fw, 1);
@@ -347,6 +381,10 @@ void ffmpeg_audio_start(FfmpegAudioCtx* ctx) {
   if (!ctx) return;
   ctx->playing = 1;
   ctx->paused = 0;
+  // Fade-in on resume (500ms at 44100Hz)
+  ctx->fade_in_remaining = 22050;
+  ctx->fade_in_total = 22050;
+  ctx->fade_out_remaining = 0;
   if (!ctx->thread_started) {
     ctx->thread_stop = 0;
     pthread_create(&ctx->decode_thread, NULL, decode_thread, ctx);
@@ -356,11 +394,9 @@ void ffmpeg_audio_start(FfmpegAudioCtx* ctx) {
 
 void ffmpeg_audio_pause(FfmpegAudioCtx* ctx) {
   if (!ctx) return;
-  ctx->playing = 0;
-  ctx->paused = 1;
-  if (ctx->alsa_open) {
-    snd_pcm_drop(ctx->alsa_handle);
-    snd_pcm_prepare(ctx->alsa_handle);
+  if (ctx->playing && !ctx->paused && ctx->fade_out_remaining <= 0) {
+    ctx->fade_out_remaining = 22050; /* ~500ms at 44100Hz stereo */
+    ctx->fade_out_total = 22050;
   }
 }
 
@@ -373,6 +409,8 @@ void ffmpeg_audio_stop(FfmpegAudioCtx* ctx) {
     snd_pcm_prepare(ctx->alsa_handle);
   }
   ctx->current_time = 0.0;
+  ctx->fade_out_remaining = 0;
+  ctx->fade_in_remaining = 0;
   if (ctx->fmt_ctx && ctx->audio_stream_idx >= 0) {
     avcodec_flush_buffers(ctx->codec_ctx);
     AVStream* st = ctx->fmt_ctx->streams[ctx->audio_stream_idx];
@@ -583,6 +621,8 @@ typedef struct {
   int               prime_target;   /* samples to accumulate before writing */
   volatile int      fade_out_remaining;
   int               fade_out_total;
+  volatile int      fade_in_remaining;
+  int               fade_in_total;
   Equalizer         eq;
 } MixerCtx;
 
@@ -746,6 +786,16 @@ static void* mixer_thread(void* arg) {
         if (mx->volume != 1.0f)
           for (int i = 0; i < nsamples; i++) mixbuf[i] *= mx->volume;
 
+        // Apply pause fade-in
+        if (mx->fade_in_remaining > 0) {
+          int to_fade = nsamples < mx->fade_in_remaining ? nsamples : mx->fade_in_remaining;
+          for (int i = 0; i < to_fade; i++) {
+            float gain = 1.0f - (float)mx->fade_in_remaining / mx->fade_in_total;
+            mixbuf[i] *= gain;
+            mx->fade_in_remaining--;
+          }
+        }
+
         // Apply pause fade-out
         if (mx->fade_out_remaining > 0) {
           int to_fade = nsamples < mx->fade_out_remaining ? nsamples : mx->fade_out_remaining;
@@ -818,6 +868,16 @@ static void* mixer_thread(void* arg) {
       // Apply volume
         if (mx->volume != 1.0f)
           for (int i = 0; i < mtotal; i++) mbuf[i] *= mx->volume;
+
+        // Apply pause fade-in
+        if (mx->fade_in_remaining > 0) {
+          int to_fade = mtotal < mx->fade_in_remaining ? mtotal : mx->fade_in_remaining;
+          for (int i = 0; i < to_fade; i++) {
+            float gain = 1.0f - (float)mx->fade_in_remaining / mx->fade_in_total;
+            mbuf[i] *= gain;
+            mx->fade_in_remaining--;
+          }
+        }
 
         // Apply pause fade-out
         if (mx->fade_out_remaining > 0) {
@@ -904,6 +964,8 @@ MixerCtx* ffmpeg_mixer_init(void) {
   mx->prime_target = 8192; /* ~93ms at 44100Hz stereo */
   mx->fade_out_remaining = 0;
   mx->fade_out_total = 0;
+  mx->fade_in_remaining = 0;
+  mx->fade_in_total = 0;
   avformat_network_init();
   return mx;
 }
@@ -929,6 +991,7 @@ int ffmpeg_mixer_load_master(MixerCtx* mx, const char* path) {
   mx->crossfade_active = 0;
   mx->crossfade_reverse = 0;
   mx->priming = 0;
+  mx->fade_in_remaining = 0;
   if (mx->master) ffmpeg_audio_uninit(mx->master);
   mx->master = ffmpeg_audio_init();
   if (!mx->master) return 0;
@@ -958,6 +1021,9 @@ void ffmpeg_mixer_start(MixerCtx* mx) {
   mx->paused = 0;
   mx->priming = 1;
   mx->fade_out_remaining = 0;
+  // Fade-in on resume (500ms at 44100Hz)
+  mx->fade_in_remaining = 22050;
+  mx->fade_in_total = 22050;
   if (!mx->thread_started) {
     mx->thread_stop = 0;
     pthread_create(&mx->decode_thread, NULL, mixer_thread, mx);
@@ -968,8 +1034,8 @@ void ffmpeg_mixer_start(MixerCtx* mx) {
 void ffmpeg_mixer_pause(MixerCtx* mx) {
   if (!mx) return;
   if (mx->playing && !mx->paused && mx->fade_out_remaining <= 0) {
-    mx->fade_out_remaining = 4410; /* ~50ms at 44100Hz stereo */
-    mx->fade_out_total = 4410;
+    mx->fade_out_remaining = 22050; /* ~500ms at 44100Hz stereo */
+    mx->fade_out_total = 22050;
     mx->priming = 0;
   }
 }
@@ -985,6 +1051,7 @@ void ffmpeg_mixer_stop(MixerCtx* mx) {
   mx->crossfade_reverse = 0;
   mx->priming = 0;
   mx->fade_out_remaining = 0;
+  mx->fade_in_remaining = 0;
 }
 
 void ffmpeg_mixer_start_crossfade(MixerCtx* mx, int duration_frames, int reverse) {
@@ -992,6 +1059,7 @@ void ffmpeg_mixer_start_crossfade(MixerCtx* mx, int duration_frames, int reverse
   mx->crossfade_active = 1;
   mx->crossfade_total_frames = duration_frames;
   mx->crossfade_frames_remaining = duration_frames;
+  mx->fade_in_remaining = 0;
   mx->crossfade_reverse = reverse ? 1 : 0;
   // Rewind slave to beginning
   if (mx->slave->fmt_ctx && mx->slave->audio_stream_idx >= 0) {
