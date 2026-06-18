@@ -1,6 +1,9 @@
 import os, json, strutils, net, posix, random, osproc, times, base64
 from nativesockets import setBlocking, selectRead, SocketHandle
-proc prctl(option: cint, arg2: cstring): cint {.importc, header: "<sys/prctl.h>".}
+when not defined(macosx):
+  proc prctl(option: cint, arg2: cstring): cint {.importc, header: "<sys/prctl.h>".}
+else:
+  proc pthread_setname_np(name: cstring): cint {.importc, header: "<pthread.h>".}
 import audio, state, library, ytdlp, lyrics
 
 proc parseFilenameForMetadata(path: string): tuple[title, artist: string] =
@@ -1402,7 +1405,10 @@ proc runDaemon*() =
     else:
       discard dup2(cint(crashFd), cint(1))
       discard dup2(cint(crashFd), cint(2))
-  discard prctl(15.cint, "gtmd")
+  when not defined(macosx):
+    discard prctl(15.cint, "gtmd")
+  else:
+    discard pthread_setname_np("gtmd")
   if not acquirePidLock():
     stderr.writeLine("[gtmd] Another daemon instance is already running")
     quit(1)
