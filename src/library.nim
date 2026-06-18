@@ -1,3 +1,31 @@
+## Music library — SQLite-backed track database and playlist management
+##
+## Manages the local music library via an embedded SQLite database.
+## Supports scanning directories, metadata extraction, favouries,
+## playlists, trash, and the lyrics cache.
+##
+## ┌──────────────────────────────────────────────────────┐
+## │  Library tables (library.db)                         │
+## │                                                      │
+## │  tracks(id, path, title, artist, album, duration,    │
+## │         bitrate, samplerate, hash)                   │
+## │      ▲                                               │
+## │  playlist_tracks(playlist_id, track_id, position)    │
+## │      ▲                                               │
+## │  playlists(id, name, created_at)                     │
+## │                                                      │
+## │  favourites(track_id, added_at)                      │
+## │  trash(id, track_id, deleted_at)                     │
+## │  lyrics_cache(track_key, source, lyrics_data, ts)    │
+## │  downloads(id, url, title, status, progress, path)   │
+## │                                                      │
+## │  ┌────────────────────────────────────────────┐      │
+## │  │  scanDirectory(path) ──► addTrack()         │      │
+## │  │  (recursive, metadata from filename ≈       │      │
+## │  │   file tags when available)                  │      │
+## │  └────────────────────────────────────────────┘      │
+## └──────────────────────────────────────────────────────┘
+
 import os, strutils, sequtils, algorithm, sets, tables, times
 import state, theme
 

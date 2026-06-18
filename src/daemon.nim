@@ -1,3 +1,35 @@
+## gtmd — background audio daemon
+##
+## Owns audio playback, the music library (SQLite), and exposes a
+## JSON-over-Unix-socket IPC interface for the TUI and CLI clients.
+##
+## ┌──────────────────────────────────────────────────┐
+## │                gtmd main loop                    │
+## │                                                  │
+## │  select() on:                                    │
+## │    ┌──────────────┐                              │
+## │    │  Unix socket  │  client requests             │
+## │    │  (listen)     │  (new connections)           │
+## │    └──────┬───────┘                              │
+## │           ▼                                       │
+## │    ┌──────────────┐                              │
+## │    │  client conns │  readLine → parseJson        │
+## │    │  (per-client) │  → parseCmd() → execute()    │
+## │    └──────┬───────┘                              │
+## │           ▼                                       │
+## │    ┌──────────────────────┐                      │
+## │    │  AudioBackend        │  pollEvents() every   │
+## │    │  (FFmpeg / Mixer)    │  iteration → queue    │
+## │    └──────────────────────┘  events for all       │
+## │                              connected clients    │
+## │    ┌──────────────────────┐                      │
+## │    │  yt-dlp subprocs     │  async downloads,     │
+## │    │  (nonblocking)       │  searches, resolves   │
+## │    └──────────────────────┘                      │
+## │                                                  │
+## │  Every poll: write queued events → each client   │
+## └──────────────────────────────────────────────────┘
+
 import os, json, strutils, net, posix, random, osproc, times, base64
 from nativesockets import setBlocking, selectRead, SocketHandle
 when not defined(macosx):

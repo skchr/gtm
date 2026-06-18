@@ -35,11 +35,11 @@ proc parseLrc*(path: string): LrcData =
     var secs: float = 0.0
     if parts.len == 2:
       try:
-        secs = parts[0].parseInt().float * 60 + parts[1].replace('.', ':').parseFloat()
+        secs = parts[0].parseInt().float * 60 + parts[1].replace(',', '.').parseFloat()
       except: continue
     elif parts.len == 3:
       try:
-        secs = parts[0].parseInt().float * 3600 + parts[1].parseInt().float * 60 + parts[2].replace('.', ':').parseFloat()
+        secs = parts[0].parseInt().float * 3600 + parts[1].parseInt().float * 60 + parts[2].replace(',', '.').parseFloat()
       except: continue
     else:
       continue

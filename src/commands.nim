@@ -1,3 +1,29 @@
+## Command dispatch: fuzzy matching, keycode parsing, and action routing
+##
+## Provides utility functions used by the TUI's keybinding system.
+## Commands themselves are registered via state.registerCommand() in gtm.nim
+## and dispatched by string ID through the main event loop.
+##
+## ┌───────────────────────────────────────────────┐
+## │  Keybinding flow                              │
+## │                                               │
+## │  keypress ──► parseKeyCode()                  │
+## │      │                                        │
+## │      ▼                                        │
+## │  keybinding lookup (state.keybindings table)  │
+## │      │                                        │
+## │      ▼                                        │
+## │  command string ID → executeCommand()         │
+## │  (registered via state.registerCommand())     │
+## │      │                                        │
+## │      ├── TUI actions (nav, play/stop/seek,    │
+## │      │   tab switch, filter, etc.)            │
+## │      ├── IPC send (play, volume, shuffle,     │
+## │      │   repeat, crossfade, etc.)             │
+## │      └── Modal (command palette, fuzzy        │
+## │          finder, queue picker)                │
+## └───────────────────────────────────────────────┘
+
 import illwave as iw
 import state, strutils, sequtils, tables
 

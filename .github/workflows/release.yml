@@ -87,8 +87,8 @@ jobs:
             cp bin/gtm.1 dist/gtm-full/
           fi
 
-          tar czf "dist/gtm-full-${VERSION}-${TARGET}.tar.gz"   -C dist/gtm-full .
-          tar czf "dist/gtmd-${VERSION}-${TARGET}.tar.gz"       -C dist/gtmd .
+          tar czf "dist/gtm-full-${TARGET}.tar.gz"   -C dist/gtm-full .
+          tar czf "dist/gtmd-${TARGET}.tar.gz"       -C dist/gtmd .
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2

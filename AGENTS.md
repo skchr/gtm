@@ -37,6 +37,15 @@
 - `src/client.nim`: version parsed from daemon JSON events into `AudioEvent.version`
 - `src/gtm.nim`: `processEvents` tracks `state.daemonStateVersion = ev.version` on every event
 
+### Phase 6 — Documentation & Manpage Generator — COMPLETE
+- `tools/genman.nim`: full manpage generator extracting CLI subcmds (15), TUI commands (47), daemon commands (72), audio events (11) from source
+- `tools/docs.nim`: example code blocks (`DocExample` objects) for CLI, daemon, lyrics, and audio use cases
+- `.githooks/pre-push`: auto-regenerates + commits manpages on push
+- `build.nims`: sets `core.hooksPath .githooks`
+- ASCII architecture diagrams added to `src/daemon.nim`, `src/audio.nim`, `src/client.nim`, `src/state.nim`, `src/gtm.nim`, `src/commands.nim`, `src/cli.nim`, `src/library.nim`
+- `docs/gtm.1.md`: examples section (shell usage, programmatic piping via jq)
+- `docs/gtmd.1.md`: examples section (socat interaction, event streaming, scripted shell, Nim sock API example)
+
 ## Build & Test
 
 ```bash
@@ -45,6 +54,8 @@ nim e build.nims -t       # TUI only
 nim e build.nims -d       # daemon only
 nim check src/gtm.nim     # TUI syntax check
 nim check src/gtmd.nim    # daemon syntax check
+nim r tools/genman.nim    # regenerate manpages from source
 # Tests:
 nim r --path:src tests/test_ipc.nim
 nim r --path:src tests/test_parse.nim
+nim r --path:src tests/test_examples.nim

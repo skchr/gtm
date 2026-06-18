@@ -84,24 +84,7 @@ gtm daemon            # Start daemon manually
 
 ## Installation
 
-### From source
-
-```bash
-nim c -d:release src/gtm.nim
-cp bin/gtm ~/.local/bin/
-```
-
-### One-liner (requires published releases)
-
-```bash
-curl -sf https://raw.githubusercontent.com/skchr/gtm/main/install.sh | sh
-```
-
-Override version or prefix:
-
-```bash
-VERSION=0.5.3 PREFIX=/usr/local curl -sf https://raw.githubusercontent.com/skchr/gtm/main/install.sh | sh
-```
+See [INSTALL.md](INSTALL.md) for install instructions (one-liner, from source, post-install steps).
 
 ## Configuration
 
@@ -115,12 +98,6 @@ VERSION=0.5.3 PREFIX=/usr/local curl -sf https://raw.githubusercontent.com/skchr
   "visualizer": { "enabled": true, "bar_count": 32 }
 }
 ```
-
-## Requirements
-
-- Nim >= 2.0.0
-- Linux with `/dev/shm` (for visualizer)
-- Terminal with true color support recommended
 
 ## Spotify Setup
 
@@ -144,12 +121,13 @@ gtm can import Spotify playlists and search Spotify tracks via [spotDL](https://
 
 4. **Import a Spotify playlist URL**: Press `Alt+S`, paste the URL (e.g. `https://open.spotify.com/playlist/...`), and press Enter. gtm will fetch metadata via spotDL and queue the downloads.
 
-## Development
+## Building & Documentation
 
-```bash
-nim c -d:release src/gtm.nim              # release build
-nim check src/gtm.nim                      # syntax check
-```
+| Resource | Description |
+|----------|-------------|
+| [BUILD.md](BUILD.md) | Build prerequisites and commands |
+| [DOCS.md](DOCS.md) | Documentation system reference |
+| [INSTALL.md](INSTALL.md) | Installation instructions |
 
 ## Architecture
 

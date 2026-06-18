@@ -50,6 +50,11 @@ proc buildBinary(src, label: string, version:string ) =
     " -d:gtmBuildTime:"
   sh("nim c " & flags & " " & src & " 2>&1")
 
+  echo ""
+
+  echo "-- Git Hooks --"
+  sh("git config core.hooksPath .githooks")
+
 when isMainModule:
   var buildTui = false
   var buildDmd = false

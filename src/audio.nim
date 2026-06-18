@@ -1,3 +1,33 @@
+## Audio backend abstraction and event system
+##
+## Defines the polymorphic AudioBackend type hierarchy and the event
+## protocol used to communicate playback state changes (position,
+## volume, metadata, errors) from the backend to the daemon's main loop.
+##
+## ┌──────────────────────────────────────────────────────────┐
+## │  AudioBackend (ref object of RootObj)                     │
+## │                                                          │
+## │  Fields: running, volume, timePos, duration, paused, ... │
+## │  ┌────────────────────────────────────────────────┐      │
+## │  │  pollEvents(): seq[AudioEvent]                 │      │
+## │  │  (called every ~16ms by daemon main loop)      │      │
+## │  └────────────────────────────────────────────────┘      │
+## │                       ▲                                  │
+## │                       │ (inherits)                       │
+## │         ┌─────────────┴─────────────┐                    │
+## │         ▼                           ▼                    │
+## │  ┌──────────────┐          ┌──────────────┐              │
+## │  │FfmpegBackend │          │ MixerBackend │              │
+## │  │ (spawns      │          │ (ALSA mixing │              │
+## │  │  ffplay via  │          │  + internal   │              │
+## │  │  popen/pipe) │          │  decoder)     │              │
+## │  └──────────────┘          └──────────────┘              │
+## │                                                          │
+## │  DummyBackend — no-op stub (unused)                      │
+## │  DaemonClient (in client.nim) inherits AudioBackend      │
+## │    to expose the same pollEvents() interface for TUI     │
+## └──────────────────────────────────────────────────────────┘
+
 import os, math, strutils, posix, tables
 
 type

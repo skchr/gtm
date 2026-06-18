@@ -1,3 +1,33 @@
+## Core state types and global state for the TUI application
+##
+## AppState holds all mutable UI state: tabs, play queue, settings,
+## library view, theme cache, cover art cache, and the daemon IPC
+## connection. It is passed by `var` through the entire TUI codebase.
+##
+## ┌───────────────────────────────────────────────────────┐
+## │  AppState                                              │
+## │                                                       │
+## │  ┌─────────────────┐  ┌──────────────────────────┐    │
+## │  │  Config fields   │  │  DaemonClient (Audio     │    │
+## │  │  (theme, volume,│  │  Backend subclass)       │    │
+## │  │   keybindings…)  │  │  - sock, buf, pending    │    │
+## │  └─────────────────┘  │  - drainedEvents[]        │    │
+## │                        └──────────────────────────┘    │
+## │  ┌─────────────────┐  ┌──────────────────────────┐    │
+## │  │  Playback        │  │  Library view            │    │
+## │  │  - queue[]       │  │  - tracks[], playlists[] │    │
+## │  │  - cursor, status │  │  - filter, search          │    │
+## │  │  - volume, repeat,│  │  - selection            │    │
+## │  │    shuffle, mute  │  └──────────────────────────┘    │
+## │  └─────────────────┘                                    │
+## │  ┌─────────────────┐  ┌──────────────────────────┐    │
+## │  │  UI state        │  │  Cover cache + lyrics    │    │
+## │  │  - tab, editor   │  │  (LrcData, LrcLine[])   │    │
+## │  │  - notifications │  └──────────────────────────┘    │
+## │  └─────────────────┘                                    │
+## │  daemonStateVersion — monotonic counter for state sync  │
+## └───────────────────────────────────────────────────────┘
+
 import illwave as iw
 import os, tables, sets, osproc, audio, theme, math, json, options, colors, strutils
 

@@ -1,16 +1,11 @@
 #!/bin/sh
-# gtm — one-line install script
 # Usage: curl -sf https://raw.githubusercontent.com/skchr/gtm/main/install.sh | sh
 #
-# Environment variables:
 #   VERSION  – release tag to install (default: latest)
 #   PREFIX   – install directory prefix (default: $HOME/.local)
-#
-# NOTE: This script downloads release artifacts from GitHub.
-# No CI/CD is set up yet — ask the maintainer to publish builds before using.
 set -eu
 
-REPO="prjctimg/gtm"
+REPO="skchr/gtm"
 VERSION="${VERSION:-latest}"
 PREFIX="${PREFIX:-$HOME/.local}"
 

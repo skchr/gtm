@@ -1,3 +1,29 @@
+## DaemonClient — IPC transport for TUI ↔ daemon communication
+##
+## DaemonClient extends AudioBackend so the TUI can use the same
+## pollEvents() interface the daemon uses for the real backends.
+## Communication is JSON-over-Unix-socket with newline framing.
+##
+## ┌─────────────────────────────────────────────────────┐
+## │  DaemonClient (TUI side)                            │
+## │                                                     │
+## │  send(cmd, args) ──► writeLine(json)                │
+## │         │                  │                         │
+## │         │          ┌───────┴────────┐               │
+## │         │          │  Unix socket   │               │
+## │         │          │  (AF_UNIX)     │               │
+## │         │          └───────┬────────┘               │
+## │         │                  │                         │
+## │         ▼                  ▼                         │
+## │  resp: pending callback ← readLine(json)            │
+## │  events: drainedEvents ← readLine(json events)      │
+## │                                                     │
+## │  pollEvents(): drain events from in-memory buffer   │
+## │  that was filled by the read thread / select loop   │
+## │                                                     │
+## │  Reconnect: if ping fails, spawn daemon and retry   │
+## └─────────────────────────────────────────────────────┘
+
 import os, json, strutils, net, osproc, posix, tables
 from nativesockets import setBlocking
 import state, audio

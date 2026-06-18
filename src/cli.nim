@@ -1,3 +1,24 @@
+## CLI subcommand parser and dispatch
+##
+## Parses argv into a Subcommand enum and optional arguments, then
+## executes the corresponding action by sending IPC messages to the
+## running daemon (or spawning it for `daemon` and `play`).
+##
+## ┌────────────────────────────────────────────────┐
+## │  CLI entry (from gtm.nim main)                  │
+## │                                                 │
+## │  parseArgs(argv) ──► CliArgs(subcmd, targets)   │
+## │       │                                         │
+## │       ▼                                         │
+## │  case subcmd:                                   │
+## │    scDaemon ──► spawn daemon, wait, exit        │
+## │    scPlay   ──► send IPC play, may spawn daemon │
+## │    scKill   ──► send IPC quit                   │
+## │    scStatus ──► send IPC status, print result   │
+## │    scVolume ──► send IPC get/set volume         │
+## │    …etc      ──► send IPC cmd, print response   │
+## └────────────────────────────────────────────────┘
+
 import os, json, strutils, osproc
 import client, state, library, audio
 

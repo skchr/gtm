@@ -1,0 +1,15 @@
+#!/bin/sh
+# Pre-push hook: regenerate manpages from source and commit if changed.
+set -e
+
+echo "  [hooks] regenerating manpages from source..."
+nim r --path:src tools/genman.nim 2>&1
+
+if ! git diff --quiet docs/gtm.1.md docs/gtmd.1.md; then
+  echo "  [hooks] manpages changed, committing..."
+  git add docs/gtm.1.md docs/gtmd.1.md
+  git commit -m "docs: sync manpage from source definitions"
+  echo "  [hooks] done"
+else
+  echo "  [hooks] no manpage changes"
+fi
