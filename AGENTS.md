@@ -46,6 +46,16 @@
 - `docs/gtm.1.md`: examples section (shell usage, programmatic piping via jq)
 - `docs/gtmd.1.md`: examples section (socat interaction, event streaming, scripted shell, Nim sock API example)
 
+### Session — CI/CD Release Pipeline Fixes — COMPLETE
+- `.github/workflows/release.yml`: `ubuntu-latest` → `ubuntu-22.04` for linux-amd64 (glibc 2.35)
+- `release.yml`: linux-arm64 builds inside `arm64v8/ubuntu:22.04` Docker container on `ubuntu-24.04-arm` runner (glibc 2.35)
+- `release.yml`: removed static FFmpeg source build (n7.1) and static binary variants — dynamic+bundled is simpler and sufficient
+- `release.yml`: added `workflow_dispatch:` trigger for manual retriggering
+- `release.yml`: removed darwin-amd64 (macos-13 runner deprecated)
+- `release.yml`: fixed macOS bundling (`set +e`, widened grep, silenced errors)
+- `release.yml`: fixed apt-get 404s (`--fix-missing`, retry flags)
+- `install.sh`: removed FFmpeg detection logic and `-static` suffix — always downloads dynamic+bundled tarball
+
 ## Build & Test
 
 ```bash
