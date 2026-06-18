@@ -2703,7 +2703,7 @@ proc processEvents(state: var AppState) =
               state.libraryTracks[i].artist = state.currentPlayingChannel
             break
       state.markDirtyBatch(cePlayState, ceTrack)
-      # Fetch cover art when track changes
+      # Request cover art from daemon — non-blocking, response via cover_art_sync event
       if state.hasKittyGraphics and state.currentPlayingPath.len > 0 and state.coverPendingPath != state.currentPlayingPath:
         state.coverPendingPath = state.currentPlayingPath
         state.coverImageId = -1
@@ -2711,29 +2711,15 @@ proc processEvents(state: var AppState) =
         if cacheKey notin state.coverCache:
           state.coverFetching = true
           if state.player of DaemonClient:
-            let cli = DaemonClient(state.player)
-            let resp = cli.getCoverArt(state.currentPlayingPath)
-            if resp.hasKey("cover_data") and resp["cover_data"].getStr("").len > 0:
-              let mime = resp{"cover_mime"}.getStr("image/jpeg")
-              state.coverCache[cacheKey] = (cast[seq[byte]](decode(resp["cover_data"].getStr(""))), mime)
-            state.coverFetching = false
-            state.markDirty(ceTrack)
-      # Fetch lyrics when track changes
+            DaemonClient(state.player).sendOnly(%*{"cmd": "request_cover_art", "path": state.currentPlayingPath})
+      # Request lyrics from daemon — non-blocking, response via lyrics_sync event
       if not isSameTrack and state.currentPlayingPath.len > 0:
         state.currentLyrics = LrcData(lines: @[])
         state.lyricsLineIdx = -1
         if state.player of DaemonClient:
-          let cli = DaemonClient(state.player)
-          let lrcResp = cli.getLyrics(state.currentPlayingPath, state.currentPlayingTitle,
-            state.currentPlayingChannel, "", state.duration)
-          if lrcResp.hasKey("ok") and lrcResp["ok"].getBool():
-            var lrcData = LrcData(title: lrcResp{"title"}.getStr(""), artist: lrcResp{"artist"}.getStr(""),
-              album: lrcResp{"album"}.getStr(""), lines: @[])
-            for ln in lrcResp["lines"].items:
-              lrcData.lines.add(LrcLine(timestamp: ln{"ts"}.getFloat(), text: ln{"text"}.getStr("")))
-            state.currentLyrics = lrcData
-          else:
-            state.currentLyrics = LrcData(lines: @[])
+          DaemonClient(state.player).sendOnly(%*{"cmd": "request_lyrics",
+            "path": state.currentPlayingPath, "title": state.currentPlayingTitle,
+            "artist": state.currentPlayingChannel, "duration": state.duration})
       # Show Now Playing notification — skip if same track (play/pause resume) or auto-advanced
       if not isSameTrack and not autoAdvanced:
         if state.currentPlayingTitle.len > 0:
@@ -2809,11 +2795,8 @@ proc processEvents(state: var AppState) =
           fullStateSync(state, fs)
           state.markDirtyBatch(cePlayState, ceTrack, cePosition, ceVolume)
       elif ev.strVal == "queue_changed" and state.player of DaemonClient:
-        let cli = DaemonClient(state.player)
-        let fullState = cli.getFullState()
-        if fullState.hasKey("shuffleIndex"):
-          state.shuffleIndex = fullState["shuffleIndex"].getInt(0)
-          state.markDirty(ceQueue)
+        state.shuffleIndex = ev.intVal
+        state.markDirty(ceQueue)
         # Rebuild TUI playbackQueue from daemon queue paths
         if ev.metadata.hasKey("queue"):
           try:
@@ -2943,6 +2926,27 @@ proc processEvents(state: var AppState) =
             state.setFeedback("Playlist: " & plTitle & " (" & $tracks.len & " tracks)")
             state.markDirty(ceSearchResults)
           except: discard
+      elif ev.strVal == "cover_art_sync":
+        if state.coverFetching and ev.metadata.hasKey("cover_data") and ev.metadata["cover_data"].len > 0:
+          let cacheKey = hash(state.currentPlayingPath).toHex
+          let mime = ev.metadata.getOrDefault("cover_mime", "image/jpeg")
+          try:
+            state.coverCache[cacheKey] = (cast[seq[byte]](decode(ev.metadata["cover_data"])), mime)
+          except: discard
+          state.coverFetching = false
+          state.markDirty(ceTrack)
+      elif ev.strVal == "lyrics_sync":
+        if ev.metadata.hasKey("ok") and ev.metadata["ok"] == "true":
+          var lrcData = LrcData(title: ev.metadata.getOrDefault("title", ""),
+            artist: ev.metadata.getOrDefault("artist", ""),
+            album: ev.metadata.getOrDefault("album", ""), lines: @[])
+          if ev.metadata.hasKey("lines"):
+            try:
+              let linesArr = parseJson(ev.metadata["lines"])
+              for ln in linesArr.items:
+                lrcData.lines.add(LrcLine(timestamp: ln{"ts"}.getFloat(), text: ln{"text"}.getStr("")))
+              state.currentLyrics = lrcData
+            except: discard
     else: discard
   if state.player.timePos != state.timePos and state.status == psPlaying:
     state.timePos = state.player.timePos

@@ -80,7 +80,8 @@ type
     dckSearchLyrics,
     dckSetSpatialWidth,
     dckPing,
-    dckDeleteTrack, dckRestoreTrack, dckPermanentDelete, dckListTrash, dckPurgeTrash
+    dckDeleteTrack, dckRestoreTrack, dckPermanentDelete, dckListTrash, dckPurgeTrash,
+    dckRequestCoverArt, dckRequestLyrics
 
   DaemonCmd* = object
     kind*: DaemonCmdKind
@@ -355,6 +356,12 @@ proc parseDaemonCommand(line: string): DaemonCmd =
       result.kind = dckListTrash
     of "purge_trash":
       result.kind = dckPurgeTrash
+    of "request_cover_art":
+      result.kind = dckRequestCoverArt; result.strArg = j{"path"}.getStr("")
+    of "request_lyrics":
+      result.kind = dckRequestLyrics; result.strArg = j{"path"}.getStr("")
+      result.strArg2 = j{"title"}.getStr(""); result.strArg3 = j{"artist"}.getStr("")
+      result.strArg4 = j{"album"}.getStr(""); result.floatArg = j{"duration"}.getFloat(0.0)
     else: result.kind = dckStatus
   except:
     result.kind = dckStatus
@@ -1310,6 +1317,22 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
       result["lines"] = arr
     else:
       result["ok"] = %false
+  of dckRequestCoverArt:
+    if cmd.strArg.len > 0 and fileExists(cmd.strArg):
+      let (coverData, coverMime) = extractCoverArt(cmd.strArg)
+      if coverData.len > 0:
+        let ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "cover_art_sync",
+          "path": %cmd.strArg, "cover_data": %encode(coverData), "cover_mime": %coverMime}]}
+        d.broadcastAll($ev & "\n")
+  of dckRequestLyrics:
+    let lrc = resolveLyrics(cmd.strArg, cmd.strArg2, cmd.strArg3, cmd.strArg4, cmd.floatArg)
+    var lrcArr = newJArray()
+    for ln in lrc.lines:
+      lrcArr.add(%*{"ts": %ln.timestamp, "text": %ln.text})
+    let ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "lyrics_sync",
+      "path": %cmd.strArg, "ok": %(lrc.lines.len > 0),
+      "title": %lrc.title, "artist": %lrc.artist, "album": %lrc.album, "lines": lrcArr}]}
+    d.broadcastAll($ev & "\n")
   of dckSearchLyrics:
     let results = searchLrclib(cmd.strArg, cmd.strArg2)
     var arr = newJArray()

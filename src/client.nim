@@ -127,12 +127,13 @@ proc drainEventLinesFromJson(j: JsonNode, cli: DaemonClient) =
     of evCustomEvent:
       ev.strVal = evJson{"event"}.getStr("")
       if evJson.hasKey("shuffleIndex"): ev.intVal = evJson["shuffleIndex"].getInt(0)
-      for key in ["url", "path", "title", "channel", "next_path", "next_title", "next_channel"]:
+      for key in ["url", "path", "title", "channel", "next_path", "next_title", "next_channel", "cover_data", "cover_mime"]:
         if evJson.hasKey(key): ev.metadata[key] = evJson[key].getStr("")
-      for key in ["queue", "results", "tracks"]:
+      for key in ["queue", "results", "tracks", "lines"]:
         if evJson.hasKey(key): ev.metadata[key] = $evJson[key]
       if evJson.hasKey("shuffle"): ev.metadata["shuffle"] = $(evJson["shuffle"].getBool(false))
       if evJson.hasKey("repeat"): ev.metadata["repeat"] = $(evJson["repeat"].getInt(0))
+      if evJson.hasKey("ok"): ev.metadata["ok"] = $(evJson["ok"].getBool(false))
       # Extract full_state_sync fields from the event itself
       if ev.strVal == "full_state_sync":
         for f in ["state", "track_path", "track_title", "track_channel"]:

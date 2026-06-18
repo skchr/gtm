@@ -896,9 +896,18 @@ static void* mixer_thread(void* arg) {
             mx->master_ended = 0;
             mx->master_duration = mx->master->duration;
             ffmpeg_audio_uninit(old);
-            // Reopen ALSA for new master's sample rate/channels
-            mixer_alsa_close(mx);
-            mixer_alsa_open(mx);
+            // Avoid ALSA reopen if sample rate/channels/format match
+            if (old->sample_rate == mx->master->sample_rate &&
+                old->channels == mx->master->channels &&
+                old->codec_ctx->sample_fmt == mx->master->codec_ctx->sample_fmt) {
+              snd_pcm_drop(mx->alsa_handle);
+              snd_pcm_prepare(mx->alsa_handle);
+            } else {
+              mixer_alsa_close(mx);
+              mixer_alsa_open(mx);
+              mx->priming = 1;
+              mx->prime_target = 8192;
+            }
             continue;
           }
           mx->master_ended = 1;
