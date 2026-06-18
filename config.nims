@@ -9,6 +9,7 @@ switch("define", "ssl")
 let projectDir = currentSourcePath().parentDir()
 
 switch("path", projectDir / "src")
+switch("path", projectDir / "vendor")
 switch("path", projectDir / "vendor/nimwave")
 switch("path", projectDir / "vendor/illwave")
 switch("path", projectDir / "vendor/ansiutils")
