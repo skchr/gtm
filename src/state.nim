@@ -398,6 +398,7 @@ type
     aboutVisible*: bool
     reconnecting*: bool
     reconnectAttempts*: int
+    reattachSyncPending*: int
     pingMissed*: int
     spinnerFrame*: int
     queueCursor*: int

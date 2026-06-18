@@ -3102,69 +3102,81 @@ proc runTui(args: seq[string]) =
         else:
           ctx.data.needsRedraw = true
       processEvents(ctx.data)
-      # Daemon reconnection watchdog
+      # Daemon reconnection watchdog — non-blocking async state sync
       if ctx.data.player of DaemonClient:
         let cli = DaemonClient(ctx.data.player)
         if not cli.connected:
           ctx.data.reconnectAttempts.inc
           if not ctx.data.reconnecting:
             ctx.data.reconnecting = true
+            ctx.data.reattachSyncPending = 0
             ctx.data.markDirty(ceReconnecting)
-          if ctx.data.reconnectAttempts mod 30 == 0:
+          if ctx.data.reattachSyncPending == 0 and ctx.data.reconnectAttempts mod 30 == 0:
             cli.ensureDaemon()
             if cli.connected:
-              let daemonState = cli.getFullState()
-              fullStateSync(ctx.data, daemonState)
-              if daemonState.hasKey("queue"):
-                try:
-                  let qArr = daemonState["queue"]
-                  var queue: seq[int] = @[]
-                  var queuePaths: seq[string] = @[]
-                  for qItem in qArr.items:
-                    let qPath = qItem.getStr("")
-                    var found = false
-                    for i, t in ctx.data.libraryTracks:
-                      if t.path == qPath:
-                        queue.add(i)
-                        queuePaths.add("")
-                        found = true
-                        break
-                    if not found:
-                      queue.add(-1)
-                      queuePaths.add(qPath)
-                  ctx.data.playbackQueue = queue
-                  ctx.data.queuePaths = queuePaths
-                  ctx.data.markDirtyBatch(ceQueue, cePlayState)
-                except: discard
-              # Re-fetch library from daemon to pick up any metadata changes
-              let libResp = cli.getLibrary()
-              if libResp.hasKey("tracks") and libResp["tracks"].len > 0:
-                ctx.data.loadLibraryFromDaemon(cli, libResp)
-                # Rebuild ytDownloaded from library tracks whose path is already local
-                ctx.data.ytDownloaded.clear()
-                let dlDir = ctx.data.ytDownloadDir
-                for t in ctx.data.libraryTracks:
-                  if t.path.startsWith(dlDir):
-                    ctx.data.ytDownloaded[t.path] = t.path
-                ctx.data.downloadCount = ctx.data.ytDownloaded.len
-              # Re-sync favourites from daemon
-              let favResp = cli.getFavouritesFromDaemon()
-              if favResp.hasKey("favourites"):
-                ctx.data.favouriteIds = initHashSet[int64]()
-                for fid in favResp["favourites"]:
-                  ctx.data.favouriteIds.incl(fid.getInt(0).int64)
-              if ctx.data.currentPlayingPath.len > 0:
-                for i, t in ctx.data.libraryTracks:
-                  if t.path == ctx.data.currentPlayingPath:
-                    ctx.data.selectIndex = i
-                    ctx.data.currentPlayingId = t.id
-                    break
-              ctx.data.reconnecting = false
-              ctx.data.reconnectAttempts = 0
-              ctx.data.markDirtyBatch(cePlayState, ceTrack, ceVolume, cePosition)
-        elif ctx.data.reconnecting:
+              ctx.data.reattachSyncPending = 3
+              cli.sendAsync(%*{"cmd": "get_full_state"}) do (resp: JsonNode):
+                fullStateSync(ctx.data, resp)
+                if resp.hasKey("queue"):
+                  try:
+                    let qArr = resp["queue"]
+                    var queue: seq[int] = @[]
+                    var queuePaths: seq[string] = @[]
+                    for qItem in qArr.items:
+                      let qPath = qItem.getStr("")
+                      var found = false
+                      for i, t in ctx.data.libraryTracks:
+                        if t.path == qPath:
+                          queue.add(i)
+                          queuePaths.add("")
+                          found = true
+                          break
+                      if not found:
+                        queue.add(-1)
+                        queuePaths.add(qPath)
+                    ctx.data.playbackQueue = queue
+                    ctx.data.queuePaths = queuePaths
+                    ctx.data.markDirtyBatch(ceQueue, cePlayState)
+                  except: discard
+                if ctx.data.currentPlayingPath.len > 0:
+                  for i, t in ctx.data.libraryTracks:
+                    if t.path == ctx.data.currentPlayingPath:
+                      ctx.data.selectIndex = i
+                      ctx.data.currentPlayingId = t.id
+                      break
+                ctx.data.reattachSyncPending.dec
+                if ctx.data.reattachSyncPending == 0:
+                  ctx.data.reconnecting = false
+                  ctx.data.reconnectAttempts = 0
+                  ctx.data.markDirtyBatch(cePlayState, ceTrack, ceVolume, cePosition)
+              cli.sendAsync(%*{"cmd": "get_library"}) do (resp: JsonNode):
+                if resp.hasKey("tracks") and resp["tracks"].len > 0:
+                  ctx.data.loadLibraryFromDaemon(cli, resp)
+                  ctx.data.ytDownloaded.clear()
+                  let dlDir = ctx.data.ytDownloadDir
+                  for t in ctx.data.libraryTracks:
+                    if t.path.startsWith(dlDir):
+                      ctx.data.ytDownloaded[t.path] = t.path
+                  ctx.data.downloadCount = ctx.data.ytDownloaded.len
+                ctx.data.reattachSyncPending.dec
+                if ctx.data.reattachSyncPending == 0:
+                  ctx.data.reconnecting = false
+                  ctx.data.reconnectAttempts = 0
+                  ctx.data.markDirtyBatch(cePlayState, ceTrack, ceVolume, cePosition)
+              cli.sendAsync(%*{"cmd": "get_favourites"}) do (resp: JsonNode):
+                if resp.hasKey("favourites"):
+                  ctx.data.favouriteIds = initHashSet[int64]()
+                  for fid in resp["favourites"]:
+                    ctx.data.favouriteIds.incl(fid.getInt(0).int64)
+                ctx.data.reattachSyncPending.dec
+                if ctx.data.reattachSyncPending == 0:
+                  ctx.data.reconnecting = false
+                  ctx.data.reconnectAttempts = 0
+                  ctx.data.markDirtyBatch(cePlayState, ceTrack, ceVolume, cePosition)
+        elif ctx.data.reconnecting and ctx.data.reattachSyncPending == 0:
           ctx.data.reconnecting = false
           ctx.data.reconnectAttempts = 0
+          ctx.data.markDirtyBatch(cePlayState, ceTrack, ceVolume, cePosition)
 
       if ctx.data.overlay.kind == okYtSearch and ctx.data.player of DaemonClient:
         let cli = DaemonClient(ctx.data.player)
@@ -3174,6 +3186,7 @@ proc runTui(args: seq[string]) =
             if ctx.data.ytSearchQuery != ctx.data.overlay.query:
               if ctx.data.ytSearchActive:
                 cli.ytSearchCancel()
+                ctx.data.ytSearchActive = false
               ctx.data.overlay.ytResults = @[]
               ctx.data.overlay.cursor = 0
               ctx.data.ytSearchQuery = ctx.data.overlay.query

@@ -1,6 +1,7 @@
-import dbus
+import dbus, os
 
 var gNotifyConn: ptr DBusConnection = nil
+var gIconPath: string = ""
 
 proc initNotifications*() =
   if gNotifyConn != nil: return
@@ -13,6 +14,15 @@ proc initNotifications*() =
     dbus_error_free(addr err)
     return
   gNotifyConn = conn
+  # Resolve icon path relative to binary location
+  let binDir = getAppFilename().parentDir()
+  let candidate = binDir / ".." / "assets" / "gtm.png"
+  if fileExists(candidate):
+    gIconPath = candidate
+  else:
+    let cwdIcon = getCurrentDir() / "assets" / "gtm.png"
+    if fileExists(cwdIcon):
+      gIconPath = cwdIcon
 
 proc sendDesktopNotification*(title, body: string) =
   if gNotifyConn == nil: return
@@ -21,7 +31,7 @@ proc sendDesktopNotification*(title, body: string) =
     "org.freedesktop.Notifications", "Notify")
   msg.append("gtm".asDbusValue)
   msg.append(0.uint32.asDbusValue)
-  msg.append("".asDbusValue)
+  msg.append(gIconPath.asDbusValue)
   msg.append(title.asDbusValue)
   msg.append(body.asDbusValue)
   msg.append(newSeq[string]().asDbusValue)
