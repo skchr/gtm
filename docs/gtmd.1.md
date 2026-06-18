@@ -1,6 +1,6 @@
 % GTMD(1) User Manuals
 % prjctimg
-% v0.6.12
+% v0.6.13
 
 # NAME
 
