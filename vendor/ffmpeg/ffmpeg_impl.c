@@ -13,7 +13,9 @@
 #include <libavutil/channel_layout.h>
 #include <libavutil/error.h>
 #include <libswresample/swresample.h>
+#ifndef __APPLE__
 #include <alsa/asoundlib.h>
+#endif
 #include <math.h>
 
 #define PCM_RING_SIZE (16384)
@@ -37,7 +39,9 @@ typedef struct {
   volatile double   seek_target;
   double            current_time;
 
+#ifndef __APPLE__
   snd_pcm_t*        alsa_handle;
+#endif
   int               alsa_open;
 
   float             volume;
@@ -58,6 +62,7 @@ typedef struct {
   pthread_mutex_t   mutex;
 } FfmpegAudioCtx;
 
+#ifndef __APPLE__
 static int alsa_open_device(FfmpegAudioCtx* ctx) {
   snd_pcm_hw_params_t* hw;
   unsigned int rate = ctx->sample_rate;
@@ -103,15 +108,22 @@ static int probe_alsa_default(void) {
   snd_pcm_close(handle);
   return 1;
 }
+#else
+static int alsa_open_device(FfmpegAudioCtx* ctx) { (void)ctx; return 0; }
+static void alsa_close_device(FfmpegAudioCtx* ctx) { (void)ctx; }
+static int probe_alsa_default(void) { return 0; }
+#endif
 
 FfmpegAudioCtx* ffmpeg_audio_init(void) {
   FfmpegAudioCtx* ctx = calloc(1, sizeof(FfmpegAudioCtx));
   if (!ctx) return NULL;
+#ifndef __APPLE__
   if (!probe_alsa_default()) {
     fprintf(stderr, "[ffmpeg] ALSA default device not available\n");
     free(ctx);
     return NULL;
   }
+#endif
   av_log_set_level(AV_LOG_QUIET);
   ctx->volume = 1.0f;
   ctx->audio_stream_idx = -1;
@@ -347,15 +359,19 @@ static void* decode_thread(void* arg) {
         if (ctx->fade_out_remaining <= 0) {
           ctx->paused = 1;
           ctx->playing = 0;
+#ifndef __APPLE__
           if (ctx->alsa_open) { snd_pcm_drop(ctx->alsa_handle); snd_pcm_prepare(ctx->alsa_handle); }
+#endif
           break;
         }
       }
 
+#ifndef __APPLE__
       if (ctx->alsa_open) {
         int fw = snd_pcm_writei(ctx->alsa_handle, conv_buf, conv);
         if (fw < 0) snd_pcm_recover(ctx->alsa_handle, fw, 1);
       }
+#endif
 
       for (int i = 0; i < total; i++) {
         int wp = ctx->pcm_wp;
@@ -404,10 +420,12 @@ void ffmpeg_audio_stop(FfmpegAudioCtx* ctx) {
   if (!ctx) return;
   ctx->playing = 0;
   ctx->paused = 1;
+#ifndef __APPLE__
   if (ctx->alsa_open) {
     snd_pcm_drop(ctx->alsa_handle);
     snd_pcm_prepare(ctx->alsa_handle);
   }
+#endif
   ctx->current_time = 0.0;
   ctx->fade_out_remaining = 0;
   ctx->fade_in_remaining = 0;
@@ -558,32 +576,32 @@ static const char* EQ_PRESET_NAMES[] = {
 
 static const float EQ_PRESETS[][EQ_BANDS] = {
   { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },         // Flat
-  { 4, 4, 3, 1, 0, 0, 0, 2, 3, 4 },          // Rock — classic rock: boosted lows/highs, slight mid scoop
-  { 2, 3, 4, 2, 0, -1, 0, 2, 3, 3 },         // Pop — presence boost, slight mid cut for clarity
-  { 2, 2, 1, 0, 0, 0, 1, 2, 3, 4 },          // Classical — gentle rise in highs for brilliance
-  { 2, 2, 1, 1, 2, 3, 2, 1, 1, 0 },          // Jazz — warm mids, rounded highs
-  { 5, 5, 3, 1, 0, 0, 0, 0, 2, 3 },          // HipHop — heavy sub/bass, flat mids, crisp highs
-  { -1, 0, 1, 3, 5, 5, 3, 1, 0, 0 },         // Vocal — boost speech presence 500-2kHz, cut rumble
-  { 7, 6, 4, 2, 1, 0, 0, 0, 0, 0 },          // BassBoost — deep bass shelf only, clear mids/highs
-  { 2, 2, 1, 0, -1, -2, -1, 1, 2, 3 },       // Headphones — compensate closed-back resonance
-  { 0, 1, 2, 3, 4, 4, 3, 2, 1, 0 },          // Laptop — loudness contour for small speakers
-  { 5, 4, 3, 0, -2, -2, 0, 3, 5, 6 },        // Electronic — smiley curve for synths/EDM
-  { 2, 2, 1, 2, 3, 3, 2, 2, 2, 2 },          // Acoustic — slight low-mid warmth, natural top
-  { -3, -2, -1, 2, 4, 5, 3, 1, 0, -1 },      // Podcast — cut rumble/sub, boost speech clarity 1-4kHz
-  { 5, 4, 2, 0, -1, -1, 1, 3, 5, 5 },        // Dance — punchy low end, presence for percussion
-  { 4, 4, 3, 1, 0, 1, 2, 3, 3, 2 },          // Soul/R&B — warm bass, smooth highs
-  { 3, 4, 4, 2, 0, 2, 3, 4, 5, 4 },          // Metal — aggressive mid-high push
-  { 4, 3, 2, 1, 2, 3, 2, 1, 1, 1 },          // Reggae — emphasis on bass+mid
-  { 2, 2, 2, 4, 4, 3, 2, 2, 2, 2 },          // Blues — vocal midrange focus
-  { 1, 2, 3, 3, 3, 2, 3, 4, 4, 3 },          // Country — clean, slightly bright
-  { 2, 2, 1, 3, 4, 4, 3, 2, 1, 1 },          // Folk — natural acoustic focus
-  { 1, 1, 1, 1, 2, 3, 3, 4, 5, 5 },          // ClassicalAlt — brighter classical variant
-  { -4, -3, -2, 0, 3, 5, 4, 2, 0, -1 },      // Speech — maximum speech clarity
-  { 5, 4, 2, 1, 0, -1, 0, 2, 3, 4 },         // Loudness — Fletcher-Munson curve
-  { 0, 0, 0, 0, 0, 0, 2, 4, 6, 6 },          // TrebleBoost — high-frequency emphasis
-  { 8, 7, 5, 3, 1, 0, 0, 0, 1, 2 },          // FullBass — maximum low-end
-  { -2, -1, 0, 1, 2, 2, 1, 0, -1, -2 },      // Soft — gentle, easy listening
-  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },          // Custom — user-defined, flat to start
+  { 4, 4, 3, 1, 0, 0, 0, 2, 3, 4 },          // Rock
+  { 2, 3, 4, 2, 0, -1, 0, 2, 3, 3 },         // Pop
+  { 2, 2, 1, 0, 0, 0, 1, 2, 3, 4 },          // Classical
+  { 2, 2, 1, 1, 2, 3, 2, 1, 1, 0 },          // Jazz
+  { 5, 5, 3, 1, 0, 0, 0, 0, 2, 3 },          // HipHop
+  { -1, 0, 1, 3, 5, 5, 3, 1, 0, 0 },         // Vocal
+  { 7, 6, 4, 2, 1, 0, 0, 0, 0, 0 },          // BassBoost
+  { 2, 2, 1, 0, -1, -2, -1, 1, 2, 3 },       // Headphones
+  { 0, 1, 2, 3, 4, 4, 3, 2, 1, 0 },          // Laptop
+  { 5, 4, 3, 0, -2, -2, 0, 3, 5, 6 },        // Electronic
+  { 2, 2, 1, 2, 3, 3, 2, 2, 2, 2 },          // Acoustic
+  { -3, -2, -1, 2, 4, 5, 3, 1, 0, -1 },      // Podcast
+  { 5, 4, 2, 0, -1, -1, 1, 3, 5, 5 },        // Dance
+  { 4, 4, 3, 1, 0, 1, 2, 3, 3, 2 },          // Soul/R&B
+  { 3, 4, 4, 2, 0, 2, 3, 4, 5, 4 },          // Metal
+  { 4, 3, 2, 1, 2, 3, 2, 1, 1, 1 },          // Reggae
+  { 2, 2, 2, 4, 4, 3, 2, 2, 2, 2 },          // Blues
+  { 1, 2, 3, 3, 3, 2, 3, 4, 4, 3 },          // Country
+  { 2, 2, 1, 3, 4, 4, 3, 2, 1, 1 },          // Folk
+  { 1, 1, 1, 1, 2, 3, 3, 4, 5, 5 },          // ClassicalAlt
+  { -4, -3, -2, 0, 3, 5, 4, 2, 0, -1 },      // Speech
+  { 5, 4, 2, 1, 0, -1, 0, 2, 3, 4 },         // Loudness
+  { 0, 0, 0, 0, 0, 0, 2, 4, 6, 6 },          // TrebleBoost
+  { 8, 7, 5, 3, 1, 0, 0, 0, 1, 2 },          // FullBass
+  { -2, -1, 0, 1, 2, 2, 1, 0, -1, -2 },      // Soft
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },          // Custom
 };
 
 // --- MixerCtx for PCM crossfade ---
@@ -598,7 +616,9 @@ typedef struct {
   volatile int      playing;
   volatile int      paused;
 
+#ifndef __APPLE__
   snd_pcm_t*        alsa_handle;
+#endif
   int               alsa_open;
 
   volatile int      crossfade_active;
@@ -626,6 +646,7 @@ typedef struct {
   Equalizer         eq;
 } MixerCtx;
 
+#ifndef __APPLE__
 static int mixer_alsa_open(MixerCtx* mx) {
   if (!mx->master) { fprintf(stderr, "[ffmpeg] mixer_alsa_open: no master\n"); return 0; }
   snd_pcm_hw_params_t* hw;
@@ -650,6 +671,16 @@ static void mixer_alsa_close(MixerCtx* mx) {
   if (mx->alsa_handle) { snd_pcm_drain(mx->alsa_handle); snd_pcm_close(mx->alsa_handle); mx->alsa_handle = NULL; }
   mx->alsa_open = 0;
 }
+
+static void mixer_alsa_reopen(MixerCtx* mx) {
+  mixer_alsa_close(mx);
+  mixer_alsa_open(mx);
+}
+#else
+static int mixer_alsa_open(MixerCtx* mx) { (void)mx; return 0; }
+static void mixer_alsa_close(MixerCtx* mx) { (void)mx; }
+static void mixer_alsa_reopen(MixerCtx* mx) { (void)mx; }
+#endif
 
 static int decode_into_buf(FfmpegAudioCtx* ctx, AVPacket* pkt, AVFrame* frame,
                            float** buf, int* cap) {
@@ -729,19 +760,19 @@ static void* mixer_thread(void* arg) {
         if (mx->crossfade_reverse) {
           double rp = 1.0 - p;
           switch (mx->crossfade_curve) {
-            case 0: /* EqualPower */
+            case 0:
               mgain = cos(rp * 3.14159f / 2.0f);
               sgain = sin(rp * 3.14159f / 2.0f);
               break;
-            case 1: /* Quadratic */
+            case 1:
               mgain = (1.0f - rp) * (1.0f - rp);
               sgain = rp * rp;
               break;
-            case 2: /* Cubic */
+            case 2:
               mgain = (1.0f - rp) * (1.0f - rp) * (1.0f - rp);
               sgain = rp * rp * rp;
               break;
-            case 3: /* Asymmetric */
+            case 3:
               mgain = cos(rp * 3.14159f / 2.0f);
               sgain = sin(rp * rp * 3.14159f / 2.0f);
               break;
@@ -751,19 +782,19 @@ static void* mixer_thread(void* arg) {
           }
         } else {
           switch (mx->crossfade_curve) {
-            case 0: /* EqualPower */
+            case 0:
               mgain = cos(p * 3.14159f / 2.0f);
               sgain = sin(p * 3.14159f / 2.0f);
               break;
-            case 1: /* Quadratic */
+            case 1:
               mgain = (1.0f - p) * (1.0f - p);
               sgain = p * p;
               break;
-            case 2: /* Cubic */
+            case 2:
               mgain = (1.0f - p) * (1.0f - p) * (1.0f - p);
               sgain = p * p * p;
               break;
-            case 3: /* Asymmetric */
+            case 3:
               mgain = cos(p * p * 3.14159f / 2.0f);
               sgain = sin(p * 3.14159f / 2.0f);
               break;
@@ -811,15 +842,19 @@ static void* mixer_thread(void* arg) {
           if (mx->fade_out_remaining <= 0) {
             mx->paused = 1;
             mx->playing = 0;
+#ifndef __APPLE__
             if (mx->alsa_open) { snd_pcm_drop(mx->alsa_handle); snd_pcm_prepare(mx->alsa_handle); }
+#endif
             continue;
           }
         }
 
+#ifndef __APPLE__
         if (mx->alsa_open) {
           int fw = snd_pcm_writei(mx->alsa_handle, mixbuf, nsamples / ch);
           if (fw < 0) snd_pcm_recover(mx->alsa_handle, fw, 1);
         }
+#endif
 
         // Write to pcm ring for visualizer
         for (int i = 0; i < nsamples; i++) {
@@ -894,11 +929,14 @@ static void* mixer_thread(void* arg) {
           if (mx->fade_out_remaining <= 0) {
             mx->paused = 1;
             mx->playing = 0;
+#ifndef __APPLE__
             if (mx->alsa_open) { snd_pcm_drop(mx->alsa_handle); snd_pcm_prepare(mx->alsa_handle); }
+#endif
             continue;
           }
         }
 
+#ifndef __APPLE__
         if (mx->alsa_open && mx->priming) {
         // Accumulate samples to prevent ALSA underrun on slow streams
         if (prime_filled + mtotal > prime_cap) {
@@ -929,6 +967,16 @@ static void* mixer_thread(void* arg) {
           snd_pcm_recover(mx->alsa_handle, fw, 1);
         }
       }
+#else
+      // Non-ALSA: priming is always disabled, write to ring buffer directly
+      for (int i = 0; i < mtotal; i++) {
+        int wp = mx->pcm_wp;
+        int next = (wp + 1) % PCM_RING_SIZE;
+        if (next != mx->pcm_rp) { mx->pcm_ring[wp] = mbuf[i]; mx->pcm_wp = next; }
+      }
+#endif
+      // On macOS, the non-ALSA branch above handles the ring buffer write
+#ifndef __APPLE__
       // If priming still active, already forwarded samples via prime_buf above
       if (!mx->priming) {
         for (int i = 0; i < mtotal; i++) {
@@ -937,6 +985,7 @@ static void* mixer_thread(void* arg) {
           if (next != mx->pcm_rp) { mx->pcm_ring[wp] = mbuf[i]; mx->pcm_wp = next; }
         }
       }
+#endif
       mx->current_time += (double)(mtotal / ch) / mx->master->sample_rate;
     }
   }
@@ -953,11 +1002,13 @@ static void* mixer_thread(void* arg) {
 MixerCtx* ffmpeg_mixer_init(void) {
   MixerCtx* mx = calloc(1, sizeof(MixerCtx));
   if (!mx) return NULL;
+#ifndef __APPLE__
   if (!probe_alsa_default()) {
     fprintf(stderr, "[ffmpeg] mixer: ALSA default device not available\n");
     free(mx);
     return NULL;
   }
+#endif
   av_log_set_level(AV_LOG_QUIET);
   mx->volume = 1.0f;
   mx->priming = 0;
@@ -981,11 +1032,6 @@ void ffmpeg_mixer_uninit(MixerCtx* mx) {
   free(mx);
 }
 
-static void mixer_alsa_reopen(MixerCtx* mx) {
-  mixer_alsa_close(mx);
-  mixer_alsa_open(mx);
-}
-
 int ffmpeg_mixer_load_master(MixerCtx* mx, const char* path) {
   if (!mx) return 0;
   mx->crossfade_active = 0;
@@ -999,7 +1045,6 @@ int ffmpeg_mixer_load_master(MixerCtx* mx, const char* path) {
   mx->master_duration = mx->master->duration;
   mx->current_time = 0.0;
   mx->master_ended = 0;
-  // Reopen ALSA for new stream's sample rate/channels
   mixer_alsa_reopen(mx);
   return 1;
 }
@@ -1044,7 +1089,9 @@ void ffmpeg_mixer_stop(MixerCtx* mx) {
   if (!mx) return;
       mx->playing = 0;
   mx->paused = 1;
+#ifndef __APPLE__
   if (mx->alsa_open) { snd_pcm_drop(mx->alsa_handle); snd_pcm_prepare(mx->alsa_handle); }
+#endif
   mx->current_time = 0.0;
   mx->master_ended = 0;
   mx->crossfade_active = 0;
@@ -1215,5 +1262,3 @@ int ffmpeg_mixer_set_eq_preset(MixerCtx* mx, const char* name) {
   eq_rebuild(&mx->eq);
   return 0;
 }
-
-
