@@ -77,8 +77,9 @@ jobs:
           TARGET="${{ matrix.os-label }}-${{ matrix.arch }}"
           mkdir -p dist/gtm-full dist/gtmd
 
-          cp bin/gtm    dist/gtm-full/
-          cp bin/gtmd   dist/gtm-full/ dist/gtmd/
+          cp bin/gtm  dist/gtm-full/
+          cp bin/gtmd dist/gtm-full/
+          cp bin/gtmd dist/gtmd/
           if [ -f bin/gtm.1 ]; then
             cp bin/gtm.1 dist/gtm-full/
           fi
