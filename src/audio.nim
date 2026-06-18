@@ -55,8 +55,12 @@ method setCrossfadeCurve*(b: AudioBackend, curveType: int) {.base.} = discard
 
 when defined(useFFmpeg):
   {.compile: "vendor/ffmpeg/ffmpeg_impl.c".}
-  {.passL: staticExec("pkg-config --libs libavformat libavcodec libavutil libswresample alsa").}
-  {.passC: staticExec("pkg-config --cflags libavformat libavcodec libavutil libswresample alsa").}
+  when defined(macosx):
+    {.passL: staticExec("pkg-config --libs libavformat libavcodec libavutil libswresample").}
+    {.passC: staticExec("pkg-config --cflags libavformat libavcodec libavutil libswresample").}
+  else:
+    {.passL: staticExec("pkg-config --libs libavformat libavcodec libavutil libswresample alsa").}
+    {.passC: staticExec("pkg-config --cflags libavformat libavcodec libavutil libswresample alsa").}
 
   type
     FfmpegCtx = ptr object
