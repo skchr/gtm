@@ -43,7 +43,8 @@ jobs:
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get install -y -qq -o Acquire::Retries=3 -o Acquire::http::Timeout=10 \
+          sudo apt-get update -qq -o Acquire::Retries=3 -o Acquire::http::Timeout=30
+          sudo apt-get install -y -qq --fix-missing -o Acquire::Retries=3 \
             libavformat-dev libavcodec-dev libavutil-dev \
             libswresample-dev libasound2-dev libdbus-1-dev \
             nasm
