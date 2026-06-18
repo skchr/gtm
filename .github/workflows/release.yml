@@ -111,26 +111,27 @@ jobs:
       - name: Bundle shared libraries (macOS)
         if: runner.os == 'macOS'
         run: |
+          set +e
           mkdir -p /tmp/bundled-libs
           for bin in bin/gtm bin/gtmd; do
-            for lib in $(otool -L "$bin" | grep -E '(libav|libswresample)' | awk '{print $1}'); do
-              [ -f "$lib" ] && cp -nL "$lib" /tmp/bundled-libs/
+            for lib in $(otool -L "$bin" | grep -E '(libavformat|libavcodec|libavutil|libswresample)' | awk '{print $1}'); do
+              [ -f "$lib" ] && cp -nL "$lib" /tmp/bundled-libs/ 2>/dev/null
             done
           done
           for bin in bin/gtm bin/gtmd; do
-            for lib in $(otool -L "$bin" | grep -E '(libav|libswresample)' | awk '{print $1}'); do
+            for lib in $(otool -L "$bin" | grep -E '(libavformat|libavcodec|libavutil|libswresample)' | awk '{print $1}'); do
               base=$(basename "$lib")
-              install_name_tool -change "$lib" "@rpath/$base" "$bin"
+              install_name_tool -change "$lib" "@rpath/$base" "$bin" 2>/dev/null
             done
-            install_name_tool -add_rpath "@executable_path" "$bin"
+            install_name_tool -add_rpath "@executable_path" "$bin" 2>/dev/null || true
           done
-          for dylib in /tmp/bundled-libs/libav*.dylib /tmp/bundled-libs/libswresample*.dylib; do
+          for dylib in /tmp/bundled-libs/*.dylib; do
             [ -f "$dylib" ] || continue
-            for dep in $(otool -L "$dylib" | grep -E '(libav|libswresample)' | awk '{print $1}' | grep -v '^@'); do
+            for dep in $(otool -L "$dylib" | grep -E '(libavformat|libavcodec|libavutil|libswresample)' | awk '{print $1}' | grep -v '^@'); do
               base=$(basename "$dep")
-              install_name_tool -change "$dep" "@rpath/$base" "$dylib"
+              install_name_tool -change "$dep" "@rpath/$base" "$dylib" 2>/dev/null
             done
-            chmod 644 "$dylib"
+            chmod 644 "$dylib" 2>/dev/null
           done
 
       - name: Build manpage
