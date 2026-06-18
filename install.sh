@@ -38,9 +38,9 @@ aarch64 | arm64) ARCH="arm64" ;;
 esac
 
 if [ "$VERSION" = "latest" ]; then
-  DOWNLOAD_URL="https://github.com/$REPO/releases/latest/download/gtm-${OS}-${ARCH}.tar.gz"
+  DOWNLOAD_URL="https://github.com/$REPO/releases/latest/download/gtm-full-${OS}-${ARCH}.tar.gz"
 else
-  DOWNLOAD_URL="https://github.com/$REPO/releases/download/v${VERSION}/gtm-${OS}-${ARCH}.tar.gz"
+  DOWNLOAD_URL="https://github.com/$REPO/releases/download/v${VERSION}/gtm-full-${OS}-${ARCH}.tar.gz"
 fi
 
 # --- Temp directory ---
