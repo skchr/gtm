@@ -3,6 +3,7 @@ name: Release
 on:
   push:
     tags: 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -58,11 +59,82 @@ jobs:
           brew update
           brew install ffmpeg pkg-config
 
-      - name: Build daemon
-        run: nim c -d:release src/gtmd.nim
+      - name: Build static FFmpeg from source (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          git clone --depth 1 --branch n7.1 https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg-src
+          cd /tmp/ffmpeg-src
+          ./configure \
+            --prefix=/tmp/ffmpeg-prefix \
+            --enable-static --disable-shared \
+            --disable-doc --disable-programs \
+            --disable-everything \
+            --enable-decoder='mp3*,aac*,flac,vorbis,opus,pcm*,wmav*,alac,ape,tta,wavpack,musepack' \
+            --enable-demuxer='mp3*,aac,flac,ogg,wav,matroska,mp4,mov,ape,tta,wv,dsf,iff' \
+            --enable-parser='mpegaudio,aac,vorbis,opus,flac' \
+            --enable-protocol='file' \
+            --enable-swresample --enable-avformat --enable-avcodec --enable-avutil
+          make -j$(nproc)
+          make install
+          echo "PKG_CONFIG_PATH=/tmp/ffmpeg-prefix/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> $GITHUB_ENV
 
-      - name: Build TUI
-        run: nim c -d:release src/gtm.nim
+      - name: Build static binaries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p bin
+          nim c -d:release -d:staticFfmpeg --nimcache:/tmp/nimcache-static src/gtmd.nim
+          mv bin/gtmd bin/gtmd-static
+          nim c -d:release -d:staticFfmpeg --nimcache:/tmp/nimcache-static src/gtm.nim
+          mv bin/gtm bin/gtm-static
+
+      - name: Build dynamic binaries
+        run: |
+          mkdir -p bin
+          nim c -d:release --nimcache:/tmp/nimcache-dynamic src/gtmd.nim
+          nim c -d:release --nimcache:/tmp/nimcache-dynamic src/gtm.nim
+
+      - name: Bundle shared libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y -qq patchelf
+          mkdir -p /tmp/bundled-libs
+          for bin in bin/gtm bin/gtmd; do
+            for lib in $(ldd "$bin" | awk '{print $3}' | grep -E '/(libav|libswresample|libasound)'); do
+              [ -n "$lib" ] && [ -f "$lib" ] && cp -nL "$lib" /tmp/bundled-libs/
+            done
+          done
+          for lib in /tmp/bundled-libs/lib*.so*; do
+            [ -f "$lib" ] || continue
+            for dep in $(ldd "$lib" 2>/dev/null | awk '{print $3}' | grep -E '/(libav|libswresample|libasound)'); do
+              [ -n "$dep" ] && [ -f "$dep" ] && cp -nL "$dep" /tmp/bundled-libs/
+            done
+          done
+          patchelf --set-rpath '$ORIGIN' bin/gtm bin/gtmd
+
+      - name: Bundle shared libraries (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p /tmp/bundled-libs
+          for bin in bin/gtm bin/gtmd; do
+            for lib in $(otool -L "$bin" | grep -E '(libav|libswresample)' | awk '{print $1}'); do
+              [ -f "$lib" ] && cp -nL "$lib" /tmp/bundled-libs/
+            done
+          done
+          for bin in bin/gtm bin/gtmd; do
+            for lib in $(otool -L "$bin" | grep -E '(libav|libswresample)' | awk '{print $1}'); do
+              base=$(basename "$lib")
+              install_name_tool -change "$lib" "@rpath/$base" "$bin"
+            done
+            install_name_tool -add_rpath "@executable_path" "$bin"
+          done
+          for dylib in /tmp/bundled-libs/libav*.dylib /tmp/bundled-libs/libswresample*.dylib; do
+            [ -f "$dylib" ] || continue
+            for dep in $(otool -L "$dylib" | grep -E '(libav|libswresample)' | awk '{print $1}' | grep -v '^@'); do
+              base=$(basename "$dep")
+              install_name_tool -change "$dep" "@rpath/$base" "$dylib"
+            done
+            chmod 644 "$dylib"
+          done
 
       - name: Build manpage
         run: |
@@ -78,17 +150,36 @@ jobs:
           VERSION="${{ github.ref_name }}"
           VERSION="${VERSION#v}"
           TARGET="${{ matrix.os-label }}-${{ matrix.arch }}"
-          mkdir -p dist/gtm-full dist/gtmd
 
+          # --- Dynamic bundled variant ---
+          mkdir -p dist/gtm-full dist/gtmd
           cp bin/gtm  dist/gtm-full/
           cp bin/gtmd dist/gtm-full/
           cp bin/gtmd dist/gtmd/
+          if [ -d /tmp/bundled-libs ]; then
+            cp /tmp/bundled-libs/*.so* dist/gtm-full/ 2>/dev/null || true
+            cp /tmp/bundled-libs/*.dylib dist/gtm-full/ 2>/dev/null || true
+            cp /tmp/bundled-libs/*.so* dist/gtmd/ 2>/dev/null || true
+            cp /tmp/bundled-libs/*.dylib dist/gtmd/ 2>/dev/null || true
+          fi
           if [ -f bin/gtm.1 ]; then
             cp bin/gtm.1 dist/gtm-full/
           fi
+          tar czf "dist/gtm-full-${TARGET}.tar.gz" -C dist/gtm-full .
+          tar czf "dist/gtmd-${TARGET}.tar.gz"     -C dist/gtmd .
 
-          tar czf "dist/gtm-full-${TARGET}.tar.gz"   -C dist/gtm-full .
-          tar czf "dist/gtmd-${TARGET}.tar.gz"       -C dist/gtmd .
+          # --- Static variant (Linux only) ---
+          if [ -f bin/gtm-static ]; then
+            mkdir -p dist/gtm-full-static dist/gtmd-static
+            cp bin/gtm-static  dist/gtm-full-static/gtm
+            cp bin/gtmd-static dist/gtm-full-static/gtmd
+            cp bin/gtmd-static dist/gtmd-static/gtmd
+            if [ -f bin/gtm.1 ]; then
+              cp bin/gtm.1 dist/gtm-full-static/
+            fi
+            tar czf "dist/gtm-full-${TARGET}-static.tar.gz" -C dist/gtm-full-static .
+            tar czf "dist/gtmd-${TARGET}-static.tar.gz"     -C dist/gtmd-static .
+          fi
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2

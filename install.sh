@@ -32,10 +32,43 @@ aarch64 | arm64) ARCH="arm64" ;;
   ;;
 esac
 
-if [ "$VERSION" = "latest" ]; then
-  DOWNLOAD_URL="https://github.com/$REPO/releases/latest/download/gtm-full-${OS}-${ARCH}.tar.gz"
+# --- Check if FFmpeg libs are already on the system ---
+has_ffmpeg=false
+case "$OS" in
+  linux)
+    if ldconfig -p 2>/dev/null | grep -q libavformat ||
+       [ -f /usr/lib/libavformat.so ] ||
+       [ -f /usr/lib/x86_64-linux-gnu/libavformat.so ] ||
+       [ -f /usr/lib/aarch64-linux-gnu/libavformat.so ]; then
+      has_ffmpeg=true
+    fi
+    ;;
+  darwin)
+    if [ -f /usr/local/lib/libavformat.dylib ] ||
+       [ -f /opt/homebrew/lib/libavformat.dylib ] ||
+       [ -f /usr/local/opt/ffmpeg/lib/libavformat.dylib ]; then
+      has_ffmpeg=true
+    fi
+    ;;
+esac
+
+if [ "$has_ffmpeg" = true ]; then
+  SUFFIX=""
 else
-  DOWNLOAD_URL="https://github.com/$REPO/releases/download/v${VERSION}/gtm-full-${OS}-${ARCH}.tar.gz"
+  # No system FFmpeg — download the fully static build (Linux only)
+  # macOS always uses the bundled variant
+  if [ "$OS" = "linux" ]; then
+    SUFFIX="-static"
+  else
+    SUFFIX=""
+  fi
+  echo "gtm: system FFmpeg not found, using ${SUFFIX:-bundled} build"
+fi
+
+if [ "$VERSION" = "latest" ]; then
+  DOWNLOAD_URL="https://github.com/$REPO/releases/latest/download/gtm-full-${OS}-${ARCH}${SUFFIX}.tar.gz"
+else
+  DOWNLOAD_URL="https://github.com/$REPO/releases/download/v${VERSION}/gtm-full-${OS}-${ARCH}${SUFFIX}.tar.gz"
 fi
 
 # --- Temp directory ---
