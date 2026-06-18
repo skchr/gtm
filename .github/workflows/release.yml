@@ -46,7 +46,8 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             libavformat-dev libavcodec-dev libavutil-dev \
-            libswresample-dev libasound2-dev libdbus-1-dev
+            libswresample-dev libasound2-dev libdbus-1-dev \
+            nasm
           git clone --depth 1 https://github.com/zielmicha/nim-dbus /tmp/nim-dbus
 
       - name: Install system dependencies (macOS)
@@ -58,7 +59,7 @@ jobs:
       - name: Build static FFmpeg from source (Linux)
         if: runner.os == 'Linux'
         run: |
-          git clone --depth 1 --branch n7.1 https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg-src
+          curl -sfL https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n7.1.tar.gz | tar xz -C /tmp && mv /tmp/FFmpeg-n7.1 /tmp/ffmpeg-src
           cd /tmp/ffmpeg-src
           ./configure \
             --prefix=/tmp/ffmpeg-prefix \
