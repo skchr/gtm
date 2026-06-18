@@ -453,6 +453,27 @@ when defined(useSqlite):
       result = colInt64(stmt, 0.cint)
     finalize(stmt)
 
+  proc getTrackByPath*(lib: LibraryDb, path: string): Track =
+    let stmt = prepare(lib.db, """
+      SELECT t.id, t.path, t.title, a.name, al.title, t.duration, t.track_num, t.year, t.genre, t.play_count, t.artist_id, t.album_id, t.added_at, t.last_played
+      FROM tracks t
+      LEFT JOIN artists a ON t.artist_id = a.id
+      LEFT JOIN albums al ON t.album_id = al.id
+      WHERE t.path = ?
+    """)
+    if stmt == nil: return
+    bindText(stmt, 1.cint, path)
+    if sqlite3_step(stmt) == SQLITE_ROW:
+      result = Track(
+        id: colInt64(stmt, 0.cint), path: colText(stmt, 1.cint), title: colText(stmt, 2.cint),
+        artist: colText(stmt, 3.cint), album: colText(stmt, 4.cint), duration: colFloat(stmt, 5.cint),
+        trackNum: colInt(stmt, 6.cint), year: colInt(stmt, 7.cint),
+        genre: colText(stmt, 8.cint), playCount: colInt(stmt, 9.cint),
+        artistId: colInt64(stmt, 10.cint), albumId: colInt64(stmt, 11.cint),
+        addedAt: colText(stmt, 12.cint), lastPlayed: colText(stmt, 13.cint)
+      )
+    finalize(stmt)
+
   proc updatePlayCount*(lib: LibraryDb, trackId: int64) =
     let stmt = prepare(lib.db, "UPDATE tracks SET play_count = play_count + 1, last_played = datetime('now') WHERE id = ?")
     if stmt == nil: return
@@ -640,6 +661,7 @@ else:
   proc getPlaybackState*(lib: LibraryDb, key: string): string = ""
   proc setPlaybackState*(lib: LibraryDb, key, value: string) = discard
   proc findTrackByPath*(lib: LibraryDb, path: string): int64 = 0
+  proc getTrackByPath*(lib: LibraryDb, path: string): Track = Track()
   proc updatePlayCount*(lib: LibraryDb, trackId: int64) = discard
   proc updateTrackPath*(lib: LibraryDb, oldPath, newPath, newTitle: string) = discard
   proc closeDb*(lib: LibraryDb) = discard

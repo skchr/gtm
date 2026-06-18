@@ -503,6 +503,15 @@ proc pushTrackHistory(d: Daemon, newPath: string) =
     if d.trackHistory.len > 50:
       d.trackHistory.delete(0)
 
+proc resolveTrackMetadata(d: Daemon, path: string): tuple[title, channel: string] =
+  if path.len == 0: return
+  if isYtWatchUrl(path) and d.lib != nil:
+    let meta = d.lib.getDownloadMetaByUrl(path)
+    if meta.title.len > 0: return (meta.title, meta.channel)
+  if d.lib != nil:
+    let track = d.lib.getTrackByPath(path)
+    if track.id > 0: return (track.title, track.artist)
+
 proc advanceToNextTrack(d: Daemon, forward: bool = true): bool =
   d.autoAdvancing = true
   d.upNextSent = false
@@ -573,14 +582,20 @@ proc advanceToNextTrack(d: Daemon, forward: bool = true): bool =
       d.player.prepareNext(loadPath)
       d.player.startCrossfade(float(d.crossfadeDuration))
       d.currentTrackPath = loadPath
+      let meta = resolveTrackMetadata(d, loadPath)
+      d.currentTrackTitle = meta.title
+      d.currentTrackChannel = meta.channel
       d.crossfadePrepared = false
-      d.crossfadeStarted = false
-      d.crossfadeNextPath = ""
+      d.crossfadeStarted = true
+      d.crossfadeNextPath = loadPath
     else:
       d.player.stop()
       if not d.player.loadFile(loadPath):
         return false
       d.currentTrackPath = loadPath
+      let meta = resolveTrackMetadata(d, loadPath)
+      d.currentTrackTitle = meta.title
+      d.currentTrackChannel = meta.channel
       d.player.play()
     d.idleFrames = 0
     d.lastTrackDuration = 0.0
@@ -684,13 +699,14 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
   of dckNext:
     d.autoAdvancing = false
     if d.crossfadePrepared and d.player.state == 1:
+      let nextPath = d.crossfadeNextPath
       d.player.startCrossfade(float(d.crossfadeDuration), reverse = false)
-      d.currentTrackPath = d.crossfadeNextPath
-      d.currentTrackTitle = ""
-      d.currentTrackChannel = ""
+      d.currentTrackPath = nextPath
+      let meta = resolveTrackMetadata(d, nextPath)
+      d.currentTrackTitle = meta.title
+      d.currentTrackChannel = meta.channel
       d.crossfadePrepared = false
-      d.crossfadeStarted = false
-      d.crossfadeNextPath = ""
+      d.crossfadeStarted = true
       d.crossfadeConsumed = false
       d.idleFrames = 0
       d.pushFullState()
@@ -701,6 +717,8 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
       d.pushFullState()
       when defined(useMpris):
         emitMprisPlayerChanged(d)
+    elif d.playbackQueue.len > 0 or d.shuffleOrder.len > 0:
+      result = %*{"ok": true, "deferred": true}
     else:
       result = %*{"ok": false, "error": "no next track"}
   of dckPrev:
@@ -722,18 +740,20 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
         d.player.prepareNext(prevPath)
         d.player.startCrossfade(float(d.crossfadeDuration), reverse = true)
         d.currentTrackPath = prevPath
-        d.currentTrackTitle = ""
-        d.currentTrackChannel = ""
+        let meta = resolveTrackMetadata(d, prevPath)
+        d.currentTrackTitle = meta.title
+        d.currentTrackChannel = meta.channel
         d.crossfadePrepared = false
-        d.crossfadeStarted = false
-        d.crossfadeNextPath = ""
+        d.crossfadeStarted = true
+        d.crossfadeNextPath = prevPath
         d.crossfadeConsumed = false
       else:
         d.player.stop()
         discard d.player.loadFile(prevPath)
         d.currentTrackPath = prevPath
-        d.currentTrackTitle = ""
-        d.currentTrackChannel = ""
+        let meta = resolveTrackMetadata(d, prevPath)
+        d.currentTrackTitle = meta.title
+        d.currentTrackChannel = meta.channel
         d.player.play()
       d.idleFrames = 0
       d.pushFullState()
@@ -1673,9 +1693,11 @@ proc runDaemon*() =
                 daemon.currentTrackTitle = meta.title
                 daemon.currentTrackChannel = meta.channel
             elif daemon.lib != nil:
-              let cfId = daemon.lib.findTrackByPath(daemon.crossfadeNextPath)
-              if cfId > 0:
-                daemon.lib.updatePlayCount(cfId)
+              let cfTrack = daemon.lib.getTrackByPath(daemon.crossfadeNextPath)
+              if cfTrack.id > 0:
+                daemon.currentTrackTitle = cfTrack.title
+                daemon.currentTrackChannel = cfTrack.artist
+                daemon.lib.updatePlayCount(cfTrack.id)
             # Consume queue now that crossfade completed
             if daemon.repeatMode == 2:
               daemon.crossfadeNextPath = ""

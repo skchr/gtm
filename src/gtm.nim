@@ -389,8 +389,6 @@ proc nextTrack(state: var AppState) =
   let nextResp = daemonSimpleCmd(DaemonClient(state.player), "next")
   if nextResp.hasKey("ok") and not nextResp["ok"].getBool(false):
     state.showNotification(nextResp{"error"}.getStr("No next track"))
-  else:
-    discard daemonSimpleCmd(DaemonClient(state.player), "get_full_state")
   state.markDirty(cePlayState)
 
 proc prevTrack(state: var AppState) =
@@ -399,8 +397,6 @@ proc prevTrack(state: var AppState) =
   let prevResp = daemonSimpleCmd(DaemonClient(state.player), "prev")
   if prevResp.hasKey("ok") and not prevResp["ok"].getBool(false):
     state.showNotification(prevResp{"error"}.getStr("No previous track"))
-  else:
-    discard daemonSimpleCmd(DaemonClient(state.player), "get_full_state")
   state.markDirty(cePlayState)
 
 proc adjustVolume(state: var AppState, delta: int) =
@@ -438,7 +434,7 @@ proc moveSelection(state: var AppState, delta: int) =
     else:
       let maxIdx = case state.settingsCategory
         of scAudio: 3
-        of scYouTube: 6
+        of scYouTube: 7
         of scAppearance: 4
         of scSystem: 2
         of scSpotify: 6
