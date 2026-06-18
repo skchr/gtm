@@ -23,10 +23,6 @@ jobs:
             runner: ubuntu-24.04-arm
             os-label: linux
             arch: arm64
-          - target: darwin-amd64
-            runner: macos-13
-            os-label: darwin
-            arch: amd64
           - target: darwin-arm64
             runner: macos-latest
             os-label: darwin
