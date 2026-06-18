@@ -645,7 +645,20 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
       emitMprisSeeked(pos)
   of dckNext:
     d.autoAdvancing = false
-    if d.advanceToNextTrack(true):
+    if d.crossfadePrepared and d.player.state == 1:
+      d.player.startCrossfade(float(d.crossfadeDuration), reverse = false)
+      d.currentTrackPath = d.crossfadeNextPath
+      d.currentTrackTitle = ""
+      d.currentTrackChannel = ""
+      d.crossfadePrepared = false
+      d.crossfadeStarted = false
+      d.crossfadeNextPath = ""
+      d.crossfadeConsumed = false
+      d.idleFrames = 0
+      d.pushFullState()
+      when defined(useMpris):
+        emitMprisPlayerChanged(d)
+    elif d.advanceToNextTrack(true):
       d.sendQueueEvent()
       d.pushFullState()
       when defined(useMpris):

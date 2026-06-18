@@ -569,7 +569,9 @@ method render*(node: LibraryContentView, ctx: var nw.Context[AppState]) =
           track.displayAlbum()[0..<min(track.displayAlbum().len, max(1, cols.wAlbum - 4))] & "\u2026"
         else: track.displayAlbum()
         let time = if track.duration > 0: formatTime(track.duration) else: ""
-        writeStr(ctx.tb, cols.xTitle, line, nameTrunc, if isSelected: theme.blue else: theme.text)
+        let playingMarker = if track.path == state.currentPlayingPath and state.status == psPlaying: "\u25B6 " else: ""
+        let playFg = if track.path == state.currentPlayingPath and state.status == psPlaying: theme.green else: (if isSelected: theme.blue else: theme.text)
+        writeStr(ctx.tb, cols.xTitle, line, playingMarker & nameTrunc, playFg)
         writeStr(ctx.tb, cols.xArtist, line, artistTrunc, theme.subtext1)
         writeStr(ctx.tb, cols.xAlbum, line, albumTrunc, theme.subtext1)
         writeStr(ctx.tb, cols.xDuration, line, time, theme.overlay0)

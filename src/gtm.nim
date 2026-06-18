@@ -297,7 +297,7 @@ proc showNotification*(state: var AppState, msg: string, kind: NotificationKind 
   state.notificationMsg = msg
   state.notificationBody = ""
   state.notificationKind = kind
-  state.notificationTimer = 180
+  state.notificationTimer = 120
   state.markDirty(ceFeedback)
 
 proc setFeedback(state: var AppState, msg: string, kind: NotificationKind = nkInfo) =
@@ -318,8 +318,19 @@ proc playSelected(state: var AppState) =
   let track = state.getCurrentTrack()
   if track.path.len > 0:
     queueLog("playSelected: track=" & track.path & " title=" & track.title & " id=" & $track.id)
-    discard state.player.loadFile(track.path, track.title, track.artist)
-    state.player.play()
+    # Skip queue rebuild when resuming the same track
+    if track.path == state.currentPlayingPath and state.status == psPlaying:
+      state.player.togglePause()
+      state.markDirtyBatch(cePlayState, ceTrack)
+      return
+    # Async sendOnly for daemon mode (non-blocking), blocking loadFile for local backends
+    if state.player of DaemonClient:
+      let cli = DaemonClient(state.player)
+      cli.sendOnly(%*{"cmd": "load_file", "path": track.path, "title": track.title, "channel": track.artist})
+      cli.sendOnly(%*{"cmd": "play"})
+    else:
+      discard state.player.loadFile(track.path, track.title, track.artist)
+      state.player.play()
     # Build queue from current view and send to daemon — daemon owns queue from here
     if state.tab == tabLibrary and state.player of DaemonClient:
       let cli = DaemonClient(state.player)
@@ -345,6 +356,8 @@ proc nextTrack(state: var AppState) =
   let nextResp = daemonSimpleCmd(DaemonClient(state.player), "next")
   if nextResp.hasKey("ok") and not nextResp["ok"].getBool(false):
     state.showNotification(nextResp{"error"}.getStr("No next track"))
+  else:
+    discard daemonSimpleCmd(DaemonClient(state.player), "get_full_state")
   state.markDirty(cePlayState)
 
 proc prevTrack(state: var AppState) =
@@ -353,6 +366,8 @@ proc prevTrack(state: var AppState) =
   let prevResp = daemonSimpleCmd(DaemonClient(state.player), "prev")
   if prevResp.hasKey("ok") and not prevResp["ok"].getBool(false):
     state.showNotification(prevResp{"error"}.getStr("No previous track"))
+  else:
+    discard daemonSimpleCmd(DaemonClient(state.player), "get_full_state")
   state.markDirty(cePlayState)
 
 proc adjustVolume(state: var AppState, delta: int) =
@@ -456,6 +471,7 @@ proc cleanQuit(state: var AppState, stopDaemon: bool) =
     DaemonClient(state.player).sendQuitDaemon()
   elif not stopDaemon:
     state.player.shutdown()
+  iw.deinit()
   terminal.showCursor()
   eraseScreen()
   setCursorPos(0, 0)
@@ -845,6 +861,11 @@ proc initCommands(state: var AppState) =
     proc(s: var AppState) =
       s.overlay = OverlayState(kind: okYtSearch, query: "")
       s.ytDebounceAt = 0)
+  state.registerCommand("spotify_url", "Import Spotify URL",
+    "Import a Spotify playlist or track from URL", "\U0001F4CB", @["AltS"],
+    proc(s: var AppState) =
+      s.overlay = OverlayState(kind: okSpotifyUrlInput, query: "")
+      s.setFeedback("Paste a Spotify playlist URL (e.g. https://open.spotify.com/playlist/...)"))
   state.registerCommand("yt_recommended", "Recommended Playlists",
     "Search YT for playlists related to current track", "\U0001F3B6", @["CtrlR"],
     proc(s: var AppState) =
@@ -2154,6 +2175,10 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     state.eqVisible = not state.eqVisible
     if state.eqVisible: state.lastCommandName = "Equalizer"
     state.markDirty(ceSettings)
+  of iw.Key.AltS:
+    state.overlay = OverlayState(kind: okSpotifyUrlInput, query: "")
+    state.setFeedback("Paste a Spotify playlist URL (e.g. https://open.spotify.com/playlist/...)")
+    state.lastCommandName = "Import Spotify URL"
   of iw.Key.AltQ:
     state.overlay = OverlayState(kind: okQueueOverlay, query: "", cursor: state.queueCursor)
     state.lastCommandName = "Current Queue"
@@ -2455,6 +2480,15 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     state.lastCommandName = "Focus Right"
   of iw.Key.N: state.nextTrack(); state.lastCommandName = "Next Track"
   of iw.Key.P: state.prevTrack(); state.lastCommandName = "Prev Track"
+  of iw.Key.J:
+    if state.tab == tabLibrary:
+      state.overlay = OverlayState(kind: okFuzzyFinder, query: "")
+      for i in 0..<state.libraryTracks.len:
+        state.overlay.results.add(i)
+        let t = state.libraryTracks[i]
+        state.overlay.strResults.add(t.displayName() & "  \u2014  " & t.displayArtist())
+      state.lastCommandName = "Fuzzy Finder"
+    else: state.moveSelection(1); state.lastCommandName = "Scroll Down"
   of iw.Key.ShiftJ: state.adjustVolume(5); state.lastCommandName = "Volume Up"
   of iw.Key.ShiftK: state.adjustVolume(-5); state.lastCommandName = "Volume Down"
   of iw.Key.Plus, iw.Key.Equals: state.adjustVolume(5); state.lastCommandName = "Volume Up"
@@ -2481,10 +2515,20 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     state.playSelected()
     state.lastCommandName = "Go to Last & Play"
   of iw.Key.A:
-    if state.isPlaylistView() and state.playlistContentsIdx < 0:
+    if state.tab == tabLibrary and state.libraryFocusPanel == lpContent:
+      let idx = state.selectIndex
+      let items = state.displayItems
+      if idx >= 0 and idx < items.len and items[idx].trackIdx >= 0 and state.player of DaemonClient:
+        let t = state.libraryTracks[items[idx].trackIdx]
+        discard DaemonClient(state.player).queueAdd(@[(t.path, t.title, t.artist)])
+        state.setFeedback("Added '" & t.displayName() & "' to queue")
+        state.markDirty(ceQueue)
+    elif state.isPlaylistView() and state.playlistContentsIdx < 0:
       execCmd(state, "create_playlist")
   of iw.Key.D:
-    if state.isPlaylistView() and state.playlistContentsIdx < 0:
+    if state.tab == tabLibrary and state.libraryFocusPanel == lpContent:
+      state.deleteConfirm()
+    elif state.isPlaylistView() and state.playlistContentsIdx < 0:
       execCmd(state, "delete_playlist")
     elif state.tab == tabNowPlaying and state.playbackQueue.len > 0:
       let t = state.libraryTracks[state.playbackQueue[state.queueCursor]]
@@ -2631,11 +2675,15 @@ proc processEvents(state: var AppState) =
       # Fallback: derive from player state if metadata not available
       elif state.player.timePos >= 0 and state.player.duration > 0:
         state.setFeedback("[Track changed]", nkInfo)
-      # Resolve currentPlayingId from path
+      # Resolve currentPlayingId from path and sync title/artist into library
       if state.currentPlayingPath.len > 0:
         for i in 0..<state.libraryTracks.len:
           if state.libraryTracks[i].path == state.currentPlayingPath:
             state.currentPlayingId = state.libraryTracks[i].id
+            if state.currentPlayingTitle.len > 0 and state.libraryTracks[i].title != state.currentPlayingTitle:
+              state.libraryTracks[i].title = state.currentPlayingTitle
+            if state.currentPlayingChannel.len > 0 and state.libraryTracks[i].artist != state.currentPlayingChannel:
+              state.libraryTracks[i].artist = state.currentPlayingChannel
             break
       state.markDirtyBatch(cePlayState, ceTrack)
       # Fetch cover art when track changes
@@ -2769,6 +2817,7 @@ proc processEvents(state: var AppState) =
                 newPaths.add(qPath)
             state.playbackQueue = newQueue
             state.queuePaths = newPaths
+            state.rebuildItems()
             state.markDirty(ceQueue)
           except: discard
       elif ev.strVal == "shuffle_changed":

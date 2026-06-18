@@ -122,6 +122,28 @@ VERSION=0.5.3 PREFIX=/usr/local curl -sf https://raw.githubusercontent.com/skchr
 - Linux with `/dev/shm` (for visualizer)
 - Terminal with true color support recommended
 
+## Spotify Setup
+
+gtm can import Spotify playlists and search Spotify tracks via [spotDL](https://github.com/spotDL/spotify-downloader).
+
+1. **Install spotDL**:
+   ```bash
+   pip install spotdl
+   ```
+
+2. **Cookies from browser** (recommended): gtm uses `--cookies-from-browser` (via yt-dlp's JS runtime) to authenticate with YouTube for Spotify downloads. No manual cookie file needed — just run spotDL once to cache your session:
+   ```bash
+   spotdl --cookies-from-browser firefox "https://open.spotify.com/playlist/..."
+   ```
+   Replace `firefox` with `chrome`, `brave`, `edge`, etc. depending on your browser.
+
+3. **Configure in gtm**: Settings tab → Spotify section:
+   - Set `spotdl` binary path (default: `spotdl` on PATH)
+   - Optionally set output directory and format
+   - Import playlist URLs via `Alt+S` or the Settings menu
+
+4. **Import a Spotify playlist URL**: Press `Alt+S`, paste the URL (e.g. `https://open.spotify.com/playlist/...`), and press Enter. gtm will fetch metadata via spotDL and queue the downloads.
+
 ## Development
 
 ```bash
