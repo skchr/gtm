@@ -20,10 +20,9 @@ jobs:
             os-label: linux
             arch: amd64
           - target: linux-arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-22.04-arm
             os-label: linux
             arch: arm64
-            docker: arm64v8/ubuntu:22.04
           - target: darwin-arm64
             runner: macos-latest
             os-label: darwin
@@ -57,38 +56,6 @@ jobs:
           brew update
           brew install ffmpeg pkg-config
 
-      - name: Build in Docker container (Linux arm64)
-        if: matrix.docker != ''
-        run: |
-          docker run --rm -v $PWD:/workspace -w /workspace \
-            ${{ matrix.docker }} bash -c "
-            set -ex
-            apt-get update -qq
-            apt-get install -y -qq \
-              build-essential libavformat-dev libavcodec-dev libavutil-dev \
-              libswresample-dev libasound2-dev libdbus-1-dev patchelf \
-              pkg-config curl xz-utils git
-            curl -sL https://nim-lang.org/download/nim-2.2.2-linux_arm64.tar.xz | tar xJ
-            export PATH=\$PWD/nim-2.2.2/bin:\$PATH
-            git clone --depth 1 https://github.com/zielmicha/nim-dbus /tmp/nim-dbus
-            mkdir -p bin
-            nim c -d:release src/gtmd.nim
-            nim c -d:release src/gtm.nim
-            mkdir -p bundled-libs
-            for bin in bin/gtm bin/gtmd; do
-              for lib in \$(ldd \"\$bin\" | awk '{print \$3}' | grep -E '/(libav|libswresample|libasound)'); do
-                [ -n \"\$lib\" ] && [ -f \"\$lib\" ] && cp -nL \"\$lib\" bundled-libs/
-              done
-            done
-            for lib in bundled-libs/lib*.so*; do
-              [ -f \"\$lib\" ] || continue
-              for dep in \$(ldd \"\$lib\" 2>/dev/null | awk '{print \$3}' | grep -E '/(libav|libswresample|libasound)'); do
-                [ -n \"\$dep\" ] && [ -f \"\$dep\" ] && cp -nL \"\$dep\" bundled-libs/
-              done
-            done
-            patchelf --set-rpath '\$ORIGIN' bin/gtm bin/gtmd
-          "
-
       - name: Build dynamic binaries
         if: matrix.docker == ''
         run: |
@@ -113,6 +80,39 @@ jobs:
             done
           done
           patchelf --set-rpath '$ORIGIN' bin/gtm bin/gtmd
+
+      - name: Verify library dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -eu
+          issues=0
+          for bin in bin/gtm bin/gtmd; do
+            echo "--- $bin ---"
+            # 1) Check glibc version requirement (target: 2.38+)
+            max=$(readelf -V "$bin" 2>/dev/null | grep 'GLIBC_' | sed 's/.*GLIBC_//' | sort -V | tail -1)
+            echo "  max GLIBC: $max"
+            if [ "$(printf '%s\n' "2.38" "$max" | sort -V | head -1)" != "2.38" ]; then
+              echo "ERROR: $bin requires GLIBC_$max > 2.38"
+              issues=$((issues + 1))
+            fi
+            # 2) Check for unresolved shared libraries
+            ldd "$bin" | grep -q 'not found' && {
+              echo "ERROR: missing shared library dependencies in $bin:"
+              ldd "$bin" | grep 'not found'
+              issues=$((issues + 1))
+            } || true
+            # 3) List all linked libs for manual inspection
+            echo "  linked libraries:"
+            ldd "$bin" | grep '=> /' | awk '{print "    " $1 " -> " $3}'
+          done
+          # 4) Verify bundled FFmpeg/ALSA libs are present
+          echo "--- bundled libs ---"
+          ls -la /tmp/bundled-libs/ 2>/dev/null || echo "  (none)"
+          if [ $issues -gt 0 ]; then
+            echo "FAILED: $issues issue(s) found"
+            exit 1
+          fi
+          echo "OK: all dependency checks passed"
 
       - name: Bundle shared libraries (macOS)
         if: runner.os == 'macOS'

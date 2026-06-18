@@ -212,8 +212,6 @@ proc firstValidCharAfter*(line: seq[Rune], count: int): int =
     realX.inc
 
 proc deleteAfter*(line: var seq[Rune], count: int) =
-  var x = 0
-  var codes: seq[string]
   var firstCharAfter = 0
   while firstCharAfter != -1:
     firstCharAfter = line.firstValidCharAfter(count)

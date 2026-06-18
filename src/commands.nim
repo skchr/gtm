@@ -36,6 +36,7 @@ proc fuzzyMatch*(query, target: string): bool =
     if qi == query.len: return true
   return false
 
+{.push warning[HoleEnumConv]:off.}
 proc parseKeyCode*(name: string): iw.Key =
   case name
   of "Space": iw.Key.Space
@@ -140,6 +141,7 @@ proc parseKeyCode*(name: string): iw.Key =
         iw.Key.None
     else:
       iw.Key.None
+{.pop.}
 
 proc keyDisplayName*(key: iw.Key): string =
   case key

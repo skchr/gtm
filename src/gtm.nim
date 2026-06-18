@@ -506,6 +506,7 @@ proc cleanQuit(state: var AppState, stopDaemon: bool) =
     state.player.shutdown()
   iw.deinit()
   terminal.showCursor()
+  write(stdout, "\e[0m\e[39m\e[49m")
   eraseScreen()
   setCursorPos(0, 0)
   quit(0)
@@ -2582,6 +2583,18 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
   of iw.Key.ShiftR:
     state.cycleRepeat()
     state.lastCommandName = "Cycle Repeat"
+  of iw.Key.ShiftW:
+    const widths = [0.0, 0.5, 1.0, 1.5, 2.0]
+    var idx = 0
+    for i, w in widths:
+      if abs(state.spatialWidth - w) < 0.01:
+        idx = (i + 1) mod widths.len; break
+    state.spatialWidth = widths[idx]
+    if state.player of DaemonClient:
+      DaemonClient(state.player).setSpatialWidth(state.spatialWidth)
+    let label = if idx == 0: "Mono" elif idx == 1: "Narrow" elif idx == 2: "Normal" elif idx == 3: "Wide" else: "Max"
+    state.showNotification("Spatial: " & label & " (" & $state.spatialWidth & "x)")
+    state.lastCommandName = "Cycle Spatial Width"
   of iw.Key.Slash:
     state.mode = imFilter
     if state.tab == tabLibrary:
@@ -2628,31 +2641,6 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           if state.overlay.kind == okNone and not state.helpVisible and not state.aboutVisible and not state.eqVisible and state.mode != imLeaderMode:
             state.lastCommandName = state.commands[idx].name
           state.commands[idx].handler(state)
-
-proc getNextTrackInfo(state: var AppState): tuple[path: string, id: int64] =
-  let items = state.displayItems
-  if state.playbackQueue.len > 0:
-    let tIdx = state.playbackQueue[0]
-    if tIdx >= 0 and tIdx < state.libraryTracks.len:
-      return (state.libraryTracks[tIdx].path, state.libraryTracks[tIdx].id)
-    return ("", 0)
-  if items.len == 0: return ("", 0)
-  var idx: int
-  if state.shuffleEnabled and state.shuffleOrder.len > 0:
-    let si = (state.shuffleIndex + 1) mod state.shuffleOrder.len
-    idx = state.shuffleOrder[si]
-  elif state.repeatMode == 2:
-    idx = state.selectIndex
-  else:
-    idx = state.selectIndex + 1
-    if idx >= items.len:
-      if state.repeatMode != 1:
-        return ("", 0)
-      idx = 0
-  if idx >= 0 and idx < items.len:
-    let track = state.libraryTracks[items[idx].trackIdx]
-    return (track.path, track.id)
-  return ("", 0)
 
 proc parseDurationToSec*(dur: string): float =
   let parts = dur.split(':')
@@ -2993,6 +2981,8 @@ proc fullStateSync(state: var AppState, daemonState: JsonNode) =
     state.repeatMode = daemonState["repeat"].getInt(0)
   if daemonState.hasKey("sleep_timer"):
     state.sleepTimerRemaining = daemonState["sleep_timer"].getInt(0)
+  if daemonState.hasKey("spatialWidth"):
+    state.spatialWidth = daemonState["spatialWidth"].getFloat(1.0)
   if daemonState.hasKey("crossfadeDuration"):
     state.crossfadeDuration = daemonState["crossfadeDuration"].getInt(0)
   if daemonState.hasKey("crossfadeCurve"):

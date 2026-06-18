@@ -35,7 +35,6 @@ proc parseYtJsonLine*(line: string): YtSearchResult =
     discard
 
 proc parseYtJsonLines(buf: var string): seq[YtSearchResult] =
-  ## Parse complete JSON lines from buf, return results, keep incomplete tail in buf.
   result = @[]
   while true:
     let nli = buf.find('\n')
@@ -75,34 +74,33 @@ proc detectBrowserCookieSource*(): string =
       return name
   result = ""
 
-proc cookieFlags*(source: string; filePath: string = ""): string =
+proc appendCookieArgs(args: var seq[string]; source: string; filePath: string = "") =
   if filePath.len > 0 and fileExists(filePath):
-    result = " --cookies " & quoteShell(filePath)
-  elif source.len == 0: return ""
+    args.add "--cookies"; args.add filePath
+  elif source.len == 0: discard
   elif source.contains("/") or source.contains("."):
-    result = " --cookies " & quoteShell(source)
+    args.add "--cookies"; args.add source
   else:
-    result = " --cookies-from-browser " & source
+    args.add "--cookies-from-browser"; args.add source
 
-proc jsRuntimeFlags*(runtime: string): string =
-  if runtime.len == 0: return ""
-  result = " --js-runtimes " & runtime & " --remote-components ejs:github"
+proc appendJsRuntimeArgs(args: var seq[string]; runtime: string) =
+  if runtime.len > 0:
+    args.add "--js-runtimes"; args.add runtime
+    args.add "--remote-components"; args.add "ejs:github"
 
 proc startYoutubeSearch*(query: string; p: var Process; cookieSource: string = ""; pageSize: int = 20; cookieFilePath: string = ""): bool =
   let yt = findYtdlp()
   if yt.len == 0: return false
   let searchQuery = "ytsearch" & $pageSize & ":" & query
-  let cmd = yt & " " & quoteShell(searchQuery) & " --dump-json --no-warnings" & cookieFlags(cookieSource, cookieFilePath) & " 2>/dev/null"
+  var args: seq[string] = @[searchQuery, "--dump-json", "--no-warnings"]
+  appendCookieArgs(args, cookieSource, cookieFilePath)
   try:
-    p = startProcess(cmd, options = {poUsePath, poEvalCommand})
+    p = startProcess(yt, args = args, options = {poUsePath})
     return true
   except:
     return false
 
 proc pollYoutubeSearch*(p: var Process, buf: var string): seq[YtSearchResult] =
-  ## Non-blocking read of yt-dlp stdout for --dump-json output.
-  ## Reads whatever data is available, parses complete JSON lines, returns partial results.
-  ## Does NOT close the process. Incomplete JSON lines stay in buf.
   result = @[]
   try:
     let outFd = p.outputHandle()
@@ -122,7 +120,6 @@ proc pollYoutubeSearch*(p: var Process, buf: var string): seq[YtSearchResult] =
     discard
 
 proc finishYoutubeSearch*(p: var Process, buf: var string): seq[YtSearchResult] =
-  ## Drains remaining stdout data, closes process, returns any final results.
   result = @[]
   try:
     let outFd = p.outputHandle()
@@ -147,9 +144,14 @@ proc finishYoutubeSearch*(p: var Process, buf: var string): seq[YtSearchResult] 
 proc startStreamUrlFetch*(url: string; p: var Process; cookieSource: string = ""; jsRuntime: string = "node"; cookieFilePath: string = ""): bool =
   let yt = findYtdlp()
   if yt.len == 0: return false
-  let cmd = yt & " -f \"ba\" -g --no-playlist --no-check-formats --no-warnings" & cookieFlags(cookieSource, cookieFilePath) & jsRuntimeFlags(jsRuntime) & " --user-agent \"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36\" --add-headers \"Referer:https://www.youtube.com/\" " & quoteShell(url) & " 2>/dev/null"
+  var args: seq[string] = @["-f", "ba", "-g", "--no-playlist", "--no-check-formats", "--no-warnings",
+    "--user-agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+    "--add-headers", "Referer:https://www.youtube.com/"]
+  appendCookieArgs(args, cookieSource, cookieFilePath)
+  appendJsRuntimeArgs(args, jsRuntime)
+  args.add url
   try:
-    p = startProcess(cmd, options = {poUsePath, poEvalCommand})
+    p = startProcess(yt, args = args, options = {poUsePath})
     return true
   except:
     return false
@@ -168,7 +170,6 @@ proc pollStreamUrlFetch*(p: var Process, buf: var string): string =
   for line in raw.splitLines:
     let trimmed = line.strip()
     if trimmed.startsWith("http://") or trimmed.startsWith("https://"):
-      # Guard: skip URLs that are webpage URLs, not direct stream URLs
       if not (trimmed.contains("googlevideo.com") or trimmed.contains("youtube.com/videoplayback") or
               trimmed.contains("manifest.googlevideo.com") or trimmed.contains("yt-video") or
               trimmed.contains("rr") or trimmed.contains("redirector")):
@@ -182,10 +183,16 @@ proc startDownload*(item: YtSearchResult; outputDir: string; p: var Process; coo
   let yt = findYtdlp()
   if yt.len == 0: return false
   if not dirExists(outputDir): createDir(outputDir)
-  let cmd = yt & " -f bestaudio --extract-audio --audio-format opus --no-playlist --print after_move:filepath --no-check-formats --no-warnings --user-agent \"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36\" --add-headers \"Referer:https://www.youtube.com/\"" & cookieFlags(cookieSource, cookieFilePath) & jsRuntimeFlags(jsRuntime) & " -o " &
-    quoteShell(outputDir / "%(title)s.%(ext)s") & " " & quoteShell(item.url) & " 2>&1"
+  var args: seq[string] = @["-f", "bestaudio", "--extract-audio", "--audio-format", "opus",
+    "--no-playlist", "--print", "after_move:filepath", "--no-check-formats", "--no-warnings",
+    "--user-agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+    "--add-headers", "Referer:https://www.youtube.com/",
+    "-o", outputDir / "%(title)s.%(ext)s"]
+  appendCookieArgs(args, cookieSource, cookieFilePath)
+  appendJsRuntimeArgs(args, jsRuntime)
+  args.add item.url
   try:
-    p = startProcess(cmd, options = {poUsePath, poEvalCommand})
+    p = startProcess(yt, args = args, options = {poUsePath})
     return true
   except:
     return false
@@ -209,16 +216,17 @@ proc pollDownload*(p: var Process, buf: var string): string =
 proc startPlaylistFetch*(url: string; p: var Process; cookieSource: string = ""; jsRuntime: string = "node"; cookieFilePath: string = ""): bool =
   let yt = findYtdlp()
   if yt.len == 0: return false
-  let cmd = yt & " --dump-json --no-playlist --flat-playlist --no-warnings" & cookieFlags(cookieSource, cookieFilePath) & jsRuntimeFlags(jsRuntime) & " " & quoteShell(url) & " 2>/dev/null"
+  var args: seq[string] = @["--dump-json", "--no-playlist", "--flat-playlist", "--no-warnings"]
+  appendCookieArgs(args, cookieSource, cookieFilePath)
+  appendJsRuntimeArgs(args, jsRuntime)
+  args.add url
   try:
-    p = startProcess(cmd, options = {poUsePath, poEvalCommand})
+    p = startProcess(yt, args = args, options = {poUsePath})
     return true
   except:
     return false
 
 proc pollPlaylistFetch*(p: var Process, buf: var string): seq[YtSearchResult] =
-  ## Non-blocking read of playlist fetch stdout. Reads available data,
-  ## parses complete JSON lines, returns partial results.
   result = @[]
   try:
     let outFd = p.outputHandle()
@@ -238,7 +246,6 @@ proc pollPlaylistFetch*(p: var Process, buf: var string): seq[YtSearchResult] =
     discard
 
 proc finishPlaylistFetch*(p: var Process, buf: var string): seq[YtSearchResult] =
-  ## Drains remaining stdout data, closes process, returns any final results.
   result = @[]
   try:
     let outFd = p.outputHandle()
@@ -261,13 +268,13 @@ proc finishPlaylistFetch*(p: var Process, buf: var string): seq[YtSearchResult] 
   result = parseYtJsonLines(buf)
 
 proc fetchPlaylistTracks*(url: string; cookieSource: string = ""; jsRuntime: string = "node"): YtPlaylistDetail =
-  ## Legacy blocking version — still used for backward compat but UNCHANGED internally.
-  ## New code should use startPlaylistFetch/pollPlaylistFetch/finishPlaylistFetch.
   let yt = findYtdlp()
   if yt.len == 0: return YtPlaylistDetail()
-  let cmd = yt & " --dump-json --no-playlist --flat-playlist --no-warnings" & cookieFlags(cookieSource) & " " & quoteShell(url) & " 2>/dev/null"
+  var args: seq[string] = @["--dump-json", "--no-playlist", "--flat-playlist", "--no-warnings"]
+  appendCookieArgs(args, cookieSource)
+  args.add url
   try:
-    let p = startProcess(cmd, options = {poUsePath, poEvalCommand})
+    let p = startProcess(yt, args = args, options = {poUsePath})
     if p.running():
       discard p.waitForExit()
     let output = p.outputStream.readAll()
@@ -294,5 +301,3 @@ proc fetchPlaylistTracks*(url: string; cookieSource: string = ""; jsRuntime: str
       result.trackCount = result.tracks.len
   except:
     discard
-
-

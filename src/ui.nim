@@ -1937,14 +1937,6 @@ proc renderApp*(ctx: var nw.Context[AppState]) =
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(AboutOverlay(), sliceCtx)
   if ctx.data.eqVisible:
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(EqualizerOverlay(), sliceCtx)
-  if ctx.data.volumeCueTimer > 0:
-    sliceCtx = nw.slice(ctx, 0, 0, w, h); render(VolumeCueOverlay(), sliceCtx)
-  if ctx.data.notificationTimer > 0 and ctx.data.notificationMsg.len > 0:
-    sliceCtx = nw.slice(ctx, 0, 0, w, h); render(FeedbackCueOverlay(), sliceCtx)
-  if ctx.data.nowPlayingCueTimer > 0 and ctx.data.nowPlayingCueMsg.len > 0:
-    sliceCtx = nw.slice(ctx, 0, 0, w, h); render(NowPlayingCueOverlay(), sliceCtx)
-  if ctx.data.upNextTimer > 0 and ctx.data.upNextMsg.len > 0:
-    sliceCtx = nw.slice(ctx, 0, 0, w, h); render(UpNextCueOverlay(), sliceCtx)
   if ctx.data.mode == imLeaderMode:
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(LeaderMenuOverlay(), sliceCtx)
   if ctx.data.playlistInputActive:
@@ -1953,6 +1945,14 @@ proc renderApp*(ctx: var nw.Context[AppState]) =
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(FooterModulePickerOverlay(), sliceCtx)
   if ctx.data.overlay.kind != okNone:
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(GenericOverlay(), sliceCtx)
+  if ctx.data.volumeCueTimer > 0:
+    sliceCtx = nw.slice(ctx, 0, 0, w, h); render(VolumeCueOverlay(), sliceCtx)
+  if ctx.data.notificationTimer > 0 and ctx.data.notificationMsg.len > 0:
+    sliceCtx = nw.slice(ctx, 0, 0, w, h); render(FeedbackCueOverlay(), sliceCtx)
+  if ctx.data.nowPlayingCueTimer > 0 and ctx.data.nowPlayingCueMsg.len > 0:
+    sliceCtx = nw.slice(ctx, 0, 0, w, h); render(NowPlayingCueOverlay(), sliceCtx)
+  if ctx.data.upNextTimer > 0 and ctx.data.upNextMsg.len > 0:
+    sliceCtx = nw.slice(ctx, 0, 0, w, h); render(UpNextCueOverlay(), sliceCtx)
 
 proc initApp*(state: var AppState) =
   state.theme = getTheme("mocha")

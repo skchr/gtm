@@ -82,6 +82,7 @@ method getStatusFlags*(b: AudioBackend): tuple[crossfading, masterEnded: bool] {
 method setEqBand*(b: AudioBackend, band: int, gainDb: float) {.base.} = discard
 method setEqPreset*(b: AudioBackend, name: string) {.base.} = discard
 method setCrossfadeCurve*(b: AudioBackend, curveType: int) {.base.} = discard
+method setSpatialWidth*(b: AudioBackend, width: float) {.base.} = discard
 
 when defined(useFFmpeg):
   {.compile: "vendor/ffmpeg/ffmpeg_impl.c".}
@@ -149,6 +150,7 @@ when defined(useFFmpeg):
   proc ffmpeg_mixer_set_crossfade_curve(ctx: FfmpegCtx, curve_type: cint) {.importc.}
   proc ffmpeg_mixer_set_eq_band(ctx: FfmpegCtx, band: cint, gain_db: cfloat): cint {.importc.}
   proc ffmpeg_mixer_set_eq_preset(ctx: FfmpegCtx, name: cstring): cint {.importc.}
+  proc ffmpeg_mixer_set_spatial_width(ctx: FfmpegCtx, width: cfloat): cint {.importc.}
 
   type
     FfmpegBackend* = ref object of AudioBackend
@@ -367,6 +369,9 @@ when defined(useFFmpeg):
 
   method setCrossfadeCurve*(b: MixerBackend, curveType: int) =
     ffmpeg_mixer_set_crossfade_curve(b.ctx, curveType.cint)
+
+  method setSpatialWidth*(b: MixerBackend, width: float) =
+    discard ffmpeg_mixer_set_spatial_width(b.ctx, width.cfloat)
 
   method pollEvents*(b: MixerBackend): seq[AudioEvent] =
     result = @[]

@@ -148,7 +148,6 @@ void ffmpeg_audio_uninit(FfmpegAudioCtx* ctx) {
 
 static void extract_metadata(FfmpegAudioCtx* ctx) {
   if (!ctx->fmt_ctx) return;
-  AVDictionary* md = NULL;
   AVDictionaryEntry* t;
 
   /* Try format-level metadata first */
@@ -431,7 +430,6 @@ void ffmpeg_audio_stop(FfmpegAudioCtx* ctx) {
   ctx->fade_in_remaining = 0;
   if (ctx->fmt_ctx && ctx->audio_stream_idx >= 0) {
     avcodec_flush_buffers(ctx->codec_ctx);
-    AVStream* st = ctx->fmt_ctx->streams[ctx->audio_stream_idx];
     av_seek_frame(ctx->fmt_ctx, ctx->audio_stream_idx, 0, AVSEEK_FLAG_BACKWARD);
   }
   ctx->seek_pending = 0;
@@ -604,6 +602,23 @@ static const float EQ_PRESETS[][EQ_BANDS] = {
   { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },          // Custom
 };
 
+// --- Spatial Audio (stereo widening via Mid/Side) ---
+
+typedef struct {
+  float width;    // 0.0=mono, 1.0=normal, >1.0=widened
+  int   active;
+} SpatialCtx;
+
+static void spatial_apply(SpatialCtx* sp, float* data, int samples) {
+  if (!sp->active || sp->width == 1.0f) return;
+  for (int i = 0; i + 1 < samples; i += 2) {
+    float m = (data[i] + data[i+1]) * 0.5f;
+    float s = (data[i] - data[i+1]) * 0.5f;
+    data[i]   = m + s * sp->width;
+    data[i+1] = m - s * sp->width;
+  }
+}
+
 // --- MixerCtx for PCM crossfade ---
 
 typedef struct {
@@ -644,6 +659,7 @@ typedef struct {
   volatile int      fade_in_remaining;
   int               fade_in_total;
   Equalizer         eq;
+  SpatialCtx        spatial;
 } MixerCtx;
 
 #ifndef __APPLE__
@@ -812,6 +828,7 @@ static void* mixer_thread(void* arg) {
 
         // Apply EQ to crossfaded output
         eq_apply(&mx->eq, mixbuf, nsamples);
+        spatial_apply(&mx->spatial, mixbuf, nsamples);
 
         // Apply volume
         if (mx->volume != 1.0f)
@@ -900,6 +917,7 @@ static void* mixer_thread(void* arg) {
       normal_write:
       // Apply EQ to master output
       eq_apply(&mx->eq, mbuf, mtotal);
+      spatial_apply(&mx->spatial, mbuf, mtotal);
       // Apply volume
         if (mx->volume != 1.0f)
           for (int i = 0; i < mtotal; i++) mbuf[i] *= mx->volume;
@@ -1017,6 +1035,8 @@ MixerCtx* ffmpeg_mixer_init(void) {
   mx->fade_out_total = 0;
   mx->fade_in_remaining = 0;
   mx->fade_in_total = 0;
+  mx->spatial.width = 1.0f;
+  mx->spatial.active = 0;
   avformat_network_init();
   return mx;
 }
@@ -1111,7 +1131,6 @@ void ffmpeg_mixer_start_crossfade(MixerCtx* mx, int duration_frames, int reverse
   // Rewind slave to beginning
   if (mx->slave->fmt_ctx && mx->slave->audio_stream_idx >= 0) {
     avcodec_flush_buffers(mx->slave->codec_ctx);
-    AVStream* st = mx->slave->fmt_ctx->streams[mx->slave->audio_stream_idx];
     av_seek_frame(mx->slave->fmt_ctx, mx->slave->audio_stream_idx, 0, AVSEEK_FLAG_BACKWARD);
   }
 }
@@ -1181,6 +1200,15 @@ void ffmpeg_mixer_seek(MixerCtx* mx, double seconds) {
   if (mx->master->duration > 0.0 && mx->master->seek_target > mx->master->duration)
     mx->master->seek_target = mx->master->duration;
   mx->master->seek_pending = 1;
+}
+
+int ffmpeg_mixer_set_spatial_width(MixerCtx* mx, float width) {
+  if (!mx) return 0;
+  if (width < 0.0f) width = 0.0f;
+  if (width > 2.0f) width = 2.0f;
+  mx->spatial.width = width;
+  mx->spatial.active = (fabsf(width - 1.0f) > 0.01f) ? 1 : 0;
+  return 1;
 }
 
 int ffmpeg_mixer_set_eq_band(MixerCtx* mx, int band, float gain_db) {

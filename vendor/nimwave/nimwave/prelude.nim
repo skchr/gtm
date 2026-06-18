@@ -1,4 +1,5 @@
 from ../nimwave as nw import nil
+{.push hint[DuplicateModuleImport]:off.}
 from sequtils import nil
 from ansiutils/codes import nil
 from tables import `[]`, `[]=`, keys, del
@@ -6,14 +7,15 @@ from sets import nil
 from nimwave/tui import nil
 from illwave as iw import `[]`, `[]=`, `==`
 from unicode import `$`, runeLen, toRunes
+{.pop.}
 
-method mount*(node: nw.Node, ctx: var nw.Context[State]) {.base, locks: "unknown".} =
+method mount*(node: nw.Node, ctx: var nw.Context[State]) {.base.} =
   discard
 
-method render*(node: nw.Node, ctx: var nw.Context[State]) {.base, locks: "unknown".} =
+method render*(node: nw.Node, ctx: var nw.Context[State]) {.base.} =
   discard
 
-method unmount*(node: nw.Node, ctx: var nw.Context[State]) {.base, locks: "unknown".} =
+method unmount*(node: nw.Node, ctx: var nw.Context[State]) {.base.} =
   discard
 
 proc renderRoot*(node: nw.Node, ctx: var nw.Context[State]) =

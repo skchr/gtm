@@ -78,6 +78,7 @@ type
     dckGetCoverArt,
     dckGetLyrics,
     dckSearchLyrics,
+    dckSetSpatialWidth,
     dckPing,
     dckDeleteTrack, dckRestoreTrack, dckPermanentDelete, dckListTrash, dckPurgeTrash
 
@@ -125,6 +126,7 @@ type
     autoAdvancing*: bool
     lastConsumedFromQueue: seq[string]
     upNextSent: bool
+    spatialWidth*: float
     # Background scan state
     scanningDir: string
     scanningFiles: seq[string]
@@ -260,6 +262,8 @@ proc parseDaemonCommand(line: string): DaemonCmd =
       result.kind = dckSetEqBand; result.intArg = j{"band"}.getInt(0); result.floatArg = j{"gain_db"}.getFloat(0.0)
     of "set_eq_preset":
       result.kind = dckSetEqPreset; result.strArg = j{"name"}.getStr("")
+    of "set_spatial_width":
+      result.kind = dckSetSpatialWidth; result.floatArg = j{"width"}.getFloat(1.0)
     of "set_crossfade_duration":
       result.kind = dckSetCrossfadeDuration; result.intArg = j{"duration"}.getInt(0)
     of "set_crossfade_curve":
@@ -586,8 +590,7 @@ proc advanceToNextTrack(d: Daemon, forward: bool = true): bool =
         d.lib.updatePlayCount(trackId)
     return true
 
-when defined(useMpris):
-  include mpris
+include mpris, notifications
 
 proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
   result = %*{"ok": true}
@@ -781,6 +784,10 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     d.player.setEqBand(cmd.intArg, cmd.floatArg)
   of dckSetEqPreset:
     d.player.setEqPreset(cmd.strArg)
+  of dckSetSpatialWidth:
+    d.spatialWidth = cmd.floatArg
+    d.player.setSpatialWidth(cmd.floatArg)
+    if d.lib != nil: d.lib.setPlaybackState("spatial_width", $(cmd.floatArg))
   of dckSetCrossfadeDuration:
     d.crossfadeDuration = cmd.intArg
     d.lib.setPlaybackState("crossfade_duration", $(d.crossfadeDuration))
@@ -1098,6 +1105,7 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     result["shuffleOrder"] = soArr
     result["shuffleIndex"] = %d.shuffleIndex
     result["version"] = %d.stateVersion
+    result["spatialWidth"] = %d.spatialWidth
     result["crossfadeDuration"] = %d.crossfadeDuration
     result["crossfadeCurve"] = %d.crossfadeCurve
     result["crossfadePrepared"] = %d.crossfadePrepared
@@ -1397,23 +1405,6 @@ proc trySend(client: Socket, data: string): bool =
     return false
   return true
 
-proc cleanupClientState(d: Daemon) =
-  if d.ytSearchActive:
-    try: d.ytSearchProcess.terminate() except: discard
-    close(d.ytSearchProcess)
-  if d.ytStreamActive:
-    try: d.ytStreamProcess.terminate() except: discard
-    close(d.ytStreamProcess)
-  d.ytSearchActive = false
-  d.ytSearchBuf = ""
-  d.ytSearchResults = @[]
-  d.ytStreamActive = false
-  d.ytStreamBuf = ""
-  d.ytStreamResultUrl = ""
-  d.ytStreamPendingTitle = ""
-  d.ytStreamPendingChannel = ""
-  d.ytStreamPendingDuration = ""
-
 proc runDaemon*() =
   let debugMode = "--debug" in os.commandLineParams()
   let dir = stateDir()
@@ -1503,10 +1494,11 @@ proc runDaemon*() =
     ytDownloadTasks: @[],
     lastConsumedFromQueue: @[],
     lastTrackDuration: 0.0,
+    spatialWidth: 1.0,
     stateVersion: 0
   )
-  when defined(useMpris):
-    initMpris(daemon)
+  initMpris(daemon)
+  initNotifications()
   let libPath = dataDir() & "/gtm.db"
   if not dirExists(dataDir()):
     createDir(dataDir())
@@ -1533,8 +1525,12 @@ proc runDaemon*() =
     let cfcStr = daemon.lib.getPlaybackState("crossfade_curve")
     if cfcStr.len > 0:
       try: daemon.crossfadeCurve = parseInt(cfcStr) except: discard
+    let swStr = daemon.lib.getPlaybackState("spatial_width")
+    if swStr.len > 0:
+      try: daemon.spatialWidth = parseFloat(swStr) except: discard
     if daemon.player != nil:
       daemon.player.setCrossfadeCurve(daemon.crossfadeCurve)
+      daemon.player.setSpatialWidth(daemon.spatialWidth)
     let ytCookie = daemon.lib.getPlaybackState("yt_cookie_source")
     if ytCookie.len > 0: daemon.ytCookieSource = ytCookie
     let ytCookieFile = daemon.lib.getPlaybackState("yt_cookie_file_path")
@@ -1586,8 +1582,7 @@ proc runDaemon*() =
   daemon.server.bindUnix(sockPath())
   daemon.server.listen()
   while daemon.running:
-    when defined(useMpris):
-      pollMpris()
+    pollMpris()
     var readFds: seq[SocketHandle] = @[daemon.server.getFd]
     for c in daemon.clients:
       readFds.add(c.sock.getFd)
@@ -1659,10 +1654,12 @@ proc runDaemon*() =
         if daemon.clients.len > 0:
           let evJson = %*{"events": serializeEvents(daemonEvents, daemon)}
           daemon.broadcastAll($evJson & "\n")
-      # Reset auto-advance flag after playback started event is broadcast
+      # Reset auto-advance flag and send desktop notification after playback started
       for ev in daemonEvents:
         if ev.kind == evPlaybackStarted:
           daemon.autoAdvancing = false
+          if daemon.currentTrackTitle.len > 0:
+            sendDesktopNotification(daemon.currentTrackTitle, daemon.currentTrackChannel)
       # Auto-advance on track ended
       for ev in daemonEvents:
         if ev.kind == evTrackEnded:
@@ -1698,8 +1695,7 @@ proc runDaemon*() =
             discard daemon.advanceToNextTrack(true)
             daemon.sendQueueEvent()
             daemon.pushFullState()
-          when defined(useMpris):
-            emitMprisPlayerChanged(daemon)
+          emitMprisPlayerChanged(daemon)
       # Monitor duration changes — broadcast if duration becomes known during playback (e.g. streams)
       let currentDur = daemon.player.duration
       if currentDur > 0 and abs(currentDur - daemon.lastTrackDuration) > 0.5:
@@ -1927,8 +1923,8 @@ proc runDaemon*() =
     daemon.idleFrames.inc
     if daemon.player != nil and daemon.idleFrames > daemon.idleTimeout * 60 and daemon.player.state == 0:
       daemon.savePlaybackState()
-      when defined(useMpris):
-        shutdownMpris()
+      shutdownMpris()
+      shutdownNotifications()
       if daemon.lib != nil:
         daemon.lib.closeDb()
       daemon.player.shutdown()

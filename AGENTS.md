@@ -54,6 +54,8 @@
 - `release.yml`: removed darwin-amd64 (macos-13 runner deprecated)
 - `release.yml`: fixed macOS bundling (`set +e`, widened grep, silenced errors)
 - `release.yml`: fixed apt-get 404s (`--fix-missing`, retry flags)
+- `release.yml`: switched linux-arm64 from Docker-on-ubuntu-24.04-arm to native ubuntu-22.04-arm runner (glibc 2.35 → 2.35, no Docker wrapper)
+- `release.yml`: added `Verify library dependencies (Linux)` step — checks max GLIBC ≤ 2.35, unresolved libs, and lists all linked libraries
 - `install.sh`: removed FFmpeg detection logic and `-static` suffix — always downloads dynamic+bundled tarball
 
 ## Build & Test

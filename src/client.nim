@@ -288,7 +288,7 @@ method getStatusFlags*(cli: DaemonClient): tuple[crossfading, masterEnded: bool]
   let resp = daemonSimpleCmd(cli, "status")
   (resp{"crossfading"}.getBool(false), resp{"master_ended"}.getBool(false))
 
-method startCrossfade*(cli: DaemonClient, durationSeconds: float) =
+method startCrossfade*(cli: DaemonClient, durationSeconds: float) {.base.} =
   cli.ensureDaemon()
   cli.sendOnly(%*{"cmd": "crossfade", "duration": durationSeconds})
 
@@ -300,7 +300,11 @@ method setEqPreset*(cli: DaemonClient, name: string) =
   cli.ensureDaemon()
   cli.sendOnly(%*{"cmd": "set_eq_preset", "name": name})
 
-method setCrossfadeDuration*(cli: DaemonClient, duration: int) =
+method setSpatialWidth*(cli: DaemonClient, width: float) =
+  cli.ensureDaemon()
+  cli.sendOnly(%*{"cmd": "set_spatial_width", "width": width})
+
+method setCrossfadeDuration*(cli: DaemonClient, duration: int) {.base.} =
   cli.ensureDaemon()
   cli.sendOnly(%*{"cmd": "set_crossfade_duration", "duration": duration})
 

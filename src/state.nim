@@ -406,6 +406,7 @@ type
     eqVisible*: bool
     eqBands*: array[10, float]
     eqPreset*: string
+    spatialWidth*: float
     eqPresetList*: seq[string]
     eqBandSelect*: int
     eqPresetSelect*: int

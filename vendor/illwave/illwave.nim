@@ -218,7 +218,7 @@ type
     AltY  = (1047, "AltY"),
     AltZ  = (1048, "AltZ"),
 
-  IllwaveError* = object of Exception
+  IllwaveError* = object of CatchableError
 
 type
   MouseButtonAction* {.pure.} = enum
@@ -238,11 +238,13 @@ type
   ScrollDirection* {.pure.} = enum
     sdNone, sdUp, sdDown
 
+{.push warning[HoleEnumConv]:off.}
 func toKey(c: int): Key =
   try:
     result = Key(c)
-  except RangeError:  # ignore unknown keycodes
+  except ValueError:  # ignore unknown keycodes
     result = Key.None
+{.pop.}
 
 var gIllwaveInitialized* = false
 
@@ -475,7 +477,7 @@ else:  # OS X & Linux
       ttyState.c_lflag = ttyState.c_lflag and not Cflag(ICANON or ECHO)
 
       # minimum of number input read
-      ttyState.c_cc[VMIN] = 0.cuchar
+      ttyState.c_cc[VMIN] = 0.char
 
     else:
       # turn on canonical mode & echo
@@ -1585,24 +1587,25 @@ type
   TerminalCmd* = enum  ## commands that can be expressed as arguments
     resetStyle         ## reset attributes
 
-template writeProcessArg(tb: var TerminalBuffer, s: string) =
-  tb.write(s)
+when defined(debug):
+  template writeProcessArg(tb: var TerminalBuffer, s: string) =
+    tb.write(s)
 
-template writeProcessArg(tb: var TerminalBuffer, style: terminal.Style) =
-  tb.setStyle({style})
+  template writeProcessArg(tb: var TerminalBuffer, style: terminal.Style) =
+    tb.setStyle({style})
 
-template writeProcessArg(tb: var TerminalBuffer, style: set[terminal.Style]) =
-  tb.setStyle(style)
+  template writeProcessArg(tb: var TerminalBuffer, style: set[terminal.Style]) =
+    tb.setStyle(style)
 
-template writeProcessArg(tb: var TerminalBuffer, color: ForegroundColor) =
-  tb.setForegroundColor(color)
+  template writeProcessArg(tb: var TerminalBuffer, color: ForegroundColor) =
+    tb.setForegroundColor(color)
 
-template writeProcessArg(tb: var TerminalBuffer, color: BackgroundColor) =
-  tb.setBackgroundColor(color)
+  template writeProcessArg(tb: var TerminalBuffer, color: BackgroundColor) =
+    tb.setBackgroundColor(color)
 
-template writeProcessArg(tb: var TerminalBuffer, cmd: TerminalCmd) =
-  when cmd == resetStyle:
-    tb.resetAttributes()
+  template writeProcessArg(tb: var TerminalBuffer, cmd: TerminalCmd) =
+    when cmd == resetStyle:
+      tb.resetAttributes()
 
 proc grow(tb: TerminalBuffer, bb: var BoxBuffer, x, y: int) =
   if outOfBounds(tb, x, y):
