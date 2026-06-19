@@ -1428,25 +1428,17 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
 proc trySend(client: Socket, data: string): bool =
   if data.len == 0: return true
   var remaining = data
-  var retries = 20
-  while remaining.len > 0 and retries > 0:
+  while remaining.len > 0:
     let n = posix.send(client.getFd, unsafeAddr remaining[0], remaining.len.cint, 0.cint)
     if n > 0:
       remaining = remaining[n..^1]
     elif n == 0:
       return true
     else:
-      let err = osLastError()
-      if err.int32 == 11 or err.int32 == 10035:
-        os.sleep(10)
-        retries.dec
-      else:
-        try: client.close() except: discard
-        return false
-  if remaining.len > 0:
-    try: client.close() except: discard
-    return false
-  return true
+      break
+  if remaining.len == 0: return true
+  try: client.close() except: discard
+  return false
 
 proc runDaemon*() =
   let debugMode = "--debug" in os.commandLineParams()
@@ -1694,16 +1686,7 @@ proc runDaemon*() =
       let daemonEvents = if daemon.player != nil: daemon.player.pollEvents() else: @[]
       if daemonEvents.len > 0:
         daemon.stateVersion.inc
-        if daemon.clients.len > 0:
-          let evJson = %*{"events": serializeEvents(daemonEvents, daemon)}
-          daemon.broadcastAll($evJson & "\n")
-      # Reset auto-advance flag and send desktop notification after playback started
-      for ev in daemonEvents:
-        if ev.kind == evPlaybackStarted:
-          daemon.autoAdvancing = false
-          if daemon.currentTrackTitle.len > 0:
-            sendDesktopNotification(daemon.currentTrackTitle, daemon.currentTrackChannel)
-      # Auto-advance on track ended
+      # FIRST: Process auto-advance on track ended (before broadcasts)
       for ev in daemonEvents:
         if ev.kind == evTrackEnded:
           if daemon.crossfadeNextPath.len > 0:
@@ -1737,10 +1720,25 @@ proc runDaemon*() =
             daemon.sendQueueEvent()
             daemon.pushFullState()
           elif daemon.playbackQueue.len > 0:
-            discard daemon.advanceToNextTrack(true)
-            daemon.sendQueueEvent()
-            daemon.pushFullState()
+            if daemon.advanceToNextTrack(true):
+              daemon.sendQueueEvent()
+              daemon.pushFullState()
+            else:
+              daemon.pushFullState()
           emitMprisPlayerChanged(daemon)
+      # SECOND: Broadcast processed events to clients
+      if daemonEvents.len > 0 and daemon.clients.len > 0:
+        let evJson = %*{"events": serializeEvents(daemonEvents, daemon)}
+        daemon.broadcastAll($evJson & "\n")
+      # THIRD: Desktop notification (isolated — failure must not corrupt state)
+      for ev in daemonEvents:
+        if ev.kind == evPlaybackStarted:
+          daemon.autoAdvancing = false
+          if daemon.currentTrackTitle.len > 0:
+            try:
+              sendDesktopNotification(daemon.currentTrackTitle, daemon.currentTrackChannel)
+            except:
+              discard
       # Monitor duration changes — broadcast if duration becomes known during playback (e.g. streams)
       let currentDur = daemon.player.duration
       if currentDur > 0 and abs(currentDur - daemon.lastTrackDuration) > 0.5:

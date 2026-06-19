@@ -368,8 +368,8 @@ proc playSelected(state: var AppState) =
     if state.tab == tabLibrary and state.player of DaemonClient:
       let cli = DaemonClient(state.player)
       if cli.connected:
-        discard daemonSimpleCmd(cli, "queue_clear")
-        var items: seq[(string, string, string)] = @[]
+        cli.sendOnly(%*{"cmd": "queue_clear"})
+        var arr = newJArray()
         var started = false
         for item in state.displayItems:
           if item.kind == likTrack:
@@ -378,25 +378,23 @@ proc playSelected(state: var AppState) =
               continue
             if started and item.trackIdx >= 0 and item.trackIdx < state.libraryTracks.len:
               let t = state.libraryTracks[item.trackIdx]
-              items.add((t.path, t.title, t.artist))
-        if items.len > 0:
-          discard cli.queueAdd(items)
+              arr.add(%*{"path": t.path, "title": t.title, "channel": t.artist})
+        if arr.len > 0:
+          cli.sendOnly(%*{"cmd": "queue_add", "data": arr})
     state.markDirtyBatch(cePlayState, ceTrack)
 
 proc nextTrack(state: var AppState) =
   state.upNextTimer = 0
   state.upNextMsg = ""
-  let nextResp = daemonSimpleCmd(DaemonClient(state.player), "next")
-  if nextResp.hasKey("ok") and not nextResp["ok"].getBool(false):
-    state.showNotification(nextResp{"error"}.getStr("No next track"))
+  if state.player of DaemonClient:
+    DaemonClient(state.player).sendOnly(%*{"cmd": "next"})
   state.markDirty(cePlayState)
 
 proc prevTrack(state: var AppState) =
   state.upNextTimer = 0
   state.upNextMsg = ""
-  let prevResp = daemonSimpleCmd(DaemonClient(state.player), "prev")
-  if prevResp.hasKey("ok") and not prevResp["ok"].getBool(false):
-    state.showNotification(prevResp{"error"}.getStr("No previous track"))
+  if state.player of DaemonClient:
+    DaemonClient(state.player).sendOnly(%*{"cmd": "prev"})
   state.markDirty(cePlayState)
 
 proc adjustVolume(state: var AppState, delta: int) =
@@ -407,13 +405,12 @@ proc adjustVolume(state: var AppState, delta: int) =
 
 proc toggleShuffle(state: var AppState) =
   if state.player of DaemonClient:
-    let cli = DaemonClient(state.player)
-    discard cli.setShuffle(not state.shuffleEnabled)
+    DaemonClient(state.player).sendOnly(%*{"cmd": "set_shuffle", "enabled": (not state.shuffleEnabled).int})
 
 proc cycleRepeat(state: var AppState) =
   if state.player of DaemonClient:
     let newMode = (state.repeatMode + 1) mod 3
-    discard DaemonClient(state.player).setRepeat(newMode)
+    DaemonClient(state.player).sendOnly(%*{"cmd": "set_repeat", "mode": newMode})
 
 proc toggleMute(state: var AppState) =
   if state.volume > 0:
@@ -2652,7 +2649,7 @@ proc processEvents(state: var AppState) =
   if state.player of DaemonClient:
     state.audioAvailable = DaemonClient(state.player).working
   for ev in events:
-    if ev.version > 0:
+    if ev.version > state.daemonStateVersion:
       state.daemonStateVersion = ev.version
     case ev.kind
     of evPositionChanged:
@@ -2773,27 +2770,29 @@ proc processEvents(state: var AppState) =
         state.upNextTimer = 150
         state.markDirty(ceFeedback)
       elif ev.strVal == "full_state_sync":
-        # Build state from embedded event metadata instead of synchronous request
-        var fs = %*{}
-        if ev.metadata.hasKey("state"): fs["state"] = %ev.metadata["state"]
-        if ev.metadata.hasKey("track_path"): fs["track_path"] = %ev.metadata["track_path"]
-        if ev.metadata.hasKey("track_title"): fs["track_title"] = %ev.metadata["track_title"]
-        if ev.metadata.hasKey("track_channel"): fs["track_channel"] = %ev.metadata["track_channel"]
-        if ev.metadata.hasKey("time_pos"):
-          try: fs["time_pos"] = %parseFloat(ev.metadata["time_pos"]) except: discard
-        if ev.metadata.hasKey("duration"):
-          try: fs["duration"] = %parseFloat(ev.metadata["duration"]) except: discard
-        if ev.metadata.hasKey("volume"):
-          try: fs["volume"] = %parseInt(ev.metadata["volume"]) except: discard
-        if ev.metadata.hasKey("full_shuffle"):
-          fs["shuffle"] = %(ev.metadata["full_shuffle"] == "true")
-        if ev.metadata.hasKey("full_repeat"):
-          try: fs["repeat"] = %parseInt(ev.metadata["full_repeat"]) except: discard
-        if ev.metadata.hasKey("sleep_timer"):
-          try: fs["sleep_timer"] = %parseInt(ev.metadata["sleep_timer"]) except: discard
-        if fs.len > 0:
-          fullStateSync(state, fs)
-          state.markDirtyBatch(cePlayState, ceTrack, cePosition, ceVolume)
+        if ev.version > 0 and ev.version < state.daemonStateVersion:
+          discard  # stale state
+        else:
+          var fs = %*{}
+          if ev.metadata.hasKey("state"): fs["state"] = %ev.metadata["state"]
+          if ev.metadata.hasKey("track_path"): fs["track_path"] = %ev.metadata["track_path"]
+          if ev.metadata.hasKey("track_title"): fs["track_title"] = %ev.metadata["track_title"]
+          if ev.metadata.hasKey("track_channel"): fs["track_channel"] = %ev.metadata["track_channel"]
+          if ev.metadata.hasKey("time_pos"):
+            try: fs["time_pos"] = %parseFloat(ev.metadata["time_pos"]) except: discard
+          if ev.metadata.hasKey("duration"):
+            try: fs["duration"] = %parseFloat(ev.metadata["duration"]) except: discard
+          if ev.metadata.hasKey("volume"):
+            try: fs["volume"] = %parseInt(ev.metadata["volume"]) except: discard
+          if ev.metadata.hasKey("full_shuffle"):
+            fs["shuffle"] = %(ev.metadata["full_shuffle"] == "true")
+          if ev.metadata.hasKey("full_repeat"):
+            try: fs["repeat"] = %parseInt(ev.metadata["full_repeat"]) except: discard
+          if ev.metadata.hasKey("sleep_timer"):
+            try: fs["sleep_timer"] = %parseInt(ev.metadata["sleep_timer"]) except: discard
+          if fs.len > 0:
+            fullStateSync(state, fs)
+            state.markDirtyBatch(cePlayState, ceTrack, cePosition, ceVolume)
       elif ev.strVal == "queue_changed" and state.player of DaemonClient:
         state.shuffleIndex = ev.intVal
         state.markDirty(ceQueue)
