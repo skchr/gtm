@@ -10,10 +10,8 @@ proc findLrcSidecar*(trackPath: string): string =
       return candidate
   ""
 
-proc parseLrc*(path: string): LrcData =
+proc parseLrcFromText(content: string): LrcData =
   result = LrcData(lines: @[])
-  if not fileExists(path): return
-  let content = readFile(path)
   for line in content.splitLines():
     let trimmed = line.strip()
     if trimmed.len == 0: continue
@@ -45,6 +43,13 @@ proc parseLrc*(path: string): LrcData =
       continue
     result.lines.add(LrcLine(timestamp: secs, text: text))
   result.lines.sort(proc(a, b: LrcLine): int = cmp(a.timestamp, b.timestamp))
+
+proc parseLrc*(path: string): LrcData =
+  if not fileExists(path): return LrcData(lines: @[])
+  parseLrcFromText(readFile(path))
+
+proc parseLrcString*(content: string): LrcData =
+  parseLrcFromText(content)
 
 proc currentLrcLine*(lyrics: LrcData, timePos: float): int =
   if lyrics.lines.len == 0: return -1
@@ -118,10 +123,7 @@ proc resolveLyrics*(trackPath, artist, title, album: string, duration: float): L
   # Step 2: Search LRCLIB
   let lrcText = fetchLrclibByParams(artist, title, album, duration)
   if lrcText.len > 0:
-    let tmpPath = "/tmp/gtm_lrc_tmp.lrc"
-    writeFile(tmpPath, lrcText)
-    result = parseLrc(tmpPath)
-    removeFile(tmpPath)
+    result = parseLrcString(lrcText)
     if result.lines.len > 0:
       return
   # Step 3: Search LRCLIB by query
@@ -129,7 +131,4 @@ proc resolveLyrics*(trackPath, artist, title, album: string, duration: float): L
   if results.len > 0:
     let lrcText2 = fetchLrclib(results[0].id)
     if lrcText2.len > 0:
-      let tmpPath2 = "/tmp/gtm_lrc_tmp2.lrc"
-      writeFile(tmpPath2, lrcText2)
-      result = parseLrc(tmpPath2)
-      removeFile(tmpPath2)
+      result = parseLrcString(lrcText2)

@@ -19,7 +19,7 @@
 ## │    …etc      ──► send IPC cmd, print response   │
 ## └────────────────────────────────────────────────┘
 
-import os, json, strutils, osproc
+import os, json, strutils, osproc, terminal
 import client, state, library, audio
 
 type
@@ -89,10 +89,14 @@ proc parseArgs*(args: seq[string] = os.commandLineParams()): CliArgs =
     result.targets = loadFromArgs(args[1..^1])
   else: discard
 
+template withDaemon(body: untyped): untyped =
+  var cli {.inject.} = newDaemonClient()
+  cli.ensureDaemon()
+  body
+
 proc simpleDaemonCmd(cmd: string): JsonNode =
   var cli = newDaemonClient()
-  cli.ensureDaemon()
-  result = daemonSimpleCmd(cli, cmd)
+  daemonSimpleCmd(cli, cmd)
 
 proc printVersion*() =
   echo "gtm " & GTM_VERSION
@@ -102,6 +106,23 @@ proc printVersion*() =
   echo "This is free software: you are free to change and redistribute it."
   echo "There is NO WARRANTY, to the extent permitted by law."
 
+proc useColor(): bool =
+  stdout.isatty()
+
+proc stateColor(state: string): string =
+  case state
+  of "playing": "\e[32m" & state & "\e[0m"  # green
+  of "paused":  "\e[33m" & state & "\e[0m"  # yellow
+  of "stopped": "\e[31m" & state & "\e[0m"  # red
+  else: state
+
+proc coloredText(text: string, code: string): string =
+  "\e[" & code & "m" & text & "\e[0m"
+
+template maybeColor(body: untyped): untyped =
+  let hasColor = useColor()
+  body
+
 proc execSubcommand*(args: CliArgs): bool =
   result = true
   case args.subcmd
@@ -110,71 +131,119 @@ proc execSubcommand*(args: CliArgs): bool =
   of scVersion:
     printVersion()
   of scPlay:
-    var cli = newDaemonClient()
-    cli.ensureDaemon()
-    if args.targets.len > 0:
-      discard cli.loadFile(args.targets[0])
-      cli.play()
-    echo "Playing: ", if args.targets.len > 0: args.targets[0] else: ""
+    withDaemon:
+      if args.targets.len > 0:
+        discard cli.loadFile(args.targets[0])
+        cli.play()
+        let resp = simpleDaemonCmd("now_playing")
+        let title = resp{"track"}.getStr(args.targets[0])
+        if useColor():
+          echo "\e[32m\u25B6\e[0m Playing: \e[36m" & title.splitFile().name.replace(".", " ") & "\e[0m"
+        else:
+          echo "Playing: ", title.splitFile().name.replace(".", " ")
+      else:
+        cli.play()
+        echo "Playback resumed"
   of scPause, scToggle:
-    var cli = newDaemonClient()
-    cli.ensureDaemon()
-    cli.togglePause()
-    echo "Toggled pause"
+    withDaemon:
+      cli.togglePause()
+      if useColor():
+        echo "\e[33m\u23F8\e[0m Toggled pause"
+      else:
+        echo "Toggled pause"
   of scStop:
-    var cli = newDaemonClient()
-    cli.ensureDaemon()
-    cli.stop()
-    echo "Stopped"
+    withDaemon:
+      cli.stop()
+      if useColor():
+        echo "\e[31m\u23F9\e[0m Stopped"
+      else:
+        echo "Stopped"
   of scNext:
-    var cli = newDaemonClient()
-    cli.ensureDaemon()
-    discard daemonSimpleCmd(cli, "next")
-    echo "Next track"
+    withDaemon:
+      discard daemonSimpleCmd(cli, "next")
+      if useColor():
+        echo "\e[34m\u23ED\e[0m Next track"
+      else:
+        echo "Next track"
   of scPrev:
-    var cli = newDaemonClient()
-    cli.ensureDaemon()
-    discard daemonSimpleCmd(cli, "prev")
-    echo "Previous track"
+    withDaemon:
+      discard daemonSimpleCmd(cli, "prev")
+      if useColor():
+        echo "\e[34m\u23EE\e[0m Previous track"
+      else:
+        echo "Previous track"
   of scVolume:
-    var cli = newDaemonClient()
-    cli.ensureDaemon()
     if args.volumeLevel >= 0:
-      cli.setVolume(args.volumeLevel)
-      echo "Volume set to ", args.volumeLevel
+      withDaemon:
+        cli.setVolume(args.volumeLevel)
+        if useColor():
+          echo "\e[36mVolume\e[0m set to \e[1m" & $args.volumeLevel & "%\e[0m"
+        else:
+          echo "Volume set to ", args.volumeLevel
     else:
       let resp = simpleDaemonCmd("get_volume")
-      echo "Volume: ", resp{"volume"}.getInt(80)
+      let vol = resp{"volume"}.getInt(80)
+      if useColor():
+        echo "\e[36mVolume:\e[0m \e[1m" & $vol & "%\e[0m"
+      else:
+        echo "Volume: ", vol
   of scShuffle:
-    var cli = newDaemonClient()
-    cli.ensureDaemon()
-    discard cli.setShuffle(args.shuffleEnabled)
-    echo "Shuffle: ", (if args.shuffleEnabled: "on" else: "off")
+    withDaemon:
+      discard cli.setShuffle(args.shuffleEnabled)
+      if useColor():
+        let on = if args.shuffleEnabled: "\e[32mON\e[0m" else: "\e[31mOFF\e[0m"
+        echo "\e[33m\u1F500\e[0m Shuffle: ", on
+      else:
+        echo "Shuffle: ", (if args.shuffleEnabled: "on" else: "off")
   of scRepeat:
-    var cli = newDaemonClient()
-    cli.ensureDaemon()
-    discard cli.setRepeat(args.repeatMode)
-    echo "Repeat: mode ", args.repeatMode
+    withDaemon:
+      discard cli.setRepeat(args.repeatMode)
+      if useColor():
+        echo "\e[34m\u1F501\e[0m Repeat: mode \e[1m" & $args.repeatMode & "\e[0m"
+      else:
+        echo "Repeat: mode ", args.repeatMode
   of scSleep:
-    var cli = newDaemonClient()
-    cli.ensureDaemon()
-    discard cli.setSleepTimer(args.sleepMinutes)
-    echo "Sleep timer: ", args.sleepMinutes, " minutes"
+    withDaemon:
+      discard cli.setSleepTimer(args.sleepMinutes)
+      if useColor():
+        echo "\e[33m\u23F0\e[0m Sleep timer: \e[1m" & $args.sleepMinutes & "m\e[0m"
+      else:
+        echo "Sleep timer: ", args.sleepMinutes, " minutes"
   of scStatus:
     let resp = simpleDaemonCmd("status")
-    echo "State: ", resp{"state"}.getStr("unknown")
-    echo "Track: ", resp{"track"}.getStr("")
-    echo "Volume: ", resp{"volume"}.getInt(80)
-    echo "Time: ", formatTime(resp{"time_pos"}.getFloat(0.0))
-    echo "Duration: ", formatTime(resp{"duration"}.getFloat(0.0))
+    let st = resp{"state"}.getStr("unknown")
+    let track = resp{"track"}.getStr("")
+    let vol = resp{"volume"}.getInt(80)
+    let tpos = formatTime(resp{"time_pos"}.getFloat(0.0))
+    let dur = formatTime(resp{"duration"}.getFloat(0.0))
+    if useColor():
+      echo stateColor(st) & "  \e[36m" & track.splitFile().name.replace(".", " ") & "\e[0m"
+      echo "  \e[2mVolume:\e[0m \e[1m" & $vol & "%\e[0m  \e[2mTime:\e[0m " & tpos & " / " & dur
+    else:
+      echo "State: ", st
+      echo "Track: ", track
+      echo "Volume: ", vol
+      echo "Time: ", tpos
+      echo "Duration: ", dur
   of scNow:
     let resp = simpleDaemonCmd("now_playing")
-    echo "Now Playing:"
-    echo "  Track: ", resp{"track"}.getStr("")
-    echo "  State: ", resp{"state"}.getStr("unknown")
-    echo "  Volume: ", resp{"volume"}.getInt(80)
-    echo "  Time: ", formatTime(resp{"time_pos"}.getFloat(0.0))
-    echo "  Duration: ", formatTime(resp{"duration"}.getFloat(0.0))
+    let st = resp{"state"}.getStr("unknown")
+    let track = resp{"track"}.getStr("")
+    let vol = resp{"volume"}.getInt(80)
+    let tpos = formatTime(resp{"time_pos"}.getFloat(0.0))
+    let dur = formatTime(resp{"duration"}.getFloat(0.0))
+    if useColor():
+      echo "\e[1mNow Playing:\e[0m"
+      echo "  \e[36m" & track.splitFile().name.replace(".", " ") & "\e[0m"
+      echo "  " & stateColor(st) & "  \e[2mVol:\e[0m \e[1m" & $vol & "%\e[0m"
+      echo "  \e[2m" & tpos & " / " & dur & "\e[0m"
+    else:
+      echo "Now Playing:"
+      echo "  Track: ", track
+      echo "  State: ", st
+      echo "  Volume: ", vol
+      echo "  Time: ", tpos
+      echo "  Duration: ", dur
   of scKill:
     const pidPath = stateDir() & "/gtmd.pid"
     if fileExists(pidPath):

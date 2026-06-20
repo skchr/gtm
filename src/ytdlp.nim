@@ -29,6 +29,13 @@ proc parseYtJsonLine*(line: string): YtSearchResult =
             elif j.hasKey("uploader"): j["uploader"].getStr("")
             else: ""
     let plTitle = if j.hasKey("playlist_title"): j["playlist_title"].getStr("") else: ""
+    # Filter out video-only results (music videos, visualizers, lyric videos)
+    if not isPlaylist:
+      let lower = t.toLowerAscii()
+      if lower.contains("video") or lower.contains("visualizer") or
+         lower.contains("lyric video") or lower.contains("music video") or
+         lower.contains("official video") or lower.contains("audio only"):
+        return default(YtSearchResult)
     result = YtSearchResult(title: t, url: u, duration: dur, channel: c,
       playlistTitle: plTitle, kind: if isPlaylist: srkPlaylist else: srkVideo)
   except:

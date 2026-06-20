@@ -2,58 +2,70 @@ import illwave as iw
 import ../vendor/nimwave/nimwave as nw
 from unicode import runeLen, toRunes, Rune
 import colors, sequtils, math, strutils, tables, sets, os, times, posix, osproc, options
-import state, theme, audio, library, icons, commands, client, graphics, hashes
+import state, theme, audio, library, icons, commands, graphics, hashes, store, daemonservice
 
-type State* = AppState
+type State* = Store
 include ../vendor/nimwave/nimwave/prelude
+
+template state*(ctx: nw.Context[Store]): var AppState = ctx.data.app
 
 var gTermCellW*: int = 8
 var gTermCellH*: int = 16
 
-proc initHighlightGroups*(theme: Theme): HighlightGroups =
-  result.Normal = HighlightAttr(fg: some(theme.text), bg: some(theme.base))
-  result.TabBar = HighlightAttr(fg: some(theme.subtext0), bg: some(theme.mantle))
-  result.TabBarActive = HighlightAttr(fg: some(theme.mauve), bg: some(theme.surface2))
-  result.TabBarInactive = HighlightAttr(fg: some(theme.subtext0), bg: some(theme.mantle))
+proc blendBg*(fg: colors.Color, alpha: float): colors.Color =
+  ## Blend a color with black background at the given opacity
+  let raw = int(fg)
+  let r = uint8(float(raw shr 16 and 0xff) * alpha)
+  let g = uint8(float(raw shr 8 and 0xff) * alpha)
+  let b = uint8(float(raw and 0xff) * alpha)
+  iw.toColor(r, g, b)
+
+proc initHighlightGroups*(theme: Theme, transparentBg: bool = false): HighlightGroups =
+  template bg(c: colors.Color): Option[colors.Color] =
+    if transparentBg: none(colors.Color) else: some(c)
+  result.Normal = HighlightAttr(fg: some(theme.text), bg: bg(theme.base))
+  result.TabBar = HighlightAttr(fg: some(theme.subtext0), bg: bg(theme.mantle))
+  result.TabBarActive = HighlightAttr(fg: some(theme.mauve), bg: bg(theme.surface2))
+  result.TabBarInactive = HighlightAttr(fg: some(theme.subtext0), bg: bg(theme.mantle))
   result.NowPlayingTitle = HighlightAttr(fg: some(theme.text))
   result.NowPlayingArtist = HighlightAttr(fg: some(theme.subtext0))
   result.NowPlayingProgress = HighlightAttr(fg: some(theme.mauve))
-  result.NowPlayingProgressFill = HighlightAttr(fg: some(theme.mauve), bg: some(theme.surface2))
+  result.NowPlayingProgressFill = HighlightAttr(fg: some(theme.mauve), bg: bg(theme.surface2))
   result.NowPlayingStatus = HighlightAttr(fg: some(theme.green))
   result.NowPlayingUpNext = HighlightAttr(fg: some(theme.text))
-  result.NowPlayingUpNextCursor = HighlightAttr(fg: some(theme.yellow), bg: some(theme.surface2))
+  result.NowPlayingUpNextCursor = HighlightAttr(fg: some(theme.yellow), bg: bg(theme.surface2))
   result.NowPlayingUpNextHeader = HighlightAttr(fg: some(theme.sky))
-  result.LibrarySidebar = HighlightAttr(fg: some(theme.subtext0), bg: some(theme.mantle))
+  result.LibrarySidebar = HighlightAttr(fg: some(theme.subtext0), bg: bg(theme.mantle))
   result.LibrarySidebarActive = HighlightAttr(fg: some(theme.blue))
-  result.LibrarySidebarSelected = HighlightAttr(fg: some(theme.text), bg: some(theme.surface2))
-  result.LibraryContentHeader = HighlightAttr(fg: some(theme.subtext0), bg: some(theme.mantle))
+  result.LibrarySidebarSelected = HighlightAttr(fg: some(theme.text), bg: bg(theme.surface2))
+  result.LibraryContentHeader = HighlightAttr(fg: some(theme.subtext0), bg: bg(theme.mantle))
   result.LibraryContentRow = HighlightAttr(fg: some(theme.text))
-  result.LibraryContentRowSelected = HighlightAttr(fg: some(theme.blue), bg: some(theme.surface2))
-  result.SettingsSidebar = HighlightAttr(fg: some(theme.subtext0), bg: some(theme.mantle))
+  result.LibraryContentRowSelected = HighlightAttr(fg: some(theme.blue), bg: bg(theme.surface2))
+  result.SettingsSidebar = HighlightAttr(fg: some(theme.subtext0), bg: bg(theme.mantle))
   result.SettingsContentRow = HighlightAttr(fg: some(theme.subtext0))
-  result.SettingsContentRowSelected = HighlightAttr(fg: some(theme.text), bg: some(theme.surface0))
-  result.SettingsSectionHeader = HighlightAttr(fg: some(theme.mauve), bg: some(theme.crust))
-  result.StatusBar = HighlightAttr(fg: some(theme.subtext0), bg: some(theme.mantle))
+  result.SettingsContentRowSelected = HighlightAttr(fg: some(theme.text), bg: bg(theme.surface0))
+  result.SettingsSectionHeader = HighlightAttr(fg: some(theme.mauve), bg: bg(theme.crust))
+  result.StatusBar = HighlightAttr(fg: some(theme.subtext0), bg: bg(theme.mantle))
   result.StatusBarHints = HighlightAttr(fg: some(theme.subtext0))
   result.StatusBarModule = HighlightAttr(fg: some(theme.subtext0))
-  result.FilterBar = HighlightAttr(fg: some(theme.text), bg: some(theme.surface1))
-  result.ProgressBar = HighlightAttr(fg: some(theme.mauve), bg: some(theme.crust))
+  result.FilterBar = HighlightAttr(fg: some(theme.text), bg: bg(theme.surface1))
+  result.ProgressBar = HighlightAttr(fg: some(theme.mauve), bg: bg(theme.crust))
   result.ProgressBarTime = HighlightAttr(fg: some(theme.sky))
   result.OverlayBorder = HighlightAttr(fg: some(theme.mauve))
   result.OverlayTitle = HighlightAttr(fg: some(theme.mauve))
-  result.OverlayInput = HighlightAttr(fg: some(theme.text), bg: some(theme.surface1))
+  result.OverlayInput = HighlightAttr(fg: some(theme.text), bg: bg(theme.surface1))
   result.OverlayRow = HighlightAttr(fg: some(theme.text))
-  result.OverlayRowSelected = HighlightAttr(fg: some(theme.blue), bg: some(theme.surface2))
+  result.OverlayRowSelected = HighlightAttr(fg: some(theme.blue), bg: bg(theme.surface2))
   result.OverlayFooter = HighlightAttr(fg: some(theme.subtext0))
   result.Scrollbar = HighlightAttr(fg: some(theme.surface2))
   result.ErrorMsg = HighlightAttr(fg: some(theme.red))
   result.WarningMsg = HighlightAttr(fg: some(theme.peach))
   result.InfoMsg = HighlightAttr(fg: some(theme.blue))
   result.SuccessMsg = HighlightAttr(fg: some(theme.green))
-  result.VolumeCue = HighlightAttr(fg: some(theme.green), bg: some(theme.surface0))
-  result.FeedbackCue = HighlightAttr(fg: some(theme.blue), bg: some(theme.surface0))
-  result.NowPlayingCue = HighlightAttr(fg: some(theme.blue), bg: some(theme.surface0))
-  result.UpNextCue = HighlightAttr(fg: some(theme.peach), bg: some(theme.surface0))
+  result.VolumeCue = HighlightAttr(fg: some(theme.green), bg: bg(theme.surface0))
+  result.FeedbackCue = HighlightAttr(fg: some(theme.blue), bg: bg(theme.surface0))
+  result.NowPlayingCue = HighlightAttr(fg: some(theme.blue), bg: bg(theme.surface0))
+  result.UpNextCue = HighlightAttr(fg: some(theme.peach), bg: bg(theme.surface0))
   result.EqualizerBar = HighlightAttr(fg: some(theme.blue))
 
 template hl*(state: AppState, group: untyped): colors.Color =
@@ -190,10 +202,10 @@ proc overlayBackground*(tb: var iw.TerminalBuffer, w, h: int, col: colors.Color)
   fillBg(tb, 0, 0, w - 1, h - 1, col)
 
 type TabBar = ref object of nw.Node
-method render*(node: TabBar, ctx: var nw.Context[AppState]) =
+method render*(node: TabBar, ctx: var nw.Context[State]) =
   let w = iw.width(ctx.tb)
   if w < 4: return
-  let theme = ctx.data.theme
+  let theme = ctx.state.theme
   fillBg(ctx.tb, 0, 0, w - 1, 0, theme.mantle)
   let ic = currentIcons()
   let tabIcons = [ic.headphone, ic.library, ic.settings]
@@ -206,7 +218,7 @@ method render*(node: TabBar, ctx: var nw.Context[AppState]) =
   for i, name in tabs:
     let key = tabKeys[i]
     let tab = AppTab(i)
-    let isActive = ctx.data.tab == tab
+    let isActive = ctx.state.tab == tab
     let display = "[" & key & "]" & tabIcons[i] & " " & name
     let segLen = display.runeLen + 1
     if isActive:
@@ -258,11 +270,11 @@ proc showInputCursor*(state: var AppState, w, h: int) =
     gCursorY = -1
 
 type NowPlayingView = ref object of nw.Node
-method render*(node: NowPlayingView, ctx: var nw.Context[AppState]) =
+method render*(node: NowPlayingView, ctx: var nw.Context[State]) =
   let w = iw.width(ctx.tb)
   let h = iw.height(ctx.tb)
   if w < 4 or h < 2: return
-  let state = ctx.data
+  var state = ctx.state
   let theme = state.theme
   fillBg(ctx.tb, 0, 0, w - 1, h - 1, theme.base)
   let track = if state.ytStreamTitle.len > 0:
@@ -345,14 +357,61 @@ method render*(node: NowPlayingView, ctx: var nw.Context[AppState]) =
         if coverW >= 8:
           let coverX = w - coverW - 1
           let coverY = 1
-          if ctx.data.coverImageId < 0:
+          if ctx.state.coverImageId < 0:
             deleteImage(CoverImageId)
             transmitImage(coverBytes, coverMime, CoverImageId)
-            ctx.data.coverImageId = CoverImageId
-          placeImage(coverX, coverY, ctx.data.coverImageId, coverW)
-    elif ctx.data.coverImageId >= 0:
-      deleteImage(ctx.data.coverImageId)
-      ctx.data.coverImageId = -1
+            ctx.state.coverImageId = CoverImageId
+          placeImage(coverX, coverY, ctx.state.coverImageId, coverW)
+    elif ctx.state.coverImageId >= 0:
+      deleteImage(ctx.state.coverImageId)
+      ctx.state.coverImageId = -1
+  # Dashboard overlay
+  if state.dashboardVisible:
+    let dashX = 2
+    let dashY = line + 1
+    let dashW = min(60, w - 4)
+    let hello = if state.totalTracksPlayed > 0:
+      let h = epochTime().toTime().getLocalTime().hour
+      if h < 12: "Good morning"
+      elif h < 17: "Good afternoon"
+      else: "Good evening"
+    else: "Welcome"
+    writeStr(ctx.tb, dashX, dashY, hello & ", " & getEnv("USER", "friend"), theme.mauve)
+    line.inc
+    writeStr(ctx.tb, dashX, dashY + 1, "\u2500".repeat(min(dashW - 2, 30)), theme.surface2)
+    line.inc
+    line.inc
+    var statsStr = "Tracks played: " & $state.totalTracksPlayed
+    if state.totalTracksPlayed > 0:
+      let totalMin = int(state.totalPlayTime / 60)
+      statsStr &= "  |  Listening time: " & $(totalMin div 60) & "h " & $(totalMin mod 60) & "m"
+      statsStr &= "  |  This session: " & $state.sessionTracksPlayed
+    writeStr(ctx.tb, dashX, dashY + 2, statsStr, theme.subtext0)
+    line.inc
+    line.inc
+    if state.spConnected and state.spFeedRecentlyPlayed.len > 0:
+      writeStr(ctx.tb, dashX, line, "Recently Played", theme.sky)
+      line.inc
+      for i, t in state.spFeedRecentlyPlayed:
+        if i >= 5: break
+        writeStr(ctx.tb, dashX + 2, line, t.artist & " — " & t.name, theme.text)
+        line.inc
+      if state.spFeedTopTracks.len > 0:
+        line.inc
+        writeStr(ctx.tb, dashX, line, "Top Tracks", theme.sky)
+        line.inc
+        for i, t in state.spFeedTopTracks:
+          if i >= 5: break
+          writeStr(ctx.tb, dashX + 2, line, t.artist & " — " & t.name, theme.text)
+          line.inc
+    elif state.spFeedFetching:
+      writeStr(ctx.tb, dashX, line, "Loading Spotify feed...", theme.overlay0)
+      line.inc
+    else:
+      writeStr(ctx.tb, dashX, line, "Link Spotify in Settings \u2192 Spotify for personalized feed", theme.overlay0)
+      line.inc
+    line.inc
+    writeStr(ctx.tb, dashX, line, "Press Alt+D or Esc to close", theme.overlay0)
   # Lyrics — synced
   if state.currentLyrics.lines.len > 0:
     let maxLyricLines = 6
@@ -414,11 +473,11 @@ type
     count: int
 
 type LibrarySidebar = ref object of nw.Node
-method render*(node: LibrarySidebar, ctx: var nw.Context[AppState]) =
+method render*(node: LibrarySidebar, ctx: var nw.Context[State]) =
   let w = iw.width(ctx.tb)
   let h = iw.height(ctx.tb)
   if w < 10 or h < 4: return
-  let state = ctx.data
+  let state = ctx.state
   let theme = state.theme
   fillBg(ctx.tb, 0, 0, w - 1, h - 1, theme.mantle)
   let isFocused = state.libraryFocusPanel == lpSidebar
@@ -428,13 +487,13 @@ method render*(node: LibrarySidebar, ctx: var nw.Context[AppState]) =
     SidebarEntry(scope: fsArtists, label: ic.artist & " Artists", count: state.libraryArtists.len),
     SidebarEntry(scope: fsAlbums, label: ic.album & " Albums", count: state.libraryAlbums.len),
     SidebarEntry(scope: fsPlaylists, label: ic.playlist & " Playlists", count: state.libraryPlaylists.len),
-    SidebarEntry(scope: fsRecent, label: "Recent", count: state.libraryTracks.len),
-    SidebarEntry(scope: fsFavourites, label: "Favourites", count: 0),
-    SidebarEntry(scope: fsLastPlayed, label: "Last Played", count: state.libraryTracks.len),
-    SidebarEntry(scope: fsMostPlayed, label: "Most Played", count: state.libraryTracks.len),
-    SidebarEntry(scope: fsLeastPlayed, label: "Least Played", count: state.libraryTracks.len),
-    SidebarEntry(scope: fsDownloads, label: "Downloads", count: state.downloadCount),
-    SidebarEntry(scope: fsSpotify, label: "Spotify", count: state.spDownloadCount),
+    SidebarEntry(scope: fsRecent, label: ic.time & " Recent", count: state.libraryTracks.len),
+    SidebarEntry(scope: fsFavourites, label: ic.heart & " Favourites", count: 0),
+    SidebarEntry(scope: fsLastPlayed, label: ic.time & " Last Played", count: state.libraryTracks.len),
+    SidebarEntry(scope: fsMostPlayed, label: ic.heart & " Most Played", count: state.libraryTracks.len),
+    SidebarEntry(scope: fsLeastPlayed, label: ic.heart & " Least Played", count: state.libraryTracks.len),
+    SidebarEntry(scope: fsDownloads, label: ic.disk & " Downloads", count: state.downloadCount),
+    SidebarEntry(scope: fsSpotify, label: ic.headphone & " Spotify", count: state.spDownloadCount),
   ]
   template treePrefix(idx: int): string =
     if idx < 4: ""
@@ -469,11 +528,11 @@ method render*(node: LibrarySidebar, ctx: var nw.Context[AppState]) =
   fillBg(ctx.tb, 0, line, w - 1, h - 1, theme.mantle)
 
 type LibraryContentView = ref object of nw.Node
-method render*(node: LibraryContentView, ctx: var nw.Context[AppState]) =
+method render*(node: LibraryContentView, ctx: var nw.Context[State]) =
   let w = iw.width(ctx.tb)
   let h = iw.height(ctx.tb)
   if w < 10 or h < 3: return
-  let state = ctx.data
+  var state = ctx.state
   let theme = state.theme
   fillBg(ctx.tb, 0, 0, w - 1, h - 1, theme.base)
   let isFocused = state.libraryFocusPanel == lpContent
@@ -521,7 +580,7 @@ method render*(node: LibraryContentView, ctx: var nw.Context[AppState]) =
       line.inc
     fillBg(ctx.tb, 0, line, w - 1, h - 1, theme.base)
     if anyItems:
-      ctx.data.markDirty(ceDownloadProgress)
+      ctx.state.markDirty(ceDownloadProgress)
     return
 
   if count == 0:
@@ -620,11 +679,11 @@ const settingsCategories* = [
 ]
 
 type SettingsView = ref object of nw.Node
-method render*(node: SettingsView, ctx: var nw.Context[AppState]) =
+method render*(node: SettingsView, ctx: var nw.Context[State]) =
   let w = iw.width(ctx.tb)
   let h = iw.height(ctx.tb)
   if w < 4 or h < 2: return
-  let state = ctx.data
+  let state = ctx.state
   let theme = state.theme
   fillBg(ctx.tb, 0, 0, w - 1, h - 1, theme.base)
   let sidebarFocused = state.settingsFocusPanel == lpSidebar
@@ -701,9 +760,8 @@ method render*(node: SettingsView, ctx: var nw.Context[AppState]) =
     writeStr(ctx.tb, contentX + contentW - 7, line, "s", theme.subtext0)
     line.inc
     settingsRow("Crossfade Curve")
-    let curveNames = ["EqualPower", "Quadratic", "Cubic", "Asymmetric"]
     let curveIdx = state.crossfadeCurve.ord
-    let curveLabel = if curveIdx >= 0 and curveIdx < curveNames.len: curveNames[curveIdx] else: "Quadratic"
+    let curveLabel = if curveIdx >= 0 and curveIdx < CrossfadeCurveLabels.len: CrossfadeCurveLabels[curveIdx] else: "Quadratic"
     writeStr(ctx.tb, contentX + contentW - curveLabel.runeLen - 11, line, "[ " & curveLabel & " ▸]", theme.subtext0)
     line.inc
     settingsRow("Daemon")
@@ -723,7 +781,7 @@ method render*(node: SettingsView, ctx: var nw.Context[AppState]) =
     writeStr(ctx.tb, contentX + contentW - cfLabel.runeLen - 11, line, "[ " & cfLabel & " \u25B8]", theme.subtext0)
     line.inc
     settingsRow("JS Runtime")
-    let rtLabel = if state.ytJsRuntime.len == 0: "node" else: state.ytJsRuntime
+    let rtLabel = if state.ytJsRuntime.len == 0: JsRuntimes[0] else: state.ytJsRuntime
     writeStr(ctx.tb, contentX + contentW - rtLabel.runeLen - 11, line, "[ " & rtLabel & " ▸]", theme.subtext0)
     line.inc
     settingsRow("Max Downloads")
@@ -783,7 +841,7 @@ method render*(node: SettingsView, ctx: var nw.Context[AppState]) =
     writeStr(ctx.tb, contentX + contentW - spCfLabel.runeLen - 11, line, "[ " & spCfLabel & " \u25B8]", theme.subtext0)
     line.inc
     settingsRow("Audio Format")
-    let fmtLabel = if state.spAudioFormat.len == 0: "opus" else: state.spAudioFormat
+    let fmtLabel = if state.spAudioFormat.len == 0: SpotifyFormats[0] else: state.spAudioFormat
     writeStr(ctx.tb, contentX + contentW - fmtLabel.runeLen - 11, line, "[ " & fmtLabel & " ▸]", theme.subtext0)
     line.inc
     settingsRow("Max Downloads")
@@ -822,11 +880,10 @@ method render*(node: SettingsView, ctx: var nw.Context[AppState]) =
         descLine.inc
       let toggleOpt =
         if cat == scAudio and descIdx == 2:
-          let cNames = ["EqualPower", "Quadratic", "Cubic", "Asymmetric"]
           let cIdx = state.crossfadeCurve.ord
-          if cIdx >= 0 and cIdx < cNames.len: some(cNames[cIdx]) else: none(string)
+          if cIdx >= 0 and cIdx < CrossfadeCurveLabels.len: some(CrossfadeCurveLabels[cIdx]) else: none(string)
         elif cat == scYouTube and descIdx == 1:
-          let rLabel = if state.ytJsRuntime.len == 0: "node" else: state.ytJsRuntime
+          let rLabel = if state.ytJsRuntime.len == 0: JsRuntimes[0] else: state.ytJsRuntime
           some(rLabel)
         else:
           none(string)
@@ -844,10 +901,10 @@ method render*(node: SettingsView, ctx: var nw.Context[AppState]) =
   writeStr(ctx.tb, 1, h - 1, truncateAt(kbLine, w - 2), theme.subtext0)
 
 type ProgressBarComp = ref object of nw.Node
-method render*(node: ProgressBarComp, ctx: var nw.Context[AppState]) =
+method render*(node: ProgressBarComp, ctx: var nw.Context[State]) =
   let w = iw.width(ctx.tb)
   if w < 6: return
-  let state = ctx.data
+  let state = ctx.state
   let theme = state.theme
   fillBg(ctx.tb, 0, 0, w - 1, 0, theme.crust)
   let elapsed = formatTime(state.timePos)
@@ -886,10 +943,10 @@ method render*(node: ProgressBarComp, ctx: var nw.Context[AppState]) =
     rightX -= 2
 
 type StatusBarComp = ref object of nw.Node
-method render*(node: StatusBarComp, ctx: var nw.Context[AppState]) =
+method render*(node: StatusBarComp, ctx: var nw.Context[State]) =
   let w = iw.width(ctx.tb)
   if w < 4: return
-  let state = ctx.data
+  let state = ctx.state
   let theme = state.theme
   fillBg(ctx.tb, 0, 0, w - 1, 0, theme.mantle)
 
@@ -1041,10 +1098,10 @@ type
     maxHeight*: int
     maxWidth*: int
 
-proc renderPicker*(ctx: var nw.Context[AppState], props: PickerProps) =
+proc renderPicker*(ctx: var nw.Context[State], props: PickerProps) =
   let w = iw.width(ctx.tb)
   let h = iw.height(ctx.tb)
-  let theme = ctx.data.theme
+  let theme = ctx.state.theme
   if w < 20 or h < 8: return
   let boxW = min(props.maxWidth, w - 8)
   let boxH = min(props.maxHeight, h - 4)
@@ -1084,57 +1141,61 @@ proc renderPicker*(ctx: var nw.Context[AppState], props: PickerProps) =
     if ft.len > 0: writeStr(ctx.tb, boxX + 1, boxY + boxH - 1, ft, theme.subtext0)
 
 type GenericOverlay* = ref object of nw.Node
-method render*(node: GenericOverlay, ctx: var nw.Context[AppState]) =
+method render*(node: GenericOverlay, ctx: var nw.Context[State]) =
   let w = iw.width(ctx.tb)
   let h = iw.height(ctx.tb)
   if w < 20 or h < 8: return
-  let ov = ctx.data.overlay
-  let theme = ctx.data.theme
+  let ov = ctx.state.overlay
+  let theme = ctx.state.theme
   var boxW = min(50, w - 8)
   var boxH = min(22, h - 4)
   var title = ""
   var queryLine = true
+  let ic = currentIcons()
   case ov.kind
   of okYtSearch:
     boxW = min(60, w - 8)
     boxH = min(24, h - 4)
-    let subTabStr = if ov.ytSubTab == ystAll: "All" else: "Playlists"
-    title = "YouTube Search [" & subTabStr & "]"
+    title = ic.search & " YouTube Search"
     if ov.multiMode: title &= " [MULTISELECT]"
   of okYtBatch:
     boxH = min(14, h - 4)
     boxW = min(44, w - 8)
-    title = "Add " & $ov.batchItems.len & " items to..."
+    title = ic.queue & " Add " & $ov.batchItems.len & " items to..."
     queryLine = false
   of okQueuePicker:
-    title = "Add to Queue"
+    title = ic.queue & " Add to Queue"
   of okPlaylistSearch:
-    title = if ov.plMode == 1: "Add to Playlist" else: "Remove from Playlist"
+    title = if ov.plMode == 1: ic.playlist & " Add to Playlist" else: ic.playlist & " Remove from Playlist"
   of okThemePicker:
-    title = "Change Theme"
+    title = ic.headphone & " Change Theme"
   of okEqPresetPicker:
-    title = "EQ Presets"
+    title = ic.settings & " EQ Presets"
   of okCommandPalette:
-    title = "\u2328 Commands"
+    title = ic.commandPalette & " Commands"
   of okQueueOverlay:
-    title = "Current Queue"
+    title = ic.queue & " Current Queue (" & $ctx.state.playbackQueue.len & ")"
     queryLine = false
   of okFuzzyFinder:
-    title = "Fuzzy Finder"
+    title = ic.search & " Fuzzy Finder"
     queryLine = true
   of okSpotifyUrlInput:
     boxW = min(52, w - 8)
     boxH = 7
-    title = "Import Spotify Playlist URL"
+    title = ic.disk & " Import Spotify Playlist URL"
     queryLine = true
   of okTrashView:
-    title = "Trash"
+    title = ic.cross & " Trash"
     boxW = min(60, w - 8)
     boxH = min(24, h - 4)
   else: return
   let boxX = (w - boxW) div 2
   let boxY = (h - boxH) div 2
-  fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.surface0)
+  let ovBg = if ctx.state.transparentBg and ctx.state.overlayOpacity < 1.0:
+    blendBg(theme.surface0, ctx.state.overlayOpacity)
+  else:
+    theme.surface0
+  fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, ovBg)
   drawRoundedRect(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.mauve)
   writeStr(ctx.tb, boxX + 1, boxY, title, theme.mauve)
   var curY = boxY + 1
@@ -1160,26 +1221,9 @@ method render*(node: GenericOverlay, ctx: var nw.Context[AppState]) =
   ctx.tb.setBackgroundColor(theme.surface0)
   writeStr(ctx.tb, boxX + 1, curY, "\u2500".repeat(boxW - 2), theme.surface2)
   curY.inc
-  #--- Sub-tab bar ---
-  if ov.kind == okYtSearch:
-    let subTabs = ["All", "Playlists"]
-    var tabX = boxX + 1
-    for i, st in subTabs:
-      let isActive = (i == 0 and ov.ytSubTab == ystAll) or (i == 1 and ov.ytSubTab == ystPlaylists)
-      let display = " [" & st & "] "
-      let subTabBg = if isActive: theme.surface2 else: theme.surface0
-      if isActive:
-        fillBg(ctx.tb, tabX, curY, tabX + display.runeLen - 1, curY, subTabBg)
-      ctx.tb.setBackgroundColor(subTabBg)
-      if isActive:
-        writeStr(ctx.tb, tabX, curY, display, theme.mauve)
-      else:
-        writeStr(ctx.tb, tabX, curY, display, theme.subtext0)
-      tabX += display.runeLen
-    curY.inc
   #--- YT Search results ---
   if ov.kind == okYtSearch:
-    if ov.ytResults.len == 0 and ov.query.len > 0 and ctx.data.ytSearchLoading:
+    if ov.ytResults.len == 0 and ov.query.len > 0 and ctx.state.ytSearchLoading:
       ctx.tb.setBackgroundColor(theme.surface0)
       writeStr(ctx.tb, boxX + 2, curY, "Searching...", theme.subtext0)
     elif ov.ytResults.len == 0 and ov.query.len > 0:
@@ -1187,13 +1231,20 @@ method render*(node: GenericOverlay, ctx: var nw.Context[AppState]) =
       writeStr(ctx.tb, boxX + 2, curY, "No results found", theme.subtext0)
     let availableLines = max(0, (boxY + boxH - 2) - curY)
     let displayCount = min(ov.ytResults.len, availableLines)
+    var videoCount = 0
     for i in 0..<displayCount:
       let lineY = curY + i
       if lineY >= boxY + boxH - 1: break
       let r = ov.ytResults[i]
       let isSelected = (i == ov.cursor)
       let isMarked = i in ov.selected
-      let kindIcon = if r.kind == srkPlaylist: "\xE2\x96\xB6" else: "\xE2\x80\xA2"
+      let isPlaylistResult = r.kind == srkPlaylist
+      # Show playlist entry after 5 songs
+      if isPlaylistResult and videoCount >= 5 and not isSelected:
+        discard
+      else:
+        if isPlaylistResult: videoCount = 0 else: videoCount.inc
+      let kindIcon = if isPlaylistResult: ic.playlist else: ic.musicNote
       let prefix = if isMarked: "\u25C9 " else: "  "
       let ttl = if r.title.runeLen > boxW - 22: r.title[0..<min(r.title.len, boxW - 25)] & "..." else: r.title
       let meta = r.channel & "  " & r.duration
@@ -1201,26 +1252,27 @@ method render*(node: GenericOverlay, ctx: var nw.Context[AppState]) =
       if isSelected:
         fillBg(ctx.tb, boxX + 1, lineY, boxX + boxW - 2, lineY, ovRowBg)
       ctx.tb.setBackgroundColor(ovRowBg)
-      writeStr(ctx.tb, boxX + 2, lineY, prefix & kindIcon & " " & ttl, if isSelected: theme.blue else: theme.text)
+      let iconColor = if isPlaylistResult: theme.peach else: (if isSelected: theme.blue else: theme.text)
+      writeStr(ctx.tb, boxX + 2, lineY, prefix & kindIcon & " " & ttl, if isSelected: theme.blue else: iconColor)
       writeStr(ctx.tb, boxX + boxW - 2 - meta.runeLen, lineY, meta, theme.subtext0)
     let footerW = boxW - 2
     ctx.tb.setBackgroundColor(theme.surface0)
     if ov.multiMode:
       let footerText = if footerW < 34: "Enter:Toggle(" & $ov.selected.len & ")  Esc:Cancel"
-                       elif footerW < 44: "Tab:SubTab  Enter:Toggle  Ctrl+S:Done  Esc:Cancel"
-                       else: "Tab:SubTab  Enter:Toggle  Ctrl+D:Batch(" & $ov.selected.len & ")  Ctrl+S:Done  Esc:Cancel"
+                       elif footerW < 44: "Enter:Toggle  Ctrl+S:Done  Esc:Cancel"
+                       else: "Enter:Toggle  Ctrl+D:Batch(" & $ov.selected.len & ")  Ctrl+S:Done  Esc:Cancel"
       let ft = truncateAt(footerText, boxW - 2)
       if ft.len > 0: writeStr(ctx.tb, boxX + 1, boxY + boxH - 1, ft, theme.subtext0)
     else:
-      let pageInfo = if ctx.data.ytSearchPage > 0: " [Page " & $(ctx.data.ytSearchPage + 1) & "]" else: ""
+      let pageInfo = if ctx.state.ytSearchPage > 0: " [Page " & $(ctx.state.ytSearchPage + 1) & "]" else: ""
       let footerText = if footerW < 34: "Enter:Play  Esc:Cancel"
                        elif footerW < 44: "Enter:Play  Ctrl+D:Queue  Esc:Cancel"
-                       else: "Tab:SubTab  Enter:Play  Ctrl+D:Queue  Ctrl+S:Multi" & pageInfo & "  Esc:Cancel"
+                       else: "Enter:Play  Ctrl+D:Queue  Ctrl+S:Multi" & pageInfo & "  Esc:Cancel"
       let ft = truncateAt(footerText, boxW - 2)
       if ft.len > 0: writeStr(ctx.tb, boxX + 1, boxY + boxH - 1, ft, theme.subtext0)
   #--- YT Batch picker ---
   elif ov.kind == okYtBatch:
-    let options = ["Queue", "Playlist", "New Playlist"]
+    let options = [ic.queue & " Queue", ic.playlist & " Playlist", ic.folder & " New Playlist"]
     for i, opt in options:
       let lineY = curY + i
       if lineY >= boxY + boxH - 1: break
@@ -1229,9 +1281,9 @@ method render*(node: GenericOverlay, ctx: var nw.Context[AppState]) =
       if isSelected:
         fillBg(ctx.tb, boxX + 1, lineY, boxX + boxW - 2, lineY, ovRowBg)
       ctx.tb.setBackgroundColor(ovRowBg)
-      if ov.batchShowPls and ov.cursor >= 0 and ov.cursor < ctx.data.libraryPlaylists.len:
-        let pl = ctx.data.libraryPlaylists[ov.cursor]
-        writeStr(ctx.tb, boxX + 2, lineY, truncateAt(pl.name & " (" & $pl.trackIds.len & " tracks)", boxW - 4), if isSelected: theme.blue else: theme.text)
+      if ov.batchShowPls and ov.cursor >= 0 and ov.cursor < ctx.state.libraryPlaylists.len:
+        let pl = ctx.state.libraryPlaylists[ov.cursor]
+        writeStr(ctx.tb, boxX + 2, lineY, ic.playlist & " " & truncateAt(pl.name & " (" & $pl.trackIds.len & " tracks)", boxW - 6), if isSelected: theme.blue else: theme.text)
       elif not ov.batchShowPls:
         writeStr(ctx.tb, boxX + 2, lineY, opt, if isSelected: theme.blue else: theme.text)
     ctx.tb.setBackgroundColor(theme.surface0)
@@ -1247,10 +1299,10 @@ method render*(node: GenericOverlay, ctx: var nw.Context[AppState]) =
       if lineY >= boxY + boxH - 1: break
       let idx = ov.results[i]
       let isSelected = (i == ov.cursor)
-      let track = if idx >= 0 and idx < ctx.data.libraryTracks.len: ctx.data.libraryTracks[idx] else: Track()
+      let track = if idx >= 0 and idx < ctx.state.libraryTracks.len: ctx.state.libraryTracks[idx] else: Track()
       let isChecked = idx in ov.selected
       let checkMark = if isChecked: "\u25C9 " else: "\u25CB "
-      let prefix = checkMark & track.displayName()
+      let prefix = checkMark & ic.musicNote & " " & track.displayName()
       let ovRowBg = if isSelected: theme.surface2 else: theme.surface0
       if isSelected:
         fillBg(ctx.tb, boxX + 1, lineY, boxX + boxW - 2, lineY, ovRowBg)
@@ -1280,7 +1332,7 @@ method render*(node: GenericOverlay, ctx: var nw.Context[AppState]) =
         fillBg(ctx.tb, boxX + 1, lineY, boxX + boxW - 2, lineY, ovRowBg)
       ctx.tb.setBackgroundColor(ovRowBg)
       if isSelected:
-        writeStr(ctx.tb, boxX + 2, lineY, seed, if isDarkMode(ctx.data.config.theme): theme.base else: theme.crust)
+        writeStr(ctx.tb, boxX + 2, lineY, seed, if isDarkMode(ctx.state.config.theme): theme.base else: theme.crust)
       else:
         writeStr(ctx.tb, boxX + 2, lineY, seed, theme.text)
     ctx.tb.setBackgroundColor(theme.surface0)
@@ -1297,7 +1349,7 @@ method render*(node: GenericOverlay, ctx: var nw.Context[AppState]) =
       if lineY >= boxY + boxH - 2: break
       let name = ov.strResults[i]
       let isSelected = (i == ov.cursor)
-      let isActive = name == ctx.data.eqPreset
+      let isActive = name == ctx.state.eqPreset
       let ovRowBg = if isSelected: theme.blue else: theme.surface0
       if isSelected:
         fillBg(ctx.tb, boxX + 1, lineY, boxX + boxW - 2, lineY, ovRowBg)
@@ -1305,7 +1357,7 @@ method render*(node: GenericOverlay, ctx: var nw.Context[AppState]) =
       let prefix = if isActive and not isSelected: "\u25C9 " else: "  "
       let label = prefix & name
       if isSelected:
-        writeStr(ctx.tb, boxX + 2, lineY, label, if isDarkMode(ctx.data.config.theme): theme.base else: theme.crust)
+        writeStr(ctx.tb, boxX + 2, lineY, label, if isDarkMode(ctx.state.config.theme): theme.base else: theme.crust)
       elif isActive:
         writeStr(ctx.tb, boxX + 2, lineY, label, theme.green)
       else:
@@ -1318,7 +1370,7 @@ method render*(node: GenericOverlay, ctx: var nw.Context[AppState]) =
       if hint.len > 0: writeStr(ctx.tb, boxX + 1, boxY + boxH - 1, hint, theme.subtext0)
   #--- Trash View ---
   elif ov.kind == okTrashView:
-    let items = ctx.data.trashItems
+    let items = ctx.state.trashItems
     let displayCount = min(items.len, boxH - 5)
     for i in 0..<displayCount:
       let lineY = curY + i
@@ -1339,15 +1391,15 @@ method render*(node: GenericOverlay, ctx: var nw.Context[AppState]) =
     if ft.len > 0: writeStr(ctx.tb, boxX + 1, boxY + boxH - 1, ft, theme.subtext0)
   #--- Current Queue Overlay ---
   elif ov.kind == okQueueOverlay:
-    let queue = ctx.data.playbackQueue
+    let queue = ctx.state.playbackQueue
     let displayCount = min(queue.len, boxH - 4)
     for i in 0..<displayCount:
       let lineY = curY + i
       if lineY >= boxY + boxH - 1: break
       let tIdx = queue[i]
       let isSelected = (i == ov.cursor)
-      let t = if tIdx >= 0 and tIdx < ctx.data.libraryTracks.len: ctx.data.libraryTracks[tIdx] else: Track()
-      let isNowPlaying = i == 0 and ctx.data.status in {psPlaying, psPaused}
+      let t = if tIdx >= 0 and tIdx < ctx.state.libraryTracks.len: ctx.state.libraryTracks[tIdx] else: Track()
+      let isNowPlaying = i == 0 and ctx.state.status in {psPlaying, psPaused}
       let ovRowBg = if isSelected: theme.surface2 else: theme.surface0
       if isSelected:
         fillBg(ctx.tb, boxX + 1, lineY, boxX + boxW - 2, lineY, ovRowBg)
@@ -1366,8 +1418,8 @@ method render*(node: GenericOverlay, ctx: var nw.Context[AppState]) =
     let displayResults = min(20, ov.results.len)
     for i in 0..<displayResults:
       let idx = ov.results[i]
-      if idx < 0 or idx >= ctx.data.commands.len: continue
-      let cmd = ctx.data.commands[idx]
+      if idx < 0 or idx >= ctx.state.commands.len: continue
+      let cmd = ctx.state.commands[idx]
       let isSelected = (i == ov.cursor)
       let lineY = curY + i
       if lineY >= boxY + boxH - 1: break
@@ -1375,7 +1427,7 @@ method render*(node: GenericOverlay, ctx: var nw.Context[AppState]) =
       if isSelected:
         fillBg(ctx.tb, boxX + 1, lineY, boxX + boxW - 2, lineY, ovRowBg)
       ctx.tb.setBackgroundColor(ovRowBg)
-      writeStr(ctx.tb, boxX + 2, lineY, cmd.name, if isSelected: (theme.blue) else: theme.text)
+      writeStr(ctx.tb, boxX + 2, lineY, cmd.icon & " " & cmd.name, if isSelected: (theme.blue) else: theme.text)
       let keys = cmd.defaultKeys.join(", ")
       writeStr(ctx.tb, boxX + boxW - 2 - keys.runeLen, lineY, keys, theme.subtext0)
     ctx.tb.setBackgroundColor(theme.surface0)
@@ -1397,17 +1449,17 @@ method render*(node: GenericOverlay, ctx: var nw.Context[AppState]) =
         fillBg(ctx.tb, boxX + 1, lineY, boxX + boxW - 2, lineY, ovRowBg)
       ctx.tb.setBackgroundColor(ovRowBg)
       let labelRaw = if i < ov.strResults.len and ov.strResults[i].len > 0: ov.strResults[i]
-                     else: "Track #" & $idx
+                     else: ic.track & " Track #" & $idx
       let maxW = max(1, boxW - 4)
       let label = if labelRaw.runeLen > maxW: labelRaw[0..<min(labelRaw.len, maxW - 2)] & "\u2026"
                   else: labelRaw
-      writeStr(ctx.tb, boxX + 2, lineY, label, if isSelected: theme.blue else: theme.text)
+      writeStr(ctx.tb, boxX + 2, lineY, ic.musicNote & " " & label, if isSelected: theme.blue else: theme.text)
     ctx.tb.setBackgroundColor(theme.surface0)
     if ov.results.len == 0 and ov.query.len > 0:
-      writeStr(ctx.tb, boxX + 2, curY, "No matches", theme.subtext0)
+      writeStr(ctx.tb, boxX + 2, curY, ic.search & " No matches", theme.subtext0)
     elif ov.results.len == 0:
-      writeStr(ctx.tb, boxX + 2, curY, "Type to search for tracks...", theme.subtext0)
-    writeStr(ctx.tb, boxX + 1, boxY + boxH - 1, truncateAt("Enter:Play  Esc:Cancel", boxW - 2), theme.subtext0)
+      writeStr(ctx.tb, boxX + 2, curY, ic.search & " Type to search for tracks...", theme.subtext0)
+    writeStr(ctx.tb, boxX + 1, boxY + boxH - 1, truncateAt(ic.play & " Enter:Play  Esc:Cancel", boxW - 2), theme.subtext0)
 
 proc cmdKey(state: AppState, id: string): string =
   let idx = findCommandIdx(state, id)
@@ -1416,11 +1468,11 @@ proc cmdKey(state: AppState, id: string): string =
   else: ""
 
 type LeaderMenuOverlay = ref object of nw.Node
-method render*(node: LeaderMenuOverlay, ctx: var nw.Context[AppState]) =
+method render*(node: LeaderMenuOverlay, ctx: var nw.Context[State]) =
   let w = iw.width(ctx.tb)
   let h = iw.height(ctx.tb)
   if w < 20 or h < 8: return
-  let state = ctx.data
+  let state = ctx.state
   let theme = state.theme
   let boxW = min(44, w - 8)
   let boxH = min(20, h - 4)
@@ -1474,11 +1526,11 @@ method render*(node: LeaderMenuOverlay, ctx: var nw.Context[AppState]) =
     writeStr(ctx.tb, boxX + boxW - 2 - key.runeLen, lineY, key, theme.blue)
 
 type HelpOverlay = ref object of nw.Node
-method render*(node: HelpOverlay, ctx: var nw.Context[AppState]) =
+method render*(node: HelpOverlay, ctx: var nw.Context[State]) =
   let w = iw.width(ctx.tb)
   let h = iw.height(ctx.tb)
   if w < 10 or h < 10: return
-  let theme = ctx.data.theme
+  let theme = ctx.state.theme
   let boxW = min(52, w - 4)
   let boxH = min(26, h - 4)
   let boxX = (w - boxW) div 2
@@ -1490,7 +1542,7 @@ method render*(node: HelpOverlay, ctx: var nw.Context[AppState]) =
   let col1x = boxX + 3
   let col2x = boxX + 17
   let maxDescW = boxX + boxW - col2x - 2
-  for cmd in ctx.data.commands:
+  for cmd in ctx.state.commands:
     if y >= boxY + boxH - 2: break
     if cmd.keyCodes.len == 0: continue
     let keyStr = bindingDisplay(cmd.keyCodes[0])
@@ -1509,11 +1561,11 @@ method render*(node: HelpOverlay, ctx: var nw.Context[AppState]) =
     writeStr(ctx.tb, col2x, y, "Close overlay", theme.text)
 
 type AboutOverlay = ref object of nw.Node
-method render*(node: AboutOverlay, ctx: var nw.Context[AppState]) =
+method render*(node: AboutOverlay, ctx: var nw.Context[State]) =
   let w = iw.width(ctx.tb)
   let h = iw.height(ctx.tb)
   if w < 10 or h < 10: return
-  let theme = ctx.data.theme
+  let theme = ctx.state.theme
   let boxW = min(66, w - 4)
   let boxH = min(34, h - 4)
   let boxX = (w - boxW) div 2
@@ -1591,7 +1643,7 @@ method render*(node: AboutOverlay, ctx: var nw.Context[AppState]) =
   let gtmdPath = gtmPath.parentDir() / "gtmd"
   let installPaths = gtmPath & "\n" & gtmdPath
   line("Installation path", installPaths)
-  line("Download", ctx.data.ytDownloadDir)
+  line("Download", ctx.state.ytDownloadDir)
   let storageSize = try:
     let (outp, _) = execCmdEx("du -sh " & stateDir() & " 2>/dev/null | cut -f1")
     let s = outp.strip
@@ -1601,27 +1653,27 @@ method render*(node: AboutOverlay, ctx: var nw.Context[AppState]) =
   sep()
 
   # Audio & playback
-  let audioBackendName = case ctx.data.player.backendType
+  let audioBackendName = case ctx.state.player.backendType
     of abtMixer: "ALSA (Mixer)"
     of abtFFmpeg: "ALSA (FFmpeg)"
     of abtDaemon: "ALSA (Daemon)"
     else: "none"
   line("Audio", audioBackendName)
-  let playbackState = case ctx.data.status
+  let playbackState = case ctx.state.status
     of psPlaying: "Playing"
     of psPaused: "Paused"
     of psStopped: "Stopped"
   line("State", playbackState,
-    if ctx.data.status == psPlaying: theme.green
-    elif ctx.data.status == psPaused: theme.peach
+    if ctx.state.status == psPlaying: theme.green
+    elif ctx.state.status == psPaused: theme.peach
     else: theme.subtext0)
-  if ctx.data.player of DaemonClient:
-    let dcli = DaemonClient(ctx.data.player)
-    let daemonStatus = if ctx.data.reconnecting: "Reconnecting"
-                       elif dcli.connected: "Connected"
+  if ctx.state.player.backendType == abtDaemon:
+    let svc = ctx.data.service
+    let daemonStatus = if ctx.state.reconnecting: "Reconnecting"
+                       elif svc.isConnected: "Connected"
                        else: "Disconnected"
-    let daemonColor = if ctx.data.reconnecting: theme.peach
-                      elif dcli.connected: theme.green
+    let daemonColor = if ctx.state.reconnecting: theme.peach
+                      elif svc.isConnected: theme.green
                       else: theme.red
     line("Daemon", daemonStatus, daemonColor)
 
@@ -1630,15 +1682,15 @@ method render*(node: AboutOverlay, ctx: var nw.Context[AppState]) =
     writeStr(ctx.tb, labelX, y, "Press any key to close", theme.subtext0)
 
 type VolumeCueOverlay* = ref object of nw.Node
-method render*(node: VolumeCueOverlay, ctx: var nw.Context[AppState]) =
+method render*(node: VolumeCueOverlay, ctx: var nw.Context[State]) =
   let w = iw.width(ctx.tb)
-  if w < 16 or ctx.data.volumeCueTimer <= 0: return
-  let theme = ctx.data.theme
-  let vol = ctx.data.volumeCueVolume
+  if w < 16 or ctx.state.volumeCueTimer <= 0: return
+  let theme = ctx.state.theme
+  let vol = ctx.state.volumeCueVolume
   let barWidth = 10
   let filled = (vol * barWidth + 50) div 100
   let bar = (repeat("█", filled) & repeat("░", barWidth - filled))
-  let label = if ctx.data.volumeCueVolume == 0: "MUT" else: "VOL"
+  let label = if ctx.state.volumeCueVolume == 0: "MUT" else: "VOL"
   let text = label & " " & bar
   let x = w - text.runeLen - 2
   writeStrBg(ctx.tb, x, 0, text, theme.green, theme.surface0)
@@ -1658,16 +1710,16 @@ proc notificationIcon(kind: NotificationKind): string =
   of nkError:   " \u2717 "
 
 type FeedbackCueOverlay* = ref object of nw.Node
-method render*(node: FeedbackCueOverlay, ctx: var nw.Context[AppState]) =
+method render*(node: FeedbackCueOverlay, ctx: var nw.Context[State]) =
   let w = iw.width(ctx.tb)
   let h = iw.height(ctx.tb)
-  if w < 16 or h < 4 or ctx.data.notificationTimer <= 0 or ctx.data.notificationMsg.len == 0: return
-  let theme = ctx.data.theme
-  let kind = ctx.data.notificationKind
+  if w < 16 or h < 4 or ctx.state.notificationTimer <= 0 or ctx.state.notificationMsg.len == 0: return
+  let theme = ctx.state.theme
+  let kind = ctx.state.notificationKind
   let (_, fgCol, bgCol) = notificationColors(theme, kind)
   let icon = notificationIcon(kind)
-  let title = ctx.data.notificationMsg
-  let body = ctx.data.notificationBody
+  let title = ctx.state.notificationMsg
+  let body = ctx.state.notificationBody
   let maxContentW = w div 3 * 2
   let boxW = min(maxContentW, 52)
   let innerW = max(1, boxW - 4)
@@ -1690,13 +1742,13 @@ method render*(node: FeedbackCueOverlay, ctx: var nw.Context[AppState]) =
     curY.inc
 
 type NowPlayingCueOverlay* = ref object of nw.Node
-method render*(node: NowPlayingCueOverlay, ctx: var nw.Context[AppState]) =
+method render*(node: NowPlayingCueOverlay, ctx: var nw.Context[State]) =
   let w = iw.width(ctx.tb)
   let h = iw.height(ctx.tb)
-  if w < 20 or h < 3 or ctx.data.nowPlayingCueTimer <= 0 or ctx.data.nowPlayingCueMsg.len == 0: return
-  let theme = ctx.data.theme
+  if w < 20 or h < 3 or ctx.state.nowPlayingCueTimer <= 0 or ctx.state.nowPlayingCueMsg.len == 0: return
+  let theme = ctx.state.theme
   let ic = currentIcons()
-  let text = ctx.data.nowPlayingCueMsg
+  let text = ctx.state.nowPlayingCueMsg
   let boxW = min(w div 3 * 2, 52)
   let innerW = max(1, boxW - 4)
   let lines = wordWrap(text, innerW)
@@ -1712,13 +1764,13 @@ method render*(node: NowPlayingCueOverlay, ctx: var nw.Context[AppState]) =
     curY.inc
 
 type UpNextCueOverlay* = ref object of nw.Node
-method render*(node: UpNextCueOverlay, ctx: var nw.Context[AppState]) =
+method render*(node: UpNextCueOverlay, ctx: var nw.Context[State]) =
   let w = iw.width(ctx.tb)
   let h = iw.height(ctx.tb)
-  if w < 20 or h < 3 or ctx.data.upNextTimer <= 0 or ctx.data.upNextMsg.len == 0: return
-  let theme = ctx.data.theme
+  if w < 20 or h < 3 or ctx.state.upNextTimer <= 0 or ctx.state.upNextMsg.len == 0: return
+  let theme = ctx.state.theme
   let ic = currentIcons()
-  let text = ctx.data.upNextMsg
+  let text = ctx.state.upNextMsg
   let boxW = min(w div 3 * 2, 52)
   let innerW = max(1, boxW - 4)
   let lines = wordWrap(text, innerW)
@@ -1734,19 +1786,19 @@ method render*(node: UpNextCueOverlay, ctx: var nw.Context[AppState]) =
     curY.inc
 
 type PlaylistInputOverlay* = ref object of nw.Node
-method render*(node: PlaylistInputOverlay, ctx: var nw.Context[AppState]) =
+method render*(node: PlaylistInputOverlay, ctx: var nw.Context[State]) =
   let w = iw.width(ctx.tb)
   let h = iw.height(ctx.tb)
   if w < 20 or h < 8: return
-  let theme = ctx.data.theme
+  let theme = ctx.state.theme
   let boxW = min(50, w - 8)
   let boxH = 5
   let boxX = (w - boxW) div 2
   let boxY = (h - boxH) div 2
   fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.surface0)
   drawRoundedRect(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.mauve)
-  writeStr(ctx.tb, boxX + 1, boxY, ctx.data.playlistInputPrompt, theme.mauve)
-  writeStrBg(ctx.tb, boxX + 1, boxY + 2, truncateAt("> " & ctx.data.playlistInputBuffer, boxW - 2), theme.text, theme.surface1)
+  writeStr(ctx.tb, boxX + 1, boxY, ctx.state.playlistInputPrompt, theme.mauve)
+  writeStrBg(ctx.tb, boxX + 1, boxY + 2, truncateAt("> " & ctx.state.playlistInputBuffer, boxW - 2), theme.text, theme.surface1)
   let footerText = truncateAt("Enter: confirm  Esc: cancel", boxW - 2)
   if footerText.len > 0:
     writeStr(ctx.tb, boxX + 1, boxY + 4, footerText, theme.subtext0)
@@ -1759,11 +1811,11 @@ proc eqBarColor(gain: float, theme: Theme): colors.Color =
   else: theme.sapphire
 
 type EqualizerOverlay* = ref object of nw.Node
-method render*(node: EqualizerOverlay, ctx: var nw.Context[AppState]) =
+method render*(node: EqualizerOverlay, ctx: var nw.Context[State]) =
   let w = iw.width(ctx.tb)
   let h = iw.height(ctx.tb)
   if w < 20 or h < 12: return
-  let st = ctx.data
+  let st = ctx.state
   let theme = st.theme
   let boxW = min(80, w - 4)
   let boxH = min(26, h - 4)
@@ -1783,7 +1835,7 @@ method render*(node: EqualizerOverlay, ctx: var nw.Context[AppState]) =
 
   # clamp scroll offset
   var scrollOff = st.eqScrollOffset.clamp(0, max(0, totalBands - maxVisibleBands))
-  ctx.data.eqScrollOffset = scrollOff
+  ctx.state.eqScrollOffset = scrollOff
 
   let sliderStartY = boxY + 3
   let sliderH = max(3, boxH - 8)
@@ -1846,11 +1898,11 @@ method render*(node: EqualizerOverlay, ctx: var nw.Context[AppState]) =
     writeStr(ctx.tb, boxX + 2, boxY + boxH - 2, eqFooter, theme.subtext0)
 
 type FooterModulePickerOverlay* = ref object of nw.Node
-method render*(node: FooterModulePickerOverlay, ctx: var nw.Context[AppState]) =
+method render*(node: FooterModulePickerOverlay, ctx: var nw.Context[State]) =
   let w = iw.width(ctx.tb)
   let h = iw.height(ctx.tb)
   if w < 30 or h < 8: return
-  let st = ctx.data
+  let st = ctx.state
   let theme = st.theme
   let allModules = [fmPlayStatus, fmVolume, fmBackend, fmDeviceName, fmSelectCount, fmTime, fmDate, fmRepeatShuffle, fmSleepTimer, fmKeyPressed, fmQueueCount, fmEqPreset, fmCurrentPlaylist]
   let boxW = min(50, w - 4)
@@ -1901,24 +1953,24 @@ method render*(node: FooterModulePickerOverlay, ctx: var nw.Context[AppState]) =
   if ftr.len > 0:
     writeStr(ctx.tb, boxX + 2, boxY + boxH - 2, ftr, theme.subtext0)
 
-proc renderApp*(ctx: var nw.Context[AppState]) =
+proc renderApp*(ctx: var nw.Context[State]) =
   let w = iw.width(ctx.tb)
   let h = iw.height(ctx.tb)
   if w < minGridW or h < minGridH: return
-  let theme = ctx.data.theme
-  var sliceCtx: Context[AppState]
+  let theme = ctx.state.theme
+  var sliceCtx: Context[State]
   fillBg(ctx.tb, 0, 0, w - 1, h - 1, theme.base)
   var y = 0
   sliceCtx = nw.slice(ctx, 0, y, w, 1); render(TabBar(), sliceCtx)
   y += 3
   let mainH = h - y - statusBarHeight
   if mainH > 0:
-    case ctx.data.tab
+    case ctx.state.tab
     of tabNowPlaying:
       sliceCtx = nw.slice(ctx, 0, y, w, mainH); render(NowPlayingView(), sliceCtx)
     of tabLibrary:
       if w < 55:
-        if ctx.data.libraryFocusPanel == lpSidebar:
+        if ctx.state.libraryFocusPanel == lpSidebar:
           sliceCtx = nw.slice(ctx, 0, y, w, mainH); render(LibrarySidebar(), sliceCtx)
         else:
           sliceCtx = nw.slice(ctx, 0, y, w, mainH); render(LibraryContentView(), sliceCtx)
@@ -1931,33 +1983,33 @@ proc renderApp*(ctx: var nw.Context[AppState]) =
       sliceCtx = nw.slice(ctx, 0, y, w, mainH); render(SettingsView(), sliceCtx)
   let statY = h - statusBarHeight
   sliceCtx = nw.slice(ctx, 0, statY, w, 1); render(StatusBarComp(), sliceCtx)
-  if ctx.data.helpVisible:
+  if ctx.state.helpVisible:
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(HelpOverlay(), sliceCtx)
-  if ctx.data.aboutVisible:
+  if ctx.state.aboutVisible:
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(AboutOverlay(), sliceCtx)
-  if ctx.data.eqVisible:
+  if ctx.state.eqVisible:
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(EqualizerOverlay(), sliceCtx)
-  if ctx.data.mode == imLeaderMode:
+  if ctx.state.mode == imLeaderMode:
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(LeaderMenuOverlay(), sliceCtx)
-  if ctx.data.playlistInputActive:
+  if ctx.state.playlistInputActive:
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(PlaylistInputOverlay(), sliceCtx)
-  if ctx.data.overlay.kind == okFooterModulePicker:
+  if ctx.state.overlay.kind == okFooterModulePicker:
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(FooterModulePickerOverlay(), sliceCtx)
-  if ctx.data.overlay.kind != okNone:
+  if ctx.state.overlay.kind != okNone:
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(GenericOverlay(), sliceCtx)
-  if ctx.data.volumeCueTimer > 0:
+  if ctx.state.volumeCueTimer > 0:
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(VolumeCueOverlay(), sliceCtx)
-  if ctx.data.notificationTimer > 0 and ctx.data.notificationMsg.len > 0:
+  if ctx.state.notificationTimer > 0 and ctx.state.notificationMsg.len > 0:
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(FeedbackCueOverlay(), sliceCtx)
-  if ctx.data.nowPlayingCueTimer > 0 and ctx.data.nowPlayingCueMsg.len > 0:
+  if ctx.state.nowPlayingCueTimer > 0 and ctx.state.nowPlayingCueMsg.len > 0:
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(NowPlayingCueOverlay(), sliceCtx)
-  if ctx.data.upNextTimer > 0 and ctx.data.upNextMsg.len > 0:
+  if ctx.state.upNextTimer > 0 and ctx.state.upNextMsg.len > 0:
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(UpNextCueOverlay(), sliceCtx)
 
 proc initApp*(state: var AppState) =
   state.theme = getTheme("mocha")
   state.status = psStopped
-  state.volume = 80
+  state.volume = DefaultVolume
   state.timePos = 0.0
   state.duration = 0.0
   state.dirtyFlags = {}
@@ -1990,8 +2042,8 @@ proc initApp*(state: var AppState) =
   state.daemonPid = 0
   state.audioAvailable = false
   state.volumeCueTimer = 0
-  state.volumeCueVolume = 80
-  state.prevVolume = 80
+  state.volumeCueVolume = DefaultVolume
+  state.prevVolume = DefaultVolume
   state.shuffleEnabled = false
   state.shuffleOrder = @[]
   state.shuffleIndex = 0
@@ -2014,7 +2066,7 @@ proc initApp*(state: var AppState) =
   state.downloadProgress = initTable[string, int]()
   state.ytMaxConcurrentDownloads = 4
   state.ytBatchDownloadMode = false
-  state.ytJsRuntime = "node"
+  state.ytJsRuntime = JsRuntimes[0]
   state.ytDownloadDir = dataDir() & "/audio"
   # Count existing downloaded files
   state.downloadCount = 0
@@ -2028,7 +2080,7 @@ proc initApp*(state: var AppState) =
   except: discard
   state.footerModules = {fmPlayStatus, fmVolume, fmBackend, fmDeviceName, fmSelectCount, fmTime, fmDate, fmRepeatShuffle, fmSleepTimer}
   state.rawKeybindingsJson = nil
-  state.ytJsRuntime = "node"
+  state.ytJsRuntime = JsRuntimes[0]
   state.ytSearchHistory = @[]
   state.ytSearchHistoryLower = @[]
   state.ytSearchCache = newTable[string, seq[YtSearchResult]]()

@@ -30,13 +30,17 @@
 ## │  Every poll: write queued events → each client   │
 ## └──────────────────────────────────────────────────┘
 
-import os, json, strutils, net, posix, random, osproc, times, base64
+import os, json, strutils, net, posix, random, osproc, times, base64, locks
 from nativesockets import setBlocking, selectRead, SocketHandle
+from std/typedthreads import Thread, createThread, joinThread
 when not defined(macosx):
   proc prctl(option: cint, arg2: cstring): cint {.importc, header: "<sys/prctl.h>".}
 else:
   proc pthread_setname_np(name: cstring): cint {.importc, header: "<pthread.h>".}
-import audio, state, library, ytdlp, lyrics
+import audio, state, library, ytdlp, lyrics, spotify
+
+var notifyChan: Channel[tuple[title, body: string]]
+var notifyThread: Thread[void]
 
 proc parseFilenameForMetadata(path: string): tuple[title, artist: string] =
   let (_, stem, _) = path.splitFile()
@@ -53,6 +57,18 @@ proc parseFilenameForMetadata(path: string): tuple[title, artist: string] =
       result.title = stem[dashPos+3..^1].strip()
 
 type
+  PulseActionKind* = enum
+    pakNone, pakPlay, pakPause, pakStop, pakTogglePause, pakSeek,
+    pakPrev, pakLoadFile, pakSetVolume, pakPrepareNext,
+    pakStartCrossfade, pakSetEqBand, pakSetEqPreset, pakSetSpatialWidth,
+    pakSetCrossfadeCurve, pakShutdown
+
+  PulseAction* = object
+    kind*: PulseActionKind
+    strVal*, strVal2*, strVal3*: string
+    floatVal*: float
+    intVal*, intVal2*: int
+
   DaemonCmdKind* = enum
     dckPlay, dckPause, dckStop, dckSeek, dckNext, dckPrev,
     dckSetVolume, dckGetVolume, dckLoadFile, dckTogglePause,
@@ -71,7 +87,7 @@ type
     dckYtDownload, dckYtDownloadPoll, dckYtCancelDownload,
     dckYtListDownloads, dckYtFetchPlaylist, dckYtFetchPlaylistPoll,
     dckYtSetConfig, dckYtGetSearchHistory, dckYtClearSearchHistory,
-    dckSpSetConfig, dckSpListDownloads,
+    dckSpSetConfig, dckSpListDownloads, dckSpOAuthUrl, dckSpOAuthCallback, dckSpFeed, dckSpDisconnect,
     dckListEqPresets,
     dckSetCrossfadeDuration,
     dckSetCrossfadeCurve,
@@ -98,11 +114,22 @@ type
     buf*: string
 
   Daemon* = ref object
-    player: AudioBackend
+    # Thread 2 (IPCHandler) exclusive — no locking needed
     lib: LibraryDb
     running: bool
     server: Socket
     clients*: seq[ClientState]
+    persistFrames: int
+    trashPurgeFrames: int
+
+    # Thread 1 (PlaybackPulse) exclusive — no locking needed, only T1 touches AudioBackend
+    player: AudioBackend
+
+    # --- Shared state (lock-protected, both T1 and T2) ---
+    lock: Lock
+    pendingActions: seq[PulseAction]
+    events: seq[string]              # serialized JSON events for T2 to broadcast
+
     currentTrackPath: string
     currentTrackTitle: string
     currentTrackChannel: string
@@ -113,8 +140,6 @@ type
     repeatMode*: int
     sleepTimerRemaining*: int
     sleepTimerFrames*: int
-    persistFrames: int
-    trashPurgeFrames: int
     playbackQueue*: seq[string]
     shuffleOrder*: seq[int]
     shuffleIndex*: int
@@ -128,6 +153,21 @@ type
     lastConsumedFromQueue: seq[string]
     upNextSent: bool
     spatialWidth*: float
+    lastTrackDuration: float
+    stateVersion*: int
+
+    # Snapshot fields — T1 copies from AudioBackend every tick (under lock)
+    # T2 reads for status queries and MPRIS (under lock, ≤16ms stale)
+    playerState*: int
+    playerVolume*: int
+    playerTimePos*: float
+    playerDuration*: float
+    playerCrossfading*: bool
+    playerMasterEnded*: bool
+    playerAudioWorking*: bool
+    playerTitle*: string
+    playerArtist*: string
+    playerAlbum*: string
     # Background scan state
     scanningDir: string
     scanningFiles: seq[string]
@@ -142,6 +182,7 @@ type
     spCookieSource: string
     spCookieFilePath: string
     spAudioFormat: string
+    spClient: SpotifyClient
     ytSearchProcess: Process
     ytSearchBuf: string
     ytSearchActive: bool
@@ -161,6 +202,7 @@ type
     ytStreamResolveUrl: string
     ytStreamResolving: bool
     ytDownloadTasks: seq[DownloadTask]
+    ytActiveDownloads: int
     ytLastCompletedPath: string
     ytLastCompletedUrl: string
     ytPlaylistProcess: Process
@@ -168,8 +210,6 @@ type
     ytPlaylistActive: bool
     ytPlaylistResult: YtPlaylistDetail
     ytPlaylistUrl: string
-    lastTrackDuration: float
-    stateVersion*: int
 
 proc flock(fd: cint, op: cint): cint {.importc, header: "<sys/file.h>".}
 const LOCK_EX = 2
@@ -334,6 +374,14 @@ proc parseDaemonCommand(line: string): DaemonCmd =
       result.strArg3 = j{"audio_format"}.getStr("")
     of "sp_list_downloads":
       result.kind = dckSpListDownloads
+    of "sp_oauth_url":
+      result.kind = dckSpOAuthUrl
+    of "sp_oauth_callback":
+      result.kind = dckSpOAuthCallback; result.strArg = j{"code"}.getStr("")
+    of "sp_feed":
+      result.kind = dckSpFeed
+    of "sp_disconnect":
+      result.kind = dckSpDisconnect
     of "list_eq_presets":
       result.kind = dckListEqPresets
     of "ping":
@@ -371,7 +419,11 @@ proc serializeEvents(events: seq[AudioEvent]; d: Daemon = nil): JsonNode =
   for ev in events:
     var obj = %*{"kind": %ev.kind.int}
     case ev.kind
-    of evPositionChanged: obj["time_pos"] = %ev.floatVal
+    of evPositionChanged:
+      var pos = ev.floatVal
+      if d != nil and d.playerCrossfading and d.playerMasterEnded and d.playerDuration > 0:
+        pos = max(0.0, pos - d.playerDuration)
+      obj["time_pos"] = %pos
     of evDurationChanged: obj["duration"] = %ev.floatVal
     of evVolumeChanged: obj["volume"] = %ev.intVal
     of evPlaybackStarted:
@@ -402,6 +454,9 @@ proc broadcastAll(d: Daemon, data: string) =
       try: c.sock.close() except: discard
   d.clients = alive
 
+proc broadcastJson(d: Daemon, ev: JsonNode) =
+  d.broadcastAll($ev & "\n")
+
 proc sendQueueEvent(d: Daemon) =
   if d.clients.len == 0: return
   var qArr = newJArray()
@@ -410,33 +465,49 @@ proc sendQueueEvent(d: Daemon) =
   for i in d.shuffleOrder: soArr.add(%i)
   let ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "queue_changed",
     "queue": qArr, "shuffleOrder": soArr, "shuffleIndex": %d.shuffleIndex}]}
-  d.broadcastAll($ev & "\n")
+  d.broadcastJson(ev)
 
 proc pushFullState(d: Daemon) =
   if d.clients.len == 0: return
   d.stateVersion.inc
   var ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "full_state_sync",
-    "state": $(d.player.state),
+    "state": $(d.playerState),
     "track_path": d.currentTrackPath,
     "track_title": d.currentTrackTitle,
     "track_channel": d.currentTrackChannel,
-    "time_pos": %d.player.timePos,
-    "duration": %d.player.duration,
-    "volume": %d.player.volume,
+    "time_pos": %d.playerTimePos,
+    "duration": %d.playerDuration,
+    "volume": %d.playerVolume,
     "shuffle": %d.shuffleEnabled,
     "repeat": %d.repeatMode,
     "sleep_timer": %d.sleepTimerRemaining,
     "version": %d.stateVersion}]}
-  d.broadcastAll($ev & "\n")
+  d.broadcastJson(ev)
+
+proc buildFullStateEvent(d: Daemon): string =
+  d.stateVersion.inc
+  var ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "full_state_sync",
+    "state": $(d.playerState),
+    "track_path": d.currentTrackPath,
+    "track_title": d.currentTrackTitle,
+    "track_channel": d.currentTrackChannel,
+    "time_pos": %d.playerTimePos,
+    "duration": %d.playerDuration,
+    "volume": %d.playerVolume,
+    "shuffle": %d.shuffleEnabled,
+    "repeat": %d.repeatMode,
+    "sleep_timer": %d.sleepTimerRemaining,
+    "version": %d.stateVersion}]}
+  result = $ev & "\n"
 
 proc savePlaybackState(d: Daemon) =
   if d.lib != nil and d.player != nil:
-    d.lib.setPlaybackState("volume", $d.player.volume)
-    d.lib.setPlaybackState("time_pos", $d.player.timePos)
+    d.lib.setPlaybackState("volume", $d.playerVolume)
+    d.lib.setPlaybackState("time_pos", $d.playerTimePos)
     d.lib.setPlaybackState("track_path", d.currentTrackPath)
     d.lib.setPlaybackState("track_title", d.currentTrackTitle)
     d.lib.setPlaybackState("track_channel", d.currentTrackChannel)
-    d.lib.setPlaybackState("state", $(d.player.state))
+    d.lib.setPlaybackState("state", $(d.playerState))
     d.lib.setPlaybackState("shuffle", $(d.shuffleEnabled))
     d.lib.setPlaybackState("repeat", $(d.repeatMode))
     d.lib.setPlaybackState("sleep_timer", $(d.sleepTimerRemaining))
@@ -519,6 +590,32 @@ proc resolveTrackMetadata(d: Daemon, path: string): tuple[title, channel: string
     let track = d.lib.getTrackByPath(path)
     if track.id > 0: return (track.title, track.artist)
 
+proc loadAndPlayTrack(d: Daemon, path: string, title = "", channel = ""): bool =
+  d.player.stop()
+  if not d.player.loadFile(path):
+    return false
+  d.currentTrackPath = path
+  if title.len > 0:
+    d.currentTrackTitle = title
+    d.currentTrackChannel = channel
+  else:
+    let meta = resolveTrackMetadata(d, path)
+    d.currentTrackTitle = meta.title
+    d.currentTrackChannel = meta.channel
+  d.player.play()
+  return true
+
+proc startCrossfadeTransition(d: Daemon, path, title, channel: string, reverse: bool = false) =
+  d.player.prepareNext(path)
+  d.player.startCrossfade(float(d.crossfadeDuration), reverse = reverse)
+  d.currentTrackPath = path
+  d.currentTrackTitle = title
+  d.currentTrackChannel = channel
+  d.crossfadePrepared = false
+  d.crossfadeStarted = true
+  d.crossfadeNextPath = path
+  d.crossfadeConsumed = not reverse
+
 proc advanceToNextTrack(d: Daemon, forward: bool = true): bool =
   d.autoAdvancing = true
   d.upNextSent = false
@@ -583,27 +680,12 @@ proc advanceToNextTrack(d: Daemon, forward: bool = true): bool =
     let consumed = d.nextTrackFromQueue()
     if consumed.len == 0: return false
     d.pushTrackHistory(loadPath)
+    let meta = resolveTrackMetadata(d, loadPath)
     if d.crossfadeDuration > 0 and d.player.state == 1:
-      # Crossfade transition
-      d.crossfadeConsumed = true
-      d.player.prepareNext(loadPath)
-      d.player.startCrossfade(float(d.crossfadeDuration))
-      d.currentTrackPath = loadPath
-      let meta = resolveTrackMetadata(d, loadPath)
-      d.currentTrackTitle = meta.title
-      d.currentTrackChannel = meta.channel
-      d.crossfadePrepared = false
-      d.crossfadeStarted = true
-      d.crossfadeNextPath = loadPath
+      d.startCrossfadeTransition(loadPath, meta.title, meta.channel)
     else:
-      d.player.stop()
-      if not d.player.loadFile(loadPath):
+      if not d.loadAndPlayTrack(loadPath):
         return false
-      d.currentTrackPath = loadPath
-      let meta = resolveTrackMetadata(d, loadPath)
-      d.currentTrackTitle = meta.title
-      d.currentTrackChannel = meta.channel
-      d.player.play()
     d.idleFrames = 0
     d.lastTrackDuration = 0.0
     if d.lib != nil:
@@ -614,47 +696,26 @@ proc advanceToNextTrack(d: Daemon, forward: bool = true): bool =
 
 include mpris, notifications
 
-proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
+proc execPlaybackControl(d: Daemon, cmd: DaemonCmd): JsonNode =
   result = %*{"ok": true}
-  if d.player == nil:
-    result["ok"] = %false
-    result["error"] = %"no audio backend"
-    return
   case cmd.kind
   of dckLoadFile:
     if cmd.strArg.len > 0:
       d.upNextSent = false
       d.autoAdvancing = false
-      # Push current track to history before switching
       if d.currentTrackPath.len > 0 and d.currentTrackPath != cmd.strArg:
         d.trackHistory.add(d.currentTrackPath)
         if d.trackHistory.len > 50:
           d.trackHistory.delete(0)
-      # Crossfade transition if a track is currently playing
       if d.crossfadeDuration > 0 and d.player.state == 1:
-        d.crossfadeConsumed = true
-        d.player.prepareNext(cmd.strArg)
-        d.player.startCrossfade(float(d.crossfadeDuration))
-        d.currentTrackPath = cmd.strArg
-        d.currentTrackTitle = cmd.strArg2
-        d.currentTrackChannel = cmd.strArg3
-        d.crossfadePrepared = false
-        d.crossfadeStarted = true
-        d.crossfadeNextPath = cmd.strArg
+        d.startCrossfadeTransition(cmd.strArg, cmd.strArg2, cmd.strArg3)
       else:
-        d.player.stop()
-        if not d.player.loadFile(cmd.strArg):
+        if not d.loadAndPlayTrack(cmd.strArg, cmd.strArg2, cmd.strArg3):
           result["ok"] = %false
           result["error"] = %"failed to load file"
           return
-        d.currentTrackPath = cmd.strArg
-        d.currentTrackTitle = cmd.strArg2
-        d.currentTrackChannel = cmd.strArg3
-        d.player.play()
       d.idleFrames = 0
-      # Poll events once so state reflects actual playback status
       discard d.player.pollEvents()
-      # Track play count for library tracks, or add YouTube streams to library
       var trackId = d.lib.findTrackByPath(d.currentTrackPath)
       if trackId == 0 and d.currentTrackTitle.len > 0:
         trackId = d.lib.addTrack(d.currentTrackPath, d.currentTrackTitle, d.currentTrackChannel, "YouTube", 0.0, 0, 0, "")
@@ -671,7 +732,6 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
       when defined(useMpris):
         emitMprisPlayerChanged(d)
   of dckPlay:
-    # Skip if already playing (e.g. crossfade already started by dckLoadFile)
     if d.player.state != 1:
       d.player.play()
     d.idleFrames = 0
@@ -731,37 +791,20 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
   of dckPrev:
     d.autoAdvancing = false
     var prevPath = ""
-    # Try last-consumed-from-queue first for queue-aware prev
     if d.lastConsumedFromQueue.len > 1:
-      # last entry is the current track just consumed; entry before it is the one we want
       let idx = d.lastConsumedFromQueue.len - 2
       if idx >= 0:
         prevPath = d.lastConsumedFromQueue[idx]
-        # Remove both last entries (current and previous) so replaying doesn't loop
         d.lastConsumedFromQueue.setLen(idx + 1)
     if prevPath.len == 0 and d.trackHistory.len > 0:
       prevPath = d.trackHistory.pop()
     if prevPath.len > 0:
       d.pushTrackHistory(prevPath)
       if d.crossfadeDuration > 0 and d.player.state == 1:
-        d.player.prepareNext(prevPath)
-        d.player.startCrossfade(float(d.crossfadeDuration), reverse = true)
-        d.currentTrackPath = prevPath
         let meta = resolveTrackMetadata(d, prevPath)
-        d.currentTrackTitle = meta.title
-        d.currentTrackChannel = meta.channel
-        d.crossfadePrepared = false
-        d.crossfadeStarted = true
-        d.crossfadeNextPath = prevPath
-        d.crossfadeConsumed = false
+        d.startCrossfadeTransition(prevPath, meta.title, meta.channel, reverse = true)
       else:
-        d.player.stop()
-        discard d.player.loadFile(prevPath)
-        d.currentTrackPath = prevPath
-        let meta = resolveTrackMetadata(d, prevPath)
-        d.currentTrackTitle = meta.title
-        d.currentTrackChannel = meta.channel
-        d.player.play()
+        discard d.loadAndPlayTrack(prevPath)
       d.idleFrames = 0
       d.pushFullState()
       when defined(useMpris):
@@ -773,12 +816,22 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
           result["track_id"] = %trackId
     else:
       result = %*{"ok": false, "error": "no previous track"}
+  else: discard
+
+proc execVolume(d: Daemon, cmd: DaemonCmd): JsonNode =
+  result = %*{"ok": true}
+  case cmd.kind
   of dckSetVolume:
     d.player.setVolume(cmd.intArg)
     when defined(useMpris):
       emitMprisPlayerChanged(d)
   of dckGetVolume:
     result["volume"] = %d.player.volume
+  else: discard
+
+proc execSystem(d: Daemon, cmd: DaemonCmd): JsonNode =
+  result = %*{"ok": true}
+  case cmd.kind
   of dckQuit:
     when defined(useMpris):
       shutdownMpris()
@@ -787,6 +840,13 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
       d.lib.closeDb()
     d.player.shutdown()
     d.running = false
+  of dckPing:
+    result["pong"] = %true
+  else: discard
+
+proc execStatus(d: Daemon, cmd: DaemonCmd): JsonNode =
+  result = %*{"ok": true}
+  case cmd.kind
   of dckStatus, dckNowPlaying:
     let st = case d.player.state
       of 0: "stopped"
@@ -803,162 +863,6 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     let flags = d.player.getStatusFlags()
     result["crossfading"] = %flags.crossfading
     result["master_ended"] = %flags.masterEnded
-  of dckPrepareNext:
-    d.player.prepareNext(cmd.strArg)
-  of dckCrossfade:
-    d.player.startCrossfade(cmd.floatArg)
-  of dckSetEqBand:
-    d.player.setEqBand(cmd.intArg, cmd.floatArg)
-  of dckSetEqPreset:
-    d.player.setEqPreset(cmd.strArg)
-  of dckSetSpatialWidth:
-    d.spatialWidth = cmd.floatArg
-    d.player.setSpatialWidth(cmd.floatArg)
-    if d.lib != nil: d.lib.setPlaybackState("spatial_width", $(cmd.floatArg))
-  of dckSetCrossfadeDuration:
-    d.crossfadeDuration = cmd.intArg
-    d.lib.setPlaybackState("crossfade_duration", $(d.crossfadeDuration))
-  of dckSetCrossfadeCurve:
-    d.crossfadeCurve = cmd.intArg
-    d.player.setCrossfadeCurve(cmd.intArg)
-  of dckGetLibrary:
-    if d.lib != nil:
-      let dbTracks = d.lib.loadTracks()
-      var arr = newJArray()
-      for t in dbTracks:
-        arr.add(%*{
-          "id": %t.id, "path": %t.path, "title": %t.title,
-          "artist": %t.artist, "album": %t.album, "duration": %t.duration,
-          "track_num": %t.trackNum, "year": %t.year, "genre": %t.genre,
-          "play_count": %t.playCount, "artist_id": %t.artistId,
-          "album_id": %t.albumId, "is_favourite": %t.isFavourite,
-          "added_at": %t.addedAt, "last_played": %t.lastPlayed
-        })
-      result["tracks"] = arr
-      let dbArtists = d.lib.loadArtists()
-      var artArr = newJArray()
-      for a in dbArtists:
-        artArr.add(%*{"id": %a.id, "name": %a.name})
-      result["artists"] = artArr
-      let dbAlbums = d.lib.loadAlbums()
-      var albArr = newJArray()
-      for a in dbAlbums:
-        albArr.add(%*{"id": %a.id, "title": %a.title, "artist_id": %a.artistId, "artist_name": %a.artistName, "year": %a.year, "genre": %a.genre})
-      result["albums"] = albArr
-  of dckAddTrack:
-    if d.lib != nil and cmd.strArg.len > 0:
-      try:
-        let data = parseJson(cmd.strArg)
-        let path = data{"path"}.getStr("")
-        let title = data{"title"}.getStr("")
-        let artist = data{"channel"}.getStr("")
-        let album = data{"album"}.getStr("YouTube")
-        let duration = data{"duration"}.getFloat(0.0)
-        if path.len > 0:
-          let trackId = d.lib.addTrack(path, title, artist, album, duration, 0, 0, "")
-          result["track_id"] = %trackId
-      except: stderr.writeLine("[gtm] addTrack error: " & getCurrentExceptionMsg())
-  of dckUpdateTrackPath:
-    if d.lib != nil and cmd.strArg.len > 0:
-      try:
-        let data = parseJson(cmd.strArg)
-        let oldPath = data{"old_path"}.getStr("")
-        let newPath = data{"new_path"}.getStr("")
-        let newTitle = data{"title"}.getStr("")
-        if oldPath.len > 0 and newPath.len > 0:
-          d.lib.updateTrackPath(oldPath, newPath, newTitle)
-          result["updated"] = %true
-      except: stderr.writeLine("[gtm] updateTrackPath error: " & getCurrentExceptionMsg())
-  of dckCreatePlaylist:
-    if d.lib != nil and cmd.strArg.len > 0:
-      let id = d.lib.createPlaylist(cmd.strArg)
-      result["playlist_id"] = %id
-      let pls = d.lib.loadPlaylists()
-      var arr = newJArray()
-      for pl in pls:
-        arr.add(%*{"id": pl.id, "name": pl.name, "track_count": pl.trackIds.len})
-      result["playlists"] = arr
-  of dckDeletePlaylist:
-    if d.lib != nil and cmd.intArg > 0:
-      d.lib.deletePlaylist(int64(cmd.intArg))
-      let pls = d.lib.loadPlaylists()
-      var arr = newJArray()
-      for pl in pls:
-        arr.add(%*{"id": pl.id, "name": pl.name, "track_count": pl.trackIds.len})
-      result["playlists"] = arr
-  of dckRenamePlaylist:
-    if d.lib != nil and cmd.intArg > 0 and cmd.strArg.len > 0:
-      d.lib.renamePlaylist(int64(cmd.intArg), cmd.strArg)
-      let pls = d.lib.loadPlaylists()
-      var arr = newJArray()
-      for pl in pls:
-        arr.add(%*{"id": pl.id, "name": pl.name, "track_count": pl.trackIds.len})
-      result["playlists"] = arr
-  of dckAddToPlaylist, dckRemoveFromPlaylist:
-    if d.lib != nil and cmd.strArg.len > 0:
-      try:
-        let data = parseJson(cmd.strArg)
-        let plId = int64(data{"playlist_id"}.getInt(0))
-        let trackId = int64(data{"track_id"}.getInt(0))
-        if plId > 0 and trackId > 0:
-          if cmd.kind == dckAddToPlaylist:
-            let pos = data{"position"}.getInt(0)
-            d.lib.addTrackToPlaylist(plId, trackId, pos)
-          else:
-            d.lib.removeTrackFromPlaylist(plId, trackId)
-      except: stderr.writeLine("[gtm] addToPlaylist error: " & getCurrentExceptionMsg())
-  of dckListPlaylists:
-    if d.lib != nil:
-      let pls = d.lib.loadPlaylists()
-      var arr = newJArray()
-      for pl in pls:
-        arr.add(%*{"id": pl.id, "name": pl.name, "track_count": pl.trackIds.len})
-      result["playlists"] = arr
-  of dckGetPlaylistTracks:
-    if d.lib != nil and cmd.intArg > 0:
-      let pls = d.lib.loadPlaylists()
-      for pl in pls:
-        if pl.id == int64(cmd.intArg):
-          var arr = newJArray()
-          for tid in pl.trackIds:
-            arr.add(%tid)
-          result["track_ids"] = arr
-          break
-      result["playlist_id"] = %cmd.intArg
-  of dckScan:
-    if cmd.strArg.len > 0 and dirExists(cmd.strArg):
-      if d.scanningDir.len > 0:
-        result["scanning_already"] = %true
-      else:
-        d.scanningDir = cmd.strArg
-        d.scanningFiles = scanDirectoryRecursive(cmd.strArg)
-        d.scanningIdx = 0
-        result["scanning"] = %true
-        result["total_files"] = %d.scanningFiles.len
-  of dckSetShuffle:
-    d.shuffleEnabled = cmd.intArg != 0
-    if d.shuffleEnabled and d.playbackQueue.len > 0:
-      d.shuffleOrder = shuffleOrder(d.playbackQueue.len)
-      d.shuffleIndex = 0
-    result["shuffle"] = %d.shuffleEnabled
-    if d.lib != nil:
-      d.lib.setPlaybackState("shuffle", $(d.shuffleEnabled))
-    let ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "shuffle_changed", "shuffle": %d.shuffleEnabled}]}
-    d.broadcastAll($ev & "\n")
-    when defined(useMpris):
-      emitMprisPlayerChanged(d)
-  of dckSetRepeat:
-    d.repeatMode = cmd.intArg
-    result["repeat"] = %d.repeatMode
-    if d.lib != nil:
-      d.lib.setPlaybackState("repeat", $(d.repeatMode))
-    let ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "repeat_changed", "repeat": %d.repeatMode}]}
-    d.broadcastAll($ev & "\n")
-    when defined(useMpris):
-      emitMprisPlayerChanged(d)
-  of dckSetSleepTimer:
-    d.sleepTimerRemaining = cmd.intArg
-    result["sleep_timer"] = %d.sleepTimerRemaining
   of dckGetState:
     result["shuffle"] = %d.shuffleEnabled
     result["repeat"] = %d.repeatMode
@@ -1004,111 +908,6 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
       result["duration"] = %d.player.duration
     else:
       result["state"] = %"stopped"
-  of dckQueueAdd:
-    if cmd.strArg.len > 0:
-      try:
-        let items = parseJson(cmd.strArg)
-        for item in items:
-          var path = ""
-          var title = ""
-          var channel = ""
-          if item.kind == JString:
-            path = item.getStr("")
-          elif item.kind == JObject:
-            path = item{"path"}.getStr("")
-            title = item{"title"}.getStr("")
-            channel = item{"channel"}.getStr("")
-          if path.len > 0:
-            d.playbackQueue.add(path)
-            if isYtWatchUrl(path):
-              let existingPath = if d.lib != nil: d.lib.getDownloadByUrl(path) else: ""
-              if existingPath.len == 0:
-                var alreadyDL = false
-                for task in d.ytDownloadTasks:
-                  if task.url == path:
-                    alreadyDL = true
-                    break
-                if not alreadyDL:
-                  var task: DownloadTask
-                  let (cSrc, cPath) = cookiesForUrl(d, path)
-                  if startDownload(YtSearchResult(url: path, title: title, channel: channel), d.ytDownloadDir, task.process, cSrc, d.ytJsRuntime, cPath):
-                    task.title = title
-                    task.url = path
-                    task.channel = channel
-                    task.outputDir = d.ytDownloadDir
-                    task.completed = false
-                    task.startedAt = epochTime()
-                    d.ytDownloadTasks.add(task)
-              # Also start resolving stream URL for instant playback
-              if d.ytStreamResolvedFor != path and not d.ytStreamResolving:
-                d.ytStreamResolveBuf = ""
-                d.ytStreamResolveUrl = path
-                let (cSrc, cPath) = cookiesForUrl(d, path)
-                discard startStreamUrlFetch(path, d.ytStreamResolveProcess, cSrc, d.ytJsRuntime, cPath)
-                d.ytStreamResolving = true
-        result["queue_length"] = %d.playbackQueue.len
-        d.regenShuffleIfNeeded()
-        d.sendQueueEvent()
-        if d.player != nil and d.player.state == 0 and d.playbackQueue.len > 0:
-          if d.advanceToNextTrack(true):
-            d.sendQueueEvent()
-            d.pushFullState()
-      except: stderr.writeLine("[gtm] queueAdd error: " & getCurrentExceptionMsg())
-  of dckQueueRemove:
-    if cmd.intArg >= 0 and cmd.intArg < d.playbackQueue.len:
-      d.playbackQueue.delete(cmd.intArg)
-    d.regenShuffleIfNeeded()
-    d.sendQueueEvent()
-  of dckQueueRemovePath:
-    if cmd.strArg.len > 0:
-      let idx = d.playbackQueue.find(cmd.strArg)
-      if idx >= 0:
-        d.playbackQueue.delete(idx)
-    d.regenShuffleIfNeeded()
-    d.sendQueueEvent()
-  of dckQueueClear:
-    d.playbackQueue = @[]
-    d.shuffleOrder = @[]
-    d.shuffleIndex = 0
-    d.crossfadePrepared = false
-    d.crossfadeStarted = false
-    d.crossfadeNextPath = ""
-    d.crossfadeConsumed = false
-    d.sendQueueEvent()
-  of dckQueueValidate:
-    var removed = 0
-    var i = 0
-    while i < d.playbackQueue.len:
-      let p = d.playbackQueue[i]
-      if p.len > 0 and not isYtWatchUrl(p) and not fileExists(p):
-        d.playbackQueue.delete(i)
-        removed.inc
-      else:
-        i.inc
-    if removed > 0:
-      d.regenShuffleIfNeeded()
-      d.sendQueueEvent()
-    result["removed"] = %removed
-  of dckQueueList:
-    var arr = newJArray()
-    for p in d.playbackQueue:
-      arr.add(%p)
-    result["queue"] = arr
-  of dckQueueSetCursor:
-    d.shuffleIndex = cmd.intArg
-    result["cursor"] = %d.shuffleIndex
-  of dckAddFavourite:
-    if d.lib != nil:
-      d.lib.addFavourite(int64(cmd.intArg))
-  of dckRemoveFavourite:
-    if d.lib != nil:
-      d.lib.removeFavourite(int64(cmd.intArg))
-  of dckGetFavourites:
-    if d.lib != nil:
-      var arr = newJArray()
-      for t in d.lib.getFavourites():
-        arr.add(%t)
-      result["favourites"] = arr
   of dckGetFullState:
     result["shuffle"] = %d.shuffleEnabled
     result["repeat"] = %d.repeatMode
@@ -1144,201 +943,82 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
       of 2: "paused"
       else: "unknown"
     result["state"] = %st
-  of dckYtSearch:
-    if d.ytSearchActive:
-      try: d.ytSearchProcess.terminate() except: discard
-      close(d.ytSearchProcess)
-    d.ytSearchBuf = ""
-    d.ytSearchResults = @[]
-    d.ytSearchQuery = cmd.strArg
-    d.ytSearchActive = startYoutubeSearch(cmd.strArg, d.ytSearchProcess, d.ytCookieSource, cmd.intArg, d.ytCookieFilePath)
-    if d.ytSearchActive and d.lib != nil:
-      d.lib.addSearchQuery(cmd.strArg)
-    result["active"] = %d.ytSearchActive
-  of dckYtSearchPoll:
-    # Main loop auto-polls; just return current accumulated results
-    var arr = newJArray()
-    for r in d.ytSearchResults:
-      arr.add(%*{"title": %r.title, "url": %r.url, "duration": %r.duration, "channel": %r.channel, "kind": %r.kind.int})
-    result["results"] = arr
-    result["done"] = %(not d.ytSearchActive)
-  of dckYtSearchCancel:
-    if d.ytSearchActive:
-      try: d.ytSearchProcess.terminate() except: discard
-      close(d.ytSearchProcess)
-    d.ytSearchActive = false
-    d.ytSearchBuf = ""
-    d.ytSearchResults = @[]
-  of dckYtResolveStream:
-    d.ytStreamBuf = ""
-    d.ytStreamResultUrl = ""
-    d.ytStreamPendingTitle = cmd.strArg2
-    d.ytStreamPendingChannel = cmd.strArg3
-    let (cSrc, cPath) = cookiesForUrl(d, cmd.strArg)
-    d.ytStreamActive = startStreamUrlFetch(cmd.strArg, d.ytStreamProcess, cSrc, d.ytJsRuntime, cPath)
-    result["active"] = %d.ytStreamActive
-  of dckYtResolveStreamPoll:
-    # Main loop auto-polls; just return current state
-    result["url"] = %d.ytStreamResultUrl
-    result["title"] = %d.ytStreamPendingTitle
-    result["channel"] = %d.ytStreamPendingChannel
-    result["done"] = %(not d.ytStreamActive)
-  of dckYtDownload:
-    if cmd.strArg.len > 0:
-      var task: DownloadTask
-      let (cSrc, cPath) = cookiesForUrl(d, cmd.strArg)
-      if startDownload(YtSearchResult(url: cmd.strArg, title: cmd.strArg2, channel: cmd.strArg3), d.ytDownloadDir, task.process, cSrc, d.ytJsRuntime, cPath):
-        task.title = cmd.strArg2
-        task.url = cmd.strArg
-        task.channel = cmd.strArg3
-        task.outputDir = d.ytDownloadDir
-        task.completed = false
-        task.startedAt = epochTime()
-        d.ytDownloadTasks.add(task)
-        result["started"] = %true
-      else:
-        result["started"] = %false
-    else:
-      result["started"] = %false
-  of dckYtDownloadPoll:
-    # Main loop auto-polls; just return current accumulated state
-    result["done"] = %(d.ytDownloadTasks.len == 0)
-    if d.ytLastCompletedPath.len > 0:
-      result["path"] = %d.ytLastCompletedPath
-      result["url"] = %d.ytLastCompletedUrl
-      d.ytLastCompletedPath = ""
-      d.ytLastCompletedUrl = ""
-    var activeArr = newJArray()
-    for t in d.ytDownloadTasks:
-      activeArr.add(%*{"url": %t.url, "title": %t.title, "started": %t.startedAt})
-    result["active"] = activeArr
-    var completedArr = newJArray()
-    if d.lib != nil:
-      for dl in d.lib.getDownloads():
-        completedArr.add(%*{"url": %dl.url, "path": %dl.path, "title": %dl.title})
-    result["completed"] = completedArr
-  of dckYtCancelDownload:
-    for i in 0..<d.ytDownloadTasks.len:
-      if d.ytDownloadTasks[i].url == cmd.strArg:
-        try: d.ytDownloadTasks[i].process.terminate() except: discard
-        close(d.ytDownloadTasks[i].process)
-        d.ytDownloadTasks.delete(i)
-        break
-  of dckYtListDownloads:
-    var arr = newJArray()
-    if d.lib != nil:
-      for dl in d.lib.getDownloads():
-        arr.add(%*{"url": %dl.url, "path": %dl.path, "title": %dl.title})
-    result["downloads"] = arr
-  of dckYtFetchPlaylist:
-    if d.ytPlaylistActive:
-      result["ok"] = %false
-      result["error"] = %"playlist fetch already in progress"
-    else:
-      let (cSrc, cPath) = cookiesForUrl(d, cmd.strArg)
-      if startPlaylistFetch(cmd.strArg, d.ytPlaylistProcess, cSrc, d.ytJsRuntime, cPath):
-        d.ytPlaylistActive = true
-        d.ytPlaylistBuf = ""
-        d.ytPlaylistUrl = cmd.strArg
-        d.ytPlaylistResult = YtPlaylistDetail(url: cmd.strArg)
-        result["ok"] = %true
-        result["pending"] = %true
-      else:
-        result["ok"] = %false
-        result["error"] = %"failed to start playlist fetch"
-  of dckYtFetchPlaylistPoll:
-    # Main loop auto-polls; just return current state
-    if not d.ytPlaylistActive and d.ytPlaylistResult.tracks.len == 0:
-      result["ok"] = %false
-      result["error"] = %"no active playlist fetch"
-    elif d.ytPlaylistActive:
-      result["ok"] = %true
-      result["pending"] = %true
-    else:
-      var tracksArr = newJArray()
-      for t in d.ytPlaylistResult.tracks:
-        tracksArr.add(%*{"title": %t.title, "url": %t.url, "duration": %t.duration, "channel": %t.channel, "kind": %t.kind.int})
-      result["title"] = %d.ytPlaylistResult.title
-      result["tracks"] = tracksArr
-      result["track_count"] = %d.ytPlaylistResult.tracks.len
-      result["done"] = %true
-  of dckYtSetConfig:
-    d.ytCookieSource = cmd.strArg
-    d.ytJsRuntime = cmd.strArg2
-    if cmd.strArg3.len > 0: d.ytDownloadDir = cmd.strArg3
-    if cmd.intArg > 0: d.ytMaxConcurrentDownloads = cmd.intArg
-    result["cookie_source"] = %d.ytCookieSource
-    result["js_runtime"] = %d.ytJsRuntime
-    result["download_dir"] = %d.ytDownloadDir
-    result["max_concurrent"] = %d.ytMaxConcurrentDownloads
-  of dckSpSetConfig:
-    d.spCookieSource = cmd.strArg
-    d.spCookieFilePath = cmd.strArg2
-    if cmd.strArg3.len > 0: d.spAudioFormat = cmd.strArg3
-    result["cookie_source"] = %d.spCookieSource
-    result["cookie_path"] = %d.spCookieFilePath
-    result["audio_format"] = %d.spAudioFormat
-  of dckSpListDownloads:
-    var arr = newJArray()
-    if d.lib != nil:
-      for dl in d.lib.getDownloads():
-        if "spotify.com" in dl.url:
-          arr.add(%*{"url": %dl.url, "path": %dl.path, "title": %dl.title})
-    result["downloads"] = arr
-  of dckYtGetSearchHistory:
-    var arr = newJArray()
-    if d.lib != nil:
-      for q in d.lib.getSearchHistory():
-        arr.add(%q)
-    result["history"] = arr
-  of dckYtClearSearchHistory:
-    if d.lib != nil:
-      d.lib.clearSearchHistory()
+  else: discard
+
+proc execAudioPipeline(d: Daemon, cmd: DaemonCmd): JsonNode =
+  result = %*{"ok": true}
+  case cmd.kind
+  of dckPrepareNext:
+    d.player.prepareNext(cmd.strArg)
+  of dckCrossfade:
+    d.player.startCrossfade(cmd.floatArg)
+  of dckSetEqBand:
+    d.player.setEqBand(cmd.intArg, cmd.floatArg)
+  of dckSetEqPreset:
+    d.player.setEqPreset(cmd.strArg)
+  of dckSetSpatialWidth:
+    d.spatialWidth = cmd.floatArg
+    d.player.setSpatialWidth(cmd.floatArg)
+    if d.lib != nil: d.lib.setPlaybackState("spatial_width", $(cmd.floatArg))
+  of dckSetCrossfadeDuration:
+    d.crossfadeDuration = cmd.intArg
+    d.lib.setPlaybackState("crossfade_duration", $(d.crossfadeDuration))
+  of dckSetCrossfadeCurve:
+    d.crossfadeCurve = cmd.intArg
+    d.player.setCrossfadeCurve(cmd.intArg)
   of dckListEqPresets:
     result["presets"] = %["Flat", "Rock", "Pop", "Classical", "Jazz", "HipHop", "Vocal", "BassBoost", "Headphones", "Laptop", "Electronic", "Acoustic", "Podcast", "Dance", "Soul", "Metal", "Reggae", "Blues", "Country", "Folk", "ClassicalAlt", "Speech", "Loudness", "TrebleBoost", "FullBass", "Soft", "Custom"]
-  of dckGetCoverArt:
-    if cmd.strArg.len > 0 and fileExists(cmd.strArg):
-      let (coverData, coverMime) = extractCoverArt(cmd.strArg)
-      if coverData.len > 0:
-        result["cover_data"] = %encode(coverData)
-        result["cover_mime"] = %coverMime
-    else:
-      result["cover_data"] = %""
-  of dckGetLyrics:
-    let lrc = resolveLyrics(cmd.strArg, cmd.strArg2, cmd.strArg3, cmd.strArg4, cmd.floatArg)
-    if lrc.lines.len > 0:
-      result["ok"] = %true
-      result["title"] = %lrc.title
-      result["artist"] = %lrc.artist
-      result["album"] = %lrc.album
+  else: discard
+
+proc execLibrary(d: Daemon, cmd: DaemonCmd): JsonNode =
+  result = %*{"ok": true}
+  case cmd.kind
+  of dckGetLibrary:
+    if d.lib != nil:
+      let dbTracks = d.lib.loadTracks()
       var arr = newJArray()
-      for ln in lrc.lines:
-        arr.add(%*{"ts": %ln.timestamp, "text": %ln.text})
-      result["lines"] = arr
-    else:
-      result["ok"] = %false
-  of dckRequestCoverArt:
-    if cmd.strArg.len > 0 and fileExists(cmd.strArg):
-      let (coverData, coverMime) = extractCoverArt(cmd.strArg)
-      if coverData.len > 0:
-        let ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "cover_art_sync",
-          "path": %cmd.strArg, "cover_data": %encode(coverData), "cover_mime": %coverMime}]}
-        d.broadcastAll($ev & "\n")
-  of dckRequestLyrics:
-    let lrc = resolveLyrics(cmd.strArg, cmd.strArg2, cmd.strArg3, cmd.strArg4, cmd.floatArg)
-    var lrcArr = newJArray()
-    for ln in lrc.lines:
-      lrcArr.add(%*{"ts": %ln.timestamp, "text": %ln.text})
-    let ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "lyrics_sync",
-      "path": %cmd.strArg, "ok": %(lrc.lines.len > 0),
-      "title": %lrc.title, "artist": %lrc.artist, "album": %lrc.album, "lines": lrcArr}]}
-    d.broadcastAll($ev & "\n")
-  of dckSearchLyrics:
-    let results = searchLrclib(cmd.strArg, cmd.strArg2)
-    var arr = newJArray()
-    for r in results:
-      arr.add(%*{"id": %r.id, "artist": %r.artist, "title": %r.title, "album": %r.album, "duration": %r.duration})
-    result["results"] = arr
+      for t in dbTracks:
+        arr.add(%*{"id": %t.id, "path": %t.path, "title": %t.title,
+          "artist": %t.artist, "album": %t.album, "duration": %t.duration,
+          "track_num": %t.trackNum, "year": %t.year, "genre": %t.genre,
+          "play_count": %t.playCount, "artist_id": %t.artistId,
+          "album_id": %t.albumId, "is_favourite": %t.isFavourite,
+          "added_at": %t.addedAt, "last_played": %t.lastPlayed})
+      result["tracks"] = arr
+      let dbArtists = d.lib.loadArtists()
+      var artArr = newJArray()
+      for a in dbArtists:
+        artArr.add(%*{"id": %a.id, "name": %a.name})
+      result["artists"] = artArr
+      let dbAlbums = d.lib.loadAlbums()
+      var albArr = newJArray()
+      for a in dbAlbums:
+        albArr.add(%*{"id": %a.id, "title": %a.title, "artist_id": %a.artistId, "artist_name": %a.artistName, "year": %a.year, "genre": %a.genre})
+      result["albums"] = albArr
+  of dckAddTrack:
+    if d.lib != nil and cmd.strArg.len > 0:
+      try:
+        let data = parseJson(cmd.strArg)
+        let path = data{"path"}.getStr("")
+        let title = data{"title"}.getStr("")
+        let artist = data{"channel"}.getStr("")
+        let album = data{"album"}.getStr("YouTube")
+        let duration = data{"duration"}.getFloat(0.0)
+        if path.len > 0:
+          let trackId = d.lib.addTrack(path, title, artist, album, duration, 0, 0, "")
+          result["track_id"] = %trackId
+      except: stderr.writeLine("[gtm] addTrack error: " & getCurrentExceptionMsg())
+  of dckUpdateTrackPath:
+    if d.lib != nil and cmd.strArg.len > 0:
+      try:
+        let data = parseJson(cmd.strArg)
+        let oldPath = data{"old_path"}.getStr("")
+        let newPath = data{"new_path"}.getStr("")
+        let newTitle = data{"title"}.getStr("")
+        if oldPath.len > 0 and newPath.len > 0:
+          d.lib.updateTrackPath(oldPath, newPath, newTitle)
+          result["updated"] = %true
+      except: stderr.writeLine("[gtm] updateTrackPath error: " & getCurrentExceptionMsg())
   of dckDeleteTrack:
     if d.lib == nil or cmd.intArg <= 0:
       result["ok"] = %false
@@ -1421,9 +1101,762 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
         purged.inc
       result["purged"] = %purged
     result["ok"] = %true
-  of dckPing:
-    result["pong"] = %true
+  else: discard
 
+proc execPlaylists(d: Daemon, cmd: DaemonCmd): JsonNode =
+  result = %*{"ok": true}
+  case cmd.kind
+  of dckCreatePlaylist:
+    if d.lib != nil and cmd.strArg.len > 0:
+      let id = d.lib.createPlaylist(cmd.strArg)
+      result["playlist_id"] = %id
+      let pls = d.lib.loadPlaylists()
+      var arr = newJArray()
+      for pl in pls:
+        arr.add(%*{"id": pl.id, "name": pl.name, "track_count": pl.trackIds.len})
+      result["playlists"] = arr
+  of dckDeletePlaylist:
+    if d.lib != nil and cmd.intArg > 0:
+      d.lib.deletePlaylist(int64(cmd.intArg))
+      let pls = d.lib.loadPlaylists()
+      var arr = newJArray()
+      for pl in pls:
+        arr.add(%*{"id": pl.id, "name": pl.name, "track_count": pl.trackIds.len})
+      result["playlists"] = arr
+  of dckRenamePlaylist:
+    if d.lib != nil and cmd.intArg > 0 and cmd.strArg.len > 0:
+      d.lib.renamePlaylist(int64(cmd.intArg), cmd.strArg)
+      let pls = d.lib.loadPlaylists()
+      var arr = newJArray()
+      for pl in pls:
+        arr.add(%*{"id": pl.id, "name": pl.name, "track_count": pl.trackIds.len})
+      result["playlists"] = arr
+  of dckAddToPlaylist, dckRemoveFromPlaylist:
+    if d.lib != nil and cmd.strArg.len > 0:
+      try:
+        let data = parseJson(cmd.strArg)
+        let plId = int64(data{"playlist_id"}.getInt(0))
+        let trackId = int64(data{"track_id"}.getInt(0))
+        if plId > 0 and trackId > 0:
+          if cmd.kind == dckAddToPlaylist:
+            let pos = data{"position"}.getInt(0)
+            d.lib.addTrackToPlaylist(plId, trackId, pos)
+          else:
+            d.lib.removeTrackFromPlaylist(plId, trackId)
+      except: stderr.writeLine("[gtm] addToPlaylist error: " & getCurrentExceptionMsg())
+  of dckListPlaylists:
+    if d.lib != nil:
+      let pls = d.lib.loadPlaylists()
+      var arr = newJArray()
+      for pl in pls:
+        arr.add(%*{"id": pl.id, "name": pl.name, "track_count": pl.trackIds.len})
+      result["playlists"] = arr
+  of dckGetPlaylistTracks:
+    if d.lib != nil and cmd.intArg > 0:
+      let pls = d.lib.loadPlaylists()
+      for pl in pls:
+        if pl.id == int64(cmd.intArg):
+          var arr = newJArray()
+          for tid in pl.trackIds:
+            arr.add(%tid)
+          result["track_ids"] = arr
+          break
+      result["playlist_id"] = %cmd.intArg
+  else: discard
+
+proc handleAutoAdvance(d: Daemon)
+
+proc execQueue(d: Daemon, cmd: DaemonCmd): JsonNode =
+  result = %*{"ok": true}
+  case cmd.kind
+  of dckQueueAdd:
+    if cmd.strArg.len > 0:
+      try:
+        let items = parseJson(cmd.strArg)
+        for item in items:
+          var path = ""
+          var title = ""
+          var channel = ""
+          if item.kind == JString:
+            path = item.getStr("")
+          elif item.kind == JObject:
+            path = item{"path"}.getStr("")
+            title = item{"title"}.getStr("")
+            channel = item{"channel"}.getStr("")
+          if path.len > 0:
+            d.playbackQueue.add(path)
+              if isYtWatchUrl(path):
+                let existingPath = if d.lib != nil: d.lib.getDownloadByUrl(path) else: ""
+                if existingPath.len == 0:
+                  var alreadyDL = false
+                  for task in d.ytDownloadTasks:
+                    if task.url == path and not task.completed:
+                      alreadyDL = true
+                      break
+                  if not alreadyDL:
+                    var task: DownloadTask
+                    task.title = title
+                    task.url = path
+                    task.channel = channel
+                    task.outputDir = d.ytDownloadDir
+                    task.completed = false
+                    task.startedAt = epochTime()
+                    if d.ytActiveDownloads < d.ytMaxConcurrentDownloads:
+                      let (cSrc, cPath) = cookiesForUrl(d, path)
+                      if startDownload(YtSearchResult(url: path, title: title, channel: channel), d.ytDownloadDir, task.process, cSrc, d.ytJsRuntime, cPath):
+                        d.ytActiveDownloads.inc
+                    d.ytDownloadTasks.add(task)
+              if d.ytStreamResolvedFor != path and not d.ytStreamResolving:
+                d.ytStreamResolveBuf = ""
+                d.ytStreamResolveUrl = path
+                let (cSrc, cPath) = cookiesForUrl(d, path)
+                discard startStreamUrlFetch(path, d.ytStreamResolveProcess, cSrc, d.ytJsRuntime, cPath)
+                d.ytStreamResolving = true
+        result["queue_length"] = %d.playbackQueue.len
+        d.regenShuffleIfNeeded()
+        d.sendQueueEvent()
+        if d.playerState == 0 and d.playbackQueue.len > 0:
+          handleAutoAdvance(d)
+      except: stderr.writeLine("[gtm] queueAdd error: " & getCurrentExceptionMsg())
+  of dckQueueRemove:
+    if cmd.intArg >= 0 and cmd.intArg < d.playbackQueue.len:
+      d.playbackQueue.delete(cmd.intArg)
+    d.regenShuffleIfNeeded()
+    d.sendQueueEvent()
+  of dckQueueRemovePath:
+    if cmd.strArg.len > 0:
+      let idx = d.playbackQueue.find(cmd.strArg)
+      if idx >= 0:
+        d.playbackQueue.delete(idx)
+    d.regenShuffleIfNeeded()
+    d.sendQueueEvent()
+  of dckQueueClear:
+    d.playbackQueue = @[]
+    d.shuffleOrder = @[]
+    d.shuffleIndex = 0
+    d.crossfadePrepared = false
+    d.crossfadeStarted = false
+    d.crossfadeNextPath = ""
+    d.crossfadeConsumed = false
+    d.sendQueueEvent()
+  of dckQueueValidate:
+    var removed = 0
+    var i = 0
+    while i < d.playbackQueue.len:
+      let p = d.playbackQueue[i]
+      if p.len > 0 and not isYtWatchUrl(p) and not fileExists(p):
+        d.playbackQueue.delete(i)
+        removed.inc
+      else:
+        i.inc
+    if removed > 0:
+      d.regenShuffleIfNeeded()
+      d.sendQueueEvent()
+    result["removed"] = %removed
+  of dckQueueList:
+    var arr = newJArray()
+    for p in d.playbackQueue:
+      arr.add(%p)
+    result["queue"] = arr
+  of dckQueueSetCursor:
+    d.shuffleIndex = cmd.intArg
+    result["cursor"] = %d.shuffleIndex
+  else: discard
+
+proc execShuffleRepeat(d: Daemon, cmd: DaemonCmd): JsonNode =
+  result = %*{"ok": true}
+  case cmd.kind
+  of dckSetShuffle:
+    d.shuffleEnabled = cmd.intArg != 0
+    if d.shuffleEnabled and d.playbackQueue.len > 0:
+      d.shuffleOrder = shuffleOrder(d.playbackQueue.len)
+      d.shuffleIndex = 0
+    result["shuffle"] = %d.shuffleEnabled
+    if d.lib != nil:
+      d.lib.setPlaybackState("shuffle", $(d.shuffleEnabled))
+    let ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "shuffle_changed", "shuffle": %d.shuffleEnabled}]}
+    d.broadcastJson(ev)
+    when defined(useMpris):
+      emitMprisPlayerChanged(d)
+  of dckSetRepeat:
+    d.repeatMode = cmd.intArg
+    result["repeat"] = %d.repeatMode
+    if d.lib != nil:
+      d.lib.setPlaybackState("repeat", $(d.repeatMode))
+    let ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "repeat_changed", "repeat": %d.repeatMode}]}
+    d.broadcastJson(ev)
+    when defined(useMpris):
+      emitMprisPlayerChanged(d)
+  of dckSetSleepTimer:
+    d.sleepTimerRemaining = cmd.intArg
+    result["sleep_timer"] = %d.sleepTimerRemaining
+  else: discard
+
+proc execFavourites(d: Daemon, cmd: DaemonCmd): JsonNode =
+  result = %*{"ok": true}
+  case cmd.kind
+  of dckAddFavourite:
+    if d.lib != nil:
+      d.lib.addFavourite(int64(cmd.intArg))
+  of dckRemoveFavourite:
+    if d.lib != nil:
+      d.lib.removeFavourite(int64(cmd.intArg))
+  of dckGetFavourites:
+    if d.lib != nil:
+      var arr = newJArray()
+      for t in d.lib.getFavourites():
+        arr.add(%t)
+      result["favourites"] = arr
+  else: discard
+
+proc execYoutube(d: Daemon, cmd: DaemonCmd): JsonNode =
+  result = %*{"ok": true}
+  case cmd.kind
+  of dckYtSearch:
+    if d.ytSearchActive:
+      try: d.ytSearchProcess.terminate() except: discard
+      close(d.ytSearchProcess)
+    d.ytSearchBuf = ""
+    d.ytSearchResults = @[]
+    d.ytSearchQuery = cmd.strArg
+    d.ytSearchActive = startYoutubeSearch(cmd.strArg, d.ytSearchProcess, d.ytCookieSource, cmd.intArg, d.ytCookieFilePath)
+    if d.ytSearchActive and d.lib != nil:
+      d.lib.addSearchQuery(cmd.strArg)
+    result["active"] = %d.ytSearchActive
+  of dckYtSearchPoll:
+    var arr = newJArray()
+    for r in d.ytSearchResults:
+      arr.add(%*{"title": %r.title, "url": %r.url, "duration": %r.duration, "channel": %r.channel, "kind": %r.kind.int})
+    result["results"] = arr
+    result["done"] = %(not d.ytSearchActive)
+  of dckYtSearchCancel:
+    if d.ytSearchActive:
+      try: d.ytSearchProcess.terminate() except: discard
+      close(d.ytSearchProcess)
+    d.ytSearchActive = false
+    d.ytSearchBuf = ""
+    d.ytSearchResults = @[]
+  of dckYtResolveStream:
+    d.ytStreamBuf = ""
+    d.ytStreamResultUrl = ""
+    d.ytStreamPendingTitle = cmd.strArg2
+    d.ytStreamPendingChannel = cmd.strArg3
+    let (cSrc, cPath) = cookiesForUrl(d, cmd.strArg)
+    d.ytStreamActive = startStreamUrlFetch(cmd.strArg, d.ytStreamProcess, cSrc, d.ytJsRuntime, cPath)
+    result["active"] = %d.ytStreamActive
+  of dckYtResolveStreamPoll:
+    result["url"] = %d.ytStreamResultUrl
+    result["title"] = %d.ytStreamPendingTitle
+    result["channel"] = %d.ytStreamPendingChannel
+    result["done"] = %(not d.ytStreamActive)
+  of dckYtDownload:
+    if cmd.strArg.len > 0:
+      var task: DownloadTask
+      task.title = cmd.strArg2
+      task.url = cmd.strArg
+      task.channel = cmd.strArg3
+      task.outputDir = d.ytDownloadDir
+      task.completed = false
+      task.startedAt = epochTime()
+      if d.ytActiveDownloads < d.ytMaxConcurrentDownloads:
+        let (cSrc, cPath) = cookiesForUrl(d, cmd.strArg)
+        if startDownload(YtSearchResult(url: cmd.strArg, title: cmd.strArg2, channel: cmd.strArg3), d.ytDownloadDir, task.process, cSrc, d.ytJsRuntime, cPath):
+          d.ytActiveDownloads.inc
+      d.ytDownloadTasks.add(task)
+      result["started"] = %true
+    else:
+      result["started"] = %false
+  of dckYtDownloadPoll:
+    result["done"] = %(d.ytDownloadTasks.len == 0)
+    if d.ytLastCompletedPath.len > 0:
+      result["path"] = %d.ytLastCompletedPath
+      result["url"] = %d.ytLastCompletedUrl
+      d.ytLastCompletedPath = ""
+      d.ytLastCompletedUrl = ""
+    var activeArr = newJArray()
+    for t in d.ytDownloadTasks:
+      activeArr.add(%*{"url": %t.url, "title": %t.title, "started": %t.startedAt})
+    result["active"] = activeArr
+    var completedArr = newJArray()
+    if d.lib != nil:
+      for dl in d.lib.getDownloads():
+        completedArr.add(%*{"url": %dl.url, "path": %dl.path, "title": %dl.title})
+    result["completed"] = completedArr
+  of dckYtCancelDownload:
+    for i in 0..<d.ytDownloadTasks.len:
+      if d.ytDownloadTasks[i].url == cmd.strArg:
+        try: d.ytDownloadTasks[i].process.terminate() except: discard
+        close(d.ytDownloadTasks[i].process)
+        d.ytDownloadTasks.delete(i)
+        break
+  of dckYtListDownloads:
+    var arr = newJArray()
+    if d.lib != nil:
+      for dl in d.lib.getDownloads():
+        arr.add(%*{"url": %dl.url, "path": %dl.path, "title": %dl.title})
+    result["downloads"] = arr
+  of dckYtFetchPlaylist:
+    if d.ytPlaylistActive:
+      result["ok"] = %false
+      result["error"] = %"playlist fetch already in progress"
+    else:
+      let (cSrc, cPath) = cookiesForUrl(d, cmd.strArg)
+      if startPlaylistFetch(cmd.strArg, d.ytPlaylistProcess, cSrc, d.ytJsRuntime, cPath):
+        d.ytPlaylistActive = true
+        d.ytPlaylistBuf = ""
+        d.ytPlaylistUrl = cmd.strArg
+        d.ytPlaylistResult = YtPlaylistDetail(url: cmd.strArg)
+        result["ok"] = %true
+        result["pending"] = %true
+      else:
+        result["ok"] = %false
+        result["error"] = %"failed to start playlist fetch"
+  of dckYtFetchPlaylistPoll:
+    if not d.ytPlaylistActive and d.ytPlaylistResult.tracks.len == 0:
+      result["ok"] = %false
+      result["error"] = %"no active playlist fetch"
+    elif d.ytPlaylistActive:
+      result["ok"] = %true
+      result["pending"] = %true
+    else:
+      var tracksArr = newJArray()
+      for t in d.ytPlaylistResult.tracks:
+        tracksArr.add(%*{"title": %t.title, "url": %t.url, "duration": %t.duration, "channel": %t.channel, "kind": %t.kind.int})
+      result["title"] = %d.ytPlaylistResult.title
+      result["tracks"] = tracksArr
+      result["track_count"] = %d.ytPlaylistResult.tracks.len
+      result["done"] = %true
+  of dckYtSetConfig:
+    d.ytCookieSource = cmd.strArg
+    d.ytJsRuntime = cmd.strArg2
+    if cmd.strArg3.len > 0: d.ytDownloadDir = cmd.strArg3
+    if cmd.intArg > 0: d.ytMaxConcurrentDownloads = cmd.intArg
+    result["cookie_source"] = %d.ytCookieSource
+    result["js_runtime"] = %d.ytJsRuntime
+    result["download_dir"] = %d.ytDownloadDir
+    result["max_concurrent"] = %d.ytMaxConcurrentDownloads
+  of dckYtGetSearchHistory:
+    var arr = newJArray()
+    if d.lib != nil:
+      for q in d.lib.getSearchHistory():
+        arr.add(%q)
+    result["history"] = arr
+  of dckYtClearSearchHistory:
+    if d.lib != nil:
+      d.lib.clearSearchHistory()
+  else: discard
+
+proc execSpotify(d: Daemon, cmd: DaemonCmd): JsonNode =
+  result = %*{"ok": true}
+  case cmd.kind
+  of dckSpSetConfig:
+    d.spCookieSource = cmd.strArg
+    d.spCookieFilePath = cmd.strArg2
+    if cmd.strArg3.len > 0: d.spAudioFormat = cmd.strArg3
+    result["cookie_source"] = %d.spCookieSource
+    result["cookie_path"] = %d.spCookieFilePath
+    result["audio_format"] = %d.spAudioFormat
+  of dckSpListDownloads:
+    var arr = newJArray()
+    if d.lib != nil:
+      for dl in d.lib.getDownloads():
+        if "spotify.com" in dl.url:
+          arr.add(%*{"url": %dl.url, "path": %dl.path, "title": %dl.title})
+    result["downloads"] = arr
+  of dckSpOAuthUrl:
+    let port = startOAuthServer()
+    result["auth_url"] = %(SpotifyAuthUrl & "?client_id=" & d.spClient.clientId & "&redirect_uri=" & encodeUrl(SpotifyRedirectUri) & "&scope=" & encodeUrl(Scopes) & "&response_type=code")
+    result["port"] = %port
+  of dckSpOAuthCallback:
+    if cmd.strArg.len > 0:
+      if d.spClient.finishOAuth(cmd.strArg):
+        result["connected"] = %true
+      else:
+        result["error"] = %"OAuth failed"
+    else:
+      result["error"] = %"No auth code"
+  of dckSpFeed:
+    if d.spClient.connected:
+      let feed = d.spClient.fetchFeed()
+      var rp = newJArray()
+      for t in feed.recentlyPlayed:
+        rp.add(%*{"id": t.id, "name": t.name, "artist": t.artist, "album": t.album, "url": t.url, "duration_ms": t.durationMs, "played_at": t.playedAt})
+      result["recently_played"] = rp
+      var tt = newJArray()
+      for t in feed.topTracks:
+        tt.add(%*{"id": t.id, "name": t.name, "artist": t.artist, "album": t.album, "url": t.url, "duration_ms": t.durationMs})
+      result["top_tracks"] = tt
+      var nr = newJArray()
+      for t in feed.newReleases:
+        nr.add(%*{"id": t.id, "name": t.name, "artist": t.artist, "album": t.album, "url": t.url})
+      result["new_releases"] = nr
+      var pl = newJArray()
+      for p in feed.playlists:
+        pl.add(%*{"id": p.id, "name": p.name})
+      result["playlists"] = pl
+      result["connected"] = %true
+    else:
+      result["connected"] = %false
+  of dckSpDisconnect:
+    d.spClient.disconnect()
+  else: discard
+
+proc execCoverLyrics(d: Daemon, cmd: DaemonCmd): JsonNode =
+  result = %*{"ok": true}
+  case cmd.kind
+  of dckGetCoverArt:
+    if cmd.strArg.len > 0 and fileExists(cmd.strArg):
+      let (coverData, coverMime) = extractCoverArt(cmd.strArg)
+      if coverData.len > 0:
+        result["cover_data"] = %encode(coverData)
+        result["cover_mime"] = %coverMime
+    else:
+      result["cover_data"] = %""
+  of dckGetLyrics:
+    let lrc = resolveLyrics(cmd.strArg, cmd.strArg2, cmd.strArg3, cmd.strArg4, cmd.floatArg)
+    if lrc.lines.len > 0:
+      result["ok"] = %true
+      result["title"] = %lrc.title
+      result["artist"] = %lrc.artist
+      result["album"] = %lrc.album
+      var arr = newJArray()
+      for ln in lrc.lines:
+        arr.add(%*{"ts": %ln.timestamp, "text": %ln.text})
+      result["lines"] = arr
+    else:
+      result["ok"] = %false
+  of dckRequestCoverArt:
+    if cmd.strArg.len > 0 and fileExists(cmd.strArg):
+      let (coverData, coverMime) = extractCoverArt(cmd.strArg)
+      if coverData.len > 0:
+        let ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "cover_art_sync",
+          "path": %cmd.strArg, "cover_data": %encode(coverData), "cover_mime": %coverMime}]}
+        d.broadcastJson(ev)
+  of dckRequestLyrics:
+    let lrc = resolveLyrics(cmd.strArg, cmd.strArg2, cmd.strArg3, cmd.strArg4, cmd.floatArg)
+    var lrcArr = newJArray()
+    for ln in lrc.lines:
+      lrcArr.add(%*{"ts": %ln.timestamp, "text": %ln.text})
+    let ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "lyrics_sync",
+      "path": %cmd.strArg, "ok": %(lrc.lines.len > 0),
+      "title": %lrc.title, "artist": %lrc.artist, "album": %lrc.album, "lines": lrcArr}]}
+    d.broadcastJson(ev)
+  of dckSearchLyrics:
+    let results = searchLrclib(cmd.strArg, cmd.strArg2)
+    var arr = newJArray()
+    for r in results:
+      arr.add(%*{"id": %r.id, "artist": %r.artist, "title": %r.title, "album": %r.album, "duration": %r.duration})
+    result["results"] = arr
+  else: discard
+
+proc execScan(d: Daemon, cmd: DaemonCmd): JsonNode =
+  result = %*{"ok": true}
+  case cmd.kind
+  of dckScan:
+    if cmd.strArg.len > 0 and dirExists(cmd.strArg):
+      if d.scanningDir.len > 0:
+        result["scanning_already"] = %true
+      else:
+        d.scanningDir = cmd.strArg
+        d.scanningFiles = scanDirectoryRecursive(cmd.strArg)
+        d.scanningIdx = 0
+        result["scanning"] = %true
+        result["total_files"] = %d.scanningFiles.len
+  else: discard
+
+proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
+  # Most read commands work without a player, writes need PulseWorker
+  case cmd.kind
+
+  # --- Audio WRITE commands — queue PulseAction, return ok immediately ---
+  of dckPlay:
+    if d.player == nil: return %*{"ok": false, "error": "no audio backend"}
+    acquire(d.lock)
+    d.pendingActions.add(PulseAction(kind: pakPlay))
+    release(d.lock)
+    result = %*{"ok": true}
+  of dckPause:
+    if d.player == nil: return %*{"ok": false, "error": "no audio backend"}
+    acquire(d.lock)
+    d.pendingActions.add(PulseAction(kind: pakPause))
+    release(d.lock)
+    result = %*{"ok": true}
+  of dckTogglePause:
+    if d.player == nil: return %*{"ok": false, "error": "no audio backend"}
+    acquire(d.lock)
+    d.pendingActions.add(PulseAction(kind: pakTogglePause))
+    release(d.lock)
+    result = %*{"ok": true}
+  of dckStop:
+    if d.player == nil: return %*{"ok": false, "error": "no audio backend"}
+    acquire(d.lock)
+    d.pendingActions.add(PulseAction(kind: pakStop))
+    release(d.lock)
+    d.crossfadePrepared = false
+    d.crossfadeStarted = false
+    d.crossfadeNextPath = ""
+    d.crossfadeConsumed = false
+    result = %*{"ok": true}
+  of dckSeek:
+    if d.player == nil: return %*{"ok": false, "error": "no audio backend"}
+    acquire(d.lock)
+    d.pendingActions.add(PulseAction(kind: pakSeek, floatVal: cmd.floatArg))
+    release(d.lock)
+    result = %*{"ok": true}
+  of dckSetVolume:
+    if d.player == nil: return %*{"ok": false, "error": "no audio backend"}
+    acquire(d.lock)
+    d.pendingActions.add(PulseAction(kind: pakSetVolume, intVal: cmd.intArg))
+    release(d.lock)
+    result = %*{"ok": true}
+  of dckLoadFile:
+    if d.player == nil: return %*{"ok": false, "error": "no audio backend"}
+    if cmd.strArg.len > 0:
+      d.upNextSent = false
+      d.autoAdvancing = false
+      if d.currentTrackPath.len > 0 and d.currentTrackPath != cmd.strArg:
+        d.trackHistory.add(d.currentTrackPath)
+        if d.trackHistory.len > 50: d.trackHistory.delete(0)
+      acquire(d.lock)
+      d.pendingActions.add(PulseAction(kind: pakLoadFile, strVal: cmd.strArg, strVal2: cmd.strArg2, strVal3: cmd.strArg3))
+      release(d.lock)
+      if d.lib != nil:
+        var trackId = d.lib.findTrackByPath(cmd.strArg)
+        if trackId == 0 and cmd.strArg2.len > 0:
+          trackId = d.lib.addTrack(cmd.strArg, cmd.strArg2, cmd.strArg3, "YouTube", 0.0, 0, 0, "")
+        if trackId > 0:
+          d.lib.updatePlayCount(trackId)
+          result["track_id"] = %trackId
+      result = %*{"ok": true}
+    else:
+      result = %*{"ok": false, "error": "no path"}
+  of dckNext:
+    if d.player == nil: return %*{"ok": false, "error": "no audio backend"}
+    if d.playbackQueue.len == 0:
+      result = %*{"ok": false, "error": "no next track"}
+    else:
+      var nextPath = ""
+      acquire(d.lock)
+      if d.shuffleEnabled and d.shuffleOrder.len > 0 and d.shuffleIndex < d.shuffleOrder.len:
+        nextPath = d.playbackQueue[d.shuffleOrder[d.shuffleIndex]]
+        d.shuffleIndex.inc
+      elif not d.shuffleEnabled:
+        nextPath = d.playbackQueue[0]
+        d.playbackQueue.delete(0)
+        if d.repeatMode == 1:
+          d.playbackQueue.add(nextPath)
+      if nextPath.len > 0:
+        d.pendingActions.add(PulseAction(kind: pakLoadFile, strVal: nextPath))
+      release(d.lock)
+      if nextPath.len > 0:
+        d.autoAdvancing = false
+        d.crossfadePrepared = false
+        d.crossfadeStarted = false
+        d.crossfadeNextPath = ""
+        d.crossfadeConsumed = false
+        d.sendQueueEvent()
+        d.pushFullState()
+        result = %*{"ok": true, "next_path": %nextPath}
+      else:
+        result = %*{"ok": false, "error": "no next track"}
+  of dckPrev:
+    if d.player == nil: return %*{"ok": false, "error": "no audio backend"}
+    var prevPath = ""
+    if d.lastConsumedFromQueue.len > 1:
+      let idx = d.lastConsumedFromQueue.len - 2
+      if idx >= 0:
+        prevPath = d.lastConsumedFromQueue[idx]
+        d.lastConsumedFromQueue.setLen(idx + 1)
+    if prevPath.len == 0 and d.trackHistory.len > 0:
+      prevPath = d.trackHistory.pop()
+    if prevPath.len > 0:
+      acquire(d.lock)
+      d.pendingActions.add(PulseAction(kind: pakLoadFile, strVal: prevPath))
+      release(d.lock)
+      result = %*{"ok": true, "prev_path": %prevPath}
+    else:
+      result = %*{"ok": false, "error": "no previous track"}
+
+  # --- Audio pipeline WRITE commands ---
+  of dckPrepareNext:
+    if d.player == nil: return %*{"ok": false, "error": "no audio backend"}
+    acquire(d.lock)
+    d.pendingActions.add(PulseAction(kind: pakPrepareNext, strVal: cmd.strArg))
+    release(d.lock)
+    result = %*{"ok": true}
+  of dckCrossfade:
+    if d.player == nil: return %*{"ok": false, "error": "no audio backend"}
+    acquire(d.lock)
+    d.pendingActions.add(PulseAction(kind: pakStartCrossfade, floatVal: cmd.floatArg))
+    release(d.lock)
+    result = %*{"ok": true}
+  of dckSetEqBand:
+    if d.player == nil: return %*{"ok": false, "error": "no audio backend"}
+    acquire(d.lock)
+    d.pendingActions.add(PulseAction(kind: pakSetEqBand, intVal: cmd.intArg, floatVal: cmd.floatArg))
+    release(d.lock)
+    result = %*{"ok": true}
+  of dckSetEqPreset:
+    if d.player == nil: return %*{"ok": false, "error": "no audio backend"}
+    acquire(d.lock)
+    d.pendingActions.add(PulseAction(kind: pakSetEqPreset, strVal: cmd.strArg))
+    release(d.lock)
+    result = %*{"ok": true}
+  of dckSetSpatialWidth:
+    if d.player == nil: return %*{"ok": false, "error": "no audio backend"}
+    acquire(d.lock)
+    d.pendingActions.add(PulseAction(kind: pakSetSpatialWidth, floatVal: cmd.floatArg))
+    release(d.lock)
+    d.spatialWidth = cmd.floatArg
+    if d.lib != nil: d.lib.setPlaybackState("spatial_width", $(cmd.floatArg))
+    result = %*{"ok": true}
+  of dckSetCrossfadeDuration:
+    d.crossfadeDuration = cmd.intArg
+    if d.lib != nil: d.lib.setPlaybackState("crossfade_duration", $(d.crossfadeDuration))
+    result = %*{"ok": true}
+  of dckSetCrossfadeCurve:
+    d.crossfadeCurve = cmd.intArg
+    if d.player != nil:
+      acquire(d.lock)
+      d.pendingActions.add(PulseAction(kind: pakSetCrossfadeCurve, intVal: cmd.intArg))
+      release(d.lock)
+    result = %*{"ok": true}
+  of dckListEqPresets:
+    result = %*{"ok": true, "presets": %["Flat", "Rock", "Pop", "Classical", "Jazz", "HipHop", "Vocal", "BassBoost", "Headphones", "Laptop", "Electronic", "Acoustic", "Podcast", "Dance", "Soul", "Metal", "Reggae", "Blues", "Country", "Folk", "ClassicalAlt", "Speech", "Loudness", "TrebleBoost", "FullBass", "Soft", "Custom"]}
+
+  # --- Audio READ commands (snapshot fields) ---
+  of dckGetVolume:
+    result = %*{"ok": true, "volume": %d.playerVolume}
+
+  # --- System commands ---
+  of dckQuit:
+    when defined(useMpris): shutdownMpris()
+    d.savePlaybackState()
+    if d.lib != nil: d.lib.closeDb()
+    if d.player != nil:
+      acquire(d.lock)
+      d.pendingActions.add(PulseAction(kind: pakShutdown))
+      release(d.lock)
+    d.running = false
+    result = %*{"ok": true}
+  of dckPing:
+    result = %*{"ok": true, "pong": %true}
+
+  # --- Status READ commands (snapshot fields) ---
+  of dckStatus, dckNowPlaying:
+    result = %*{"ok": true}
+    var st = "unknown"
+    if d.playerState == 0: st = "stopped"
+    elif d.playerState == 1: st = "playing"
+    elif d.playerState == 2: st = "paused"
+    result["state"] = %st
+    result["volume"] = %d.playerVolume
+    result["time_pos"] = %d.playerTimePos
+    result["duration"] = %d.playerDuration
+    result["track"] = %d.currentTrackPath
+    result["audio_working"] = %d.playerAudioWorking
+    result["sleep_timer"] = %d.sleepTimerRemaining
+    result["crossfading"] = %d.playerCrossfading
+    result["master_ended"] = %d.playerMasterEnded
+  of dckGetState:
+    result = %*{"ok": true}
+    result["shuffle"] = %d.shuffleEnabled
+    result["repeat"] = %d.repeatMode
+    result["sleep_timer"] = %d.sleepTimerRemaining
+    result["time_pos"] = %d.playerTimePos
+    result["duration"] = %d.playerDuration
+    result["track_path"] = %d.currentTrackPath
+    if d.currentTrackPath.len > 0:
+      if d.currentTrackTitle.len > 0:
+        result["track_title"] = %d.currentTrackTitle
+      elif d.currentTrackPath.contains("youtube.com") or d.currentTrackPath.contains("googlevideo.com"):
+        result["track_title"] = %d.playerTitle
+      else:
+        result["track_title"] = %(splitFile(d.currentTrackPath).name.replace(".", " "))
+      if d.currentTrackChannel.len > 0:
+        result["track_channel"] = %d.currentTrackChannel
+      elif d.playerArtist.len > 0:
+        result["track_channel"] = %d.playerArtist
+      if d.playerAlbum.len > 0:
+        result["track_album"] = %d.playerAlbum
+    result["crossfading"] = %d.playerCrossfading
+    result["master_ended"] = %d.playerMasterEnded
+    var st2 = "unknown"
+    if d.playerState == 0: st2 = "stopped"
+    elif d.playerState == 1: st2 = "playing"
+    elif d.playerState == 2: st2 = "paused"
+    result["state"] = %st2
+    result["volume"] = %d.playerVolume
+    result["backend_type"] = %(if d.player != nil and d.player of MixerBackend: "Mixer" elif d.player != nil and d.player of FfmpegBackend: "FFmpeg" else: "ALSA")
+  of dckResume:
+    result = %*{"ok": true}
+    if d.currentTrackPath.len > 0:
+      var st = "stopped"
+      if d.playerState == 1: st = "playing"
+      elif d.playerState == 2: st = "paused"
+      result["state"] = %st
+      result["track"] = %d.currentTrackPath
+      result["time_pos"] = %d.playerTimePos
+      result["duration"] = %d.playerDuration
+    else:
+      result["state"] = %"stopped"
+  of dckGetFullState:
+    result = %*{"ok": true}
+    result["shuffle"] = %d.shuffleEnabled
+    result["repeat"] = %d.repeatMode
+    result["sleep_timer"] = %d.sleepTimerRemaining
+    result["volume"] = %d.playerVolume
+    result["time_pos"] = %d.playerTimePos
+    result["duration"] = %d.playerDuration
+    result["track_path"] = %d.currentTrackPath
+    result["track_title"] = %d.currentTrackTitle
+    result["track_channel"] = %d.currentTrackChannel
+    result["track_album"] = %d.playerAlbum
+    result["crossfading"] = %d.playerCrossfading
+    result["master_ended"] = %d.playerMasterEnded
+    var qArr = newJArray()
+    for p in d.playbackQueue: qArr.add(%p)
+    result["queue"] = qArr
+    var soArr = newJArray()
+    for i in d.shuffleOrder: soArr.add(%i)
+    result["shuffleOrder"] = soArr
+    result["shuffleIndex"] = %d.shuffleIndex
+    result["version"] = %d.stateVersion
+    result["spatialWidth"] = %d.spatialWidth
+    result["crossfadeDuration"] = %d.crossfadeDuration
+    result["crossfadeCurve"] = %d.crossfadeCurve
+    result["crossfadePrepared"] = %d.crossfadePrepared
+    result["crossfadeStarted"] = %d.crossfadeStarted
+    result["crossfadeNextPath"] = %d.crossfadeNextPath
+    var st3 = "unknown"
+    if d.playerState == 0: st3 = "stopped"
+    elif d.playerState == 1: st3 = "playing"
+    elif d.playerState == 2: st3 = "paused"
+    result["state"] = %st3
+
+  # --- Non-audio commands (existing dispatch procs — no d.player access) ---
+  of dckGetLibrary, dckAddTrack, dckUpdateTrackPath, dckDeleteTrack, dckRestoreTrack, dckPermanentDelete, dckListTrash, dckPurgeTrash:
+    result = execLibrary(d, cmd)
+  of dckCreatePlaylist, dckDeletePlaylist, dckRenamePlaylist, dckAddToPlaylist, dckRemoveFromPlaylist, dckListPlaylists, dckGetPlaylistTracks:
+    result = execPlaylists(d, cmd)
+  of dckQueueAdd, dckQueueRemove, dckQueueRemovePath, dckQueueClear, dckQueueValidate, dckQueueList, dckQueueSetCursor:
+    result = execQueue(d, cmd)
+  of dckSetShuffle, dckSetRepeat, dckSetSleepTimer:
+    result = execShuffleRepeat(d, cmd)
+  of dckAddFavourite, dckRemoveFavourite, dckGetFavourites:
+    result = execFavourites(d, cmd)
+  of dckYtSearch, dckYtSearchPoll, dckYtSearchCancel, dckYtResolveStream, dckYtResolveStreamPoll, dckYtDownload, dckYtDownloadPoll, dckYtCancelDownload, dckYtListDownloads, dckYtFetchPlaylist, dckYtFetchPlaylistPoll, dckYtSetConfig, dckYtGetSearchHistory, dckYtClearSearchHistory:
+    result = execYoutube(d, cmd)
+  of dckSpSetConfig, dckSpListDownloads, dckSpOAuthUrl, dckSpOAuthCallback, dckSpFeed, dckSpDisconnect:
+    result = execSpotify(d, cmd)
+  of dckGetCoverArt, dckGetLyrics, dckRequestCoverArt, dckRequestLyrics, dckSearchLyrics:
+    result = execCoverLyrics(d, cmd)
+  of dckScan:
+    result = execScan(d, cmd)
+
+proc removeClient(d: Daemon, idx: int) =
+  try: d.clients[idx].sock.close() except: discard
+  d.clients.delete(idx)
 
 proc trySend(client: Socket, data: string): bool =
   if data.len == 0: return true
@@ -1439,6 +1872,181 @@ proc trySend(client: Socket, data: string): bool =
   if remaining.len == 0: return true
   try: client.close() except: discard
   return false
+
+proc runPulseWorker(d: ptr Daemon) {.thread.} =
+  when not defined(macosx):
+    discard prctl(15.cint, "pulse")
+  else:
+    discard pthread_setname_np("pulse")
+
+  const tickInterval = 0.016
+  while d.running:
+    let tickStart = epochTime()
+
+    # --- Copy pending actions under lock ---
+    acquire(d.lock)
+    let actions = d.pendingActions
+    d.pendingActions.setLen(0)
+    release(d.lock)
+
+    let player = d.player
+    if player == nil:
+      sleep(16)
+      continue
+
+    # --- Execute pending actions ---
+    for a in actions:
+      case a.kind
+      of pakPlay:
+        player.play()
+      of pakPause:
+        player.pause()
+      of pakStop:
+        player.stop()
+      of pakTogglePause:
+        player.togglePause()
+      of pakSeek:
+        player.seek(a.floatVal)
+      of pakLoadFile:
+        if a.strVal.len > 0:
+          player.stop()
+          if player.loadFile(a.strVal):
+            player.play()
+      of pakSetVolume:
+        player.setVolume(a.intVal)
+      of pakPrepareNext:
+        player.prepareNext(a.strVal)
+      of pakStartCrossfade:
+        player.startCrossfade(a.floatVal)
+      of pakSetEqBand:
+        player.setEqBand(a.intVal, a.floatVal)
+      of pakSetEqPreset:
+        player.setEqPreset(a.strVal)
+      of pakSetSpatialWidth:
+        player.setSpatialWidth(a.floatVal)
+      of pakSetCrossfadeCurve:
+        player.setCrossfadeCurve(a.intVal)
+      of pakShutdown:
+        return
+      of pakNone, pakPrev:
+        discard
+
+    # --- Poll audio events ---
+    let audioEvents = player.pollEvents()
+
+    # --- Write snapshot + events under lock ---
+    acquire(d.lock)
+    d.playerState = player.state
+    d.playerVolume = player.volume
+    d.playerTimePos = player.timePos
+    d.playerDuration = player.duration
+    let flags = player.getStatusFlags()
+    d.playerCrossfading = flags.crossfading
+    d.playerMasterEnded = flags.masterEnded
+    # During crossfade after master ends, derive slave position
+    if d.playerCrossfading and d.playerMasterEnded and d.playerDuration > 0:
+      let slavePos = d.playerTimePos - d.playerDuration
+      d.playerTimePos = max(0.0, slavePos)
+      d.playerDuration = 0.0  # unknown until daemon sets it
+    d.playerAudioWorking = player.working
+    d.playerTitle = player.metadata.title
+    d.playerArtist = player.metadata.artist
+    d.playerAlbum = player.metadata.album
+    
+    if audioEvents.len > 0:
+      d.stateVersion.inc
+      let evJson = %*{"events": serializeEvents(audioEvents, d[])}
+      d.events.add($evJson & "\n")
+
+    release(d.lock)
+
+    let elapsed = epochTime() - tickStart
+    let remaining = tickInterval - elapsed
+    if remaining > 0:
+      sleep(int(remaining * 1000))
+
+
+proc runNotifyWorker() {.thread.} =
+  when not defined(macosx):
+    discard prctl(15.cint, "notify")
+  else:
+    discard pthread_setname_np("notify")
+  initNotifications()
+  while true:
+    let (title, body) = notifyChan.recv()
+    if title.len == 0 and body.len == 0:
+      break
+    sendDesktopNotification(title, body)
+
+
+proc handleAutoAdvance(d: Daemon) =
+  ## Called when a track ends. Pops next from queue and queues a pakLoadFile action.
+  acquire(d.lock)
+  var nextPath = ""
+  var nextTitle = d.currentTrackTitle
+  var nextChannel = d.currentTrackChannel
+
+  if d.crossfadeNextPath.len > 0:
+    nextPath = d.crossfadeNextPath
+    d.crossfadeNextPath = ""
+    d.crossfadePrepared = false
+    d.crossfadeStarted = false
+    d.crossfadeConsumed = false
+    d.upNextSent = false
+    if d.repeatMode != 2:
+      if not d.shuffleEnabled and d.playbackQueue.len > 0:
+        d.playbackQueue.delete(0)
+        if d.repeatMode == 1:
+          d.playbackQueue.add(nextPath)
+  elif d.playbackQueue.len > 0:
+    if d.shuffleEnabled and d.shuffleOrder.len > 0 and d.shuffleIndex < d.shuffleOrder.len:
+      nextPath = d.playbackQueue[d.shuffleOrder[d.shuffleIndex]]
+    elif not d.shuffleEnabled:
+      nextPath = d.playbackQueue[0]
+    if nextPath.len > 0:
+      if d.repeatMode == 2:
+        discard
+      elif d.shuffleEnabled:
+        d.shuffleIndex.inc
+      else:
+        d.playbackQueue.delete(0)
+        if d.repeatMode == 1:
+          d.playbackQueue.add(nextPath)
+
+  let copyCtp = d.currentTrackPath
+  let copyCtt = d.currentTrackTitle
+  let copyCtc = d.currentTrackChannel
+  release(d.lock)
+
+  if nextPath.len > 0:
+    var loadPath = nextPath
+    if isYtWatchUrl(nextPath):
+      acquire(d.lock)
+      if d.ytStreamResolvedFor == nextPath and d.ytStreamResolvedUrl.len > 0:
+        loadPath = d.ytStreamResolvedUrl
+      release(d.lock)
+    if d.lib != nil and isYtWatchUrl(nextPath):
+      let meta = d.lib.getDownloadMetaByUrl(nextPath)
+      if meta.title.len > 0:
+        nextTitle = meta.title
+        nextChannel = meta.channel
+    acquire(d.lock)
+    d.pendingActions.add(PulseAction(kind: pakLoadFile, strVal: loadPath, strVal2: nextTitle, strVal3: nextChannel))
+    d.currentTrackPath = loadPath
+    d.currentTrackTitle = nextTitle
+    d.currentTrackChannel = nextChannel
+    if copyCtp.len > 0 and copyCtp != loadPath:
+      d.trackHistory.add(copyCtp)
+      if d.trackHistory.len > 50: d.trackHistory.delete(0)
+    if d.lib != nil:
+      var trackId = d.lib.findTrackByPath(loadPath)
+      if trackId > 0:
+        d.lib.updatePlayCount(trackId)
+    release(d.lock)
+    d.sendQueueEvent()
+    d.pushFullState()
+    when defined(useMpris):
+      emitMprisPlayerChanged(d)
 
 proc runDaemon*() =
   let debugMode = "--debug" in os.commandLineParams()
@@ -1485,11 +2093,16 @@ proc runDaemon*() =
   if player == nil or not player.working:
     stderr.writeLine("[gtm] All audio backends unavailable")
   let defaultDownloadDir = dataDir() & "/audio"
+  var daemonLock: Lock
+  initLock(daemonLock)
   var daemon = Daemon(
     player: player,
     running: true,
     idleTimeout: 300,
     clients: @[],
+    lock: daemonLock,
+    pendingActions: @[],
+    events: @[],
     shuffleEnabled: false,
     repeatMode: 0,
     sleepTimerRemaining: 0,
@@ -1515,6 +2128,7 @@ proc runDaemon*() =
     spCookieSource: "",
     spCookieFilePath: "",
     spAudioFormat: "opus",
+    spClient: newSpotifyClient(),
     ytSearchActive: false,
     ytStreamActive: false,
     ytStreamResultUrl: "",
@@ -1533,7 +2147,8 @@ proc runDaemon*() =
     stateVersion: 0
   )
   initMpris(daemon)
-  initNotifications()
+  notifyChan.open()
+  createThread(notifyThread, runNotifyWorker)
   let libPath = dataDir() & "/gtm.db"
   if not dirExists(dataDir()):
     createDir(dataDir())
@@ -1583,6 +2198,7 @@ proc runDaemon*() =
     if spCookieFile.len > 0: daemon.spCookieFilePath = spCookieFile
     let spAudio = daemon.lib.getPlaybackState("sp_audio_format")
     if spAudio.len > 0: daemon.spAudioFormat = spAudio
+  discard daemon.spClient.loadTokens()
     # Completed downloads are queried from DB on demand
     let queueStr = daemon.lib.getPlaybackState("queue_json")
     if queueStr.len > 0:
@@ -1616,6 +2232,10 @@ proc runDaemon*() =
   daemon.server = newSocket(srvFd, Domain.AF_UNIX, SockType.SOCK_STREAM)
   daemon.server.bindUnix(sockPath())
   daemon.server.listen()
+  # Spawn PulseWorker thread
+  var pulseThread: Thread[ptr Daemon]
+  createThread(pulseThread, runPulseWorker, addr(daemon))
+
   while daemon.running:
     pollMpris()
     var readFds: seq[SocketHandle] = @[daemon.server.getFd]
@@ -1634,137 +2254,109 @@ proc runDaemon*() =
           )
           setBlocking(newClient.sock.getFd, false)
           daemon.clients.add(newClient)
-          daemon.idleFrames = 0
       # Read from all clients
       var ci = 0
       while ci < daemon.clients.len:
-        if daemon.clients[ci].sock.getFd in readFds:
-          var tmp: array[4096, char]
-          let n = posix.recv(daemon.clients[ci].sock.getFd, addr tmp[0], tmp.len.cint, 0)
-          if n < 0:
-            let err = osLastError()
-            if err.int32 != 11 and err.int32 != 10035:
-              daemon.clients[ci].sock.close()
-              daemon.clients.delete(ci)
-              continue
-            else:
-              ci.inc
-              continue
-          elif n == 0:
-            daemon.clients[ci].sock.close()
-            daemon.clients.delete(ci)
+        if daemon.clients[ci].sock.getFd notin readFds:
+          ci.inc
+          continue
+        var tmp: array[4096, char]
+        let n = posix.recv(daemon.clients[ci].sock.getFd, addr tmp[0], tmp.len.cint, 0)
+        if n < 0:
+          let err = osLastError()
+          if err.int32 == 11 or err.int32 == 10035:
+            ci.inc
             continue
-          else:
-            let old = daemon.clients[ci].buf.len
-            daemon.clients[ci].buf.setLen(old + n)
-            copyMem(addr daemon.clients[ci].buf[old], addr tmp[0], n)
-            while true:
-              let nli = daemon.clients[ci].buf.find('\n')
-              if nli < 0: break
-              let line = daemon.clients[ci].buf[0..<nli]
-              daemon.clients[ci].buf = daemon.clients[ci].buf[nli+1..^1]
-              if line.len > 0:
-                if debugMode: stderr.writeLine("[gtm] daemon recv: " & line)
-                let cmdJson = parseJson(line)
-                let cmd = parseDaemonCommand(line)
-                let resp = try:
-                  executeCommand(daemon, cmd)
-                except Exception as ex:
-                  if debugMode: stderr.writeLine("[gtm] command error: " & ex.msg)
-                  %*{"ok": false, "error": ex.msg}
-                if cmdJson.hasKey("seq"):
-                  resp["seq"] = cmdJson["seq"]
-                let respStr = $resp & "\n"
-                if debugMode: stderr.writeLine("[gtm] daemon resp: " & respStr.strip())
-                if not trySend(daemon.clients[ci].sock, respStr):
-                  daemon.clients[ci].sock.close()
-                  daemon.clients.delete(ci)
-                  break
-                if not daemon.running: break
+          daemon.removeClient(ci)
+          continue
+        if n == 0:
+          daemon.removeClient(ci)
+          continue
+        let old = daemon.clients[ci].buf.len
+        daemon.clients[ci].buf.setLen(old + n)
+        copyMem(addr daemon.clients[ci].buf[old], addr tmp[0], n)
+        while true:
+          let nli = daemon.clients[ci].buf.find('\n')
+          if nli < 0: break
+          let line = daemon.clients[ci].buf[0..<nli]
+          daemon.clients[ci].buf = daemon.clients[ci].buf[nli+1..^1]
+          if line.len == 0: continue
+          if debugMode: stderr.writeLine("[gtm] daemon recv: " & line)
+          let cmdJson = parseJson(line)
+          let cmd = parseDaemonCommand(line)
+          let resp = try:
+            executeCommand(daemon, cmd)
+          except Exception as ex:
+            if debugMode: stderr.writeLine("[gtm] command error: " & ex.msg)
+            %*{"ok": false, "error": ex.msg}
+          if cmdJson.hasKey("seq"):
+            resp["seq"] = cmdJson["seq"]
+          let respStr = $resp & "\n"
+          if debugMode: stderr.writeLine("[gtm] daemon resp: " & respStr.strip())
+          if not trySend(daemon.clients[ci].sock, respStr):
+            daemon.removeClient(ci)
+            break
+          if not daemon.running: break
         ci.inc
-    try:
-      let daemonEvents = if daemon.player != nil: daemon.player.pollEvents() else: @[]
-      if daemonEvents.len > 0:
-        daemon.stateVersion.inc
-      # FIRST: Process auto-advance on track ended (before broadcasts)
-      for ev in daemonEvents:
-        if ev.kind == evTrackEnded:
-          if daemon.crossfadeNextPath.len > 0:
-            daemon.currentTrackPath = daemon.crossfadeNextPath
-            daemon.upNextSent = false
-            # Fetch metadata for the crossfaded track
-            if daemon.lib != nil and isYtWatchUrl(daemon.crossfadeNextPath):
-              let meta = daemon.lib.getDownloadMetaByUrl(daemon.crossfadeNextPath)
-              if meta.title.len > 0:
-                daemon.currentTrackTitle = meta.title
-                daemon.currentTrackChannel = meta.channel
-            elif daemon.lib != nil:
-              let cfTrack = daemon.lib.getTrackByPath(daemon.crossfadeNextPath)
-              if cfTrack.id > 0:
-                daemon.currentTrackTitle = cfTrack.title
-                daemon.currentTrackChannel = cfTrack.artist
-                daemon.lib.updatePlayCount(cfTrack.id)
-            # Consume queue now that crossfade completed
-            if daemon.repeatMode == 2:
-              daemon.crossfadeNextPath = ""
-              daemon.crossfadePrepared = false
-              daemon.crossfadeConsumed = false
-            elif not daemon.shuffleEnabled and daemon.playbackQueue.len > 0:
-              daemon.playbackQueue.delete(0)
-              if daemon.repeatMode == 1:
-                daemon.playbackQueue.add(daemon.crossfadeNextPath)
-            daemon.crossfadePrepared = false
-            daemon.crossfadeStarted = false
-            daemon.crossfadeConsumed = false
-            daemon.crossfadeNextPath = ""
-            daemon.sendQueueEvent()
-            daemon.pushFullState()
-          elif daemon.playbackQueue.len > 0:
-            if daemon.advanceToNextTrack(true):
-              daemon.sendQueueEvent()
-              daemon.pushFullState()
-            else:
-              daemon.pushFullState()
-          emitMprisPlayerChanged(daemon)
-      # SECOND: Broadcast processed events to clients
-      if daemonEvents.len > 0 and daemon.clients.len > 0:
-        let evJson = %*{"events": serializeEvents(daemonEvents, daemon)}
-        daemon.broadcastAll($evJson & "\n")
-      # THIRD: Desktop notification (isolated — failure must not corrupt state)
-      for ev in daemonEvents:
-        if ev.kind == evPlaybackStarted:
-          daemon.autoAdvancing = false
-          if daemon.currentTrackTitle.len > 0:
-            try:
-              sendDesktopNotification(daemon.currentTrackTitle, daemon.currentTrackChannel)
-            except:
-              discard
-      # Monitor duration changes — broadcast if duration becomes known during playback (e.g. streams)
-      let currentDur = daemon.player.duration
-      if currentDur > 0 and abs(currentDur - daemon.lastTrackDuration) > 0.5:
-        daemon.lastTrackDuration = currentDur
-        daemon.stateVersion.inc
-        let durEv = %*{"events": [%*{"kind": %evDurationChanged.int, "duration": %currentDur, "version": %daemon.stateVersion}]}
-        daemon.broadcastAll($durEv & "\n")
-    except Exception as ex:
-      if debugMode: stderr.writeLine("[gtmd] event processing error: " & ex.msg)
 
-    # yt-dlp download task management (poll BEFORE retry so completed downloads are visible)
+    # Drain events from PulseWorker and broadcast to all clients
+    acquire(daemon.lock)
+    var pendingEvents = daemon.events
+    daemon.events.setLen(0)
+    release(daemon.lock)
+
+    for evJson in pendingEvents:
+      if daemon.clients.len > 0:
+        daemon.broadcastAll(evJson)
+
+    # Desktop notification + auto-advance on track ended (from event drain)
+    for evJson in pendingEvents:
+      try:
+        let j = parseJson(evJson)
+        if j.hasKey("events"):
+          for ev in j["events"]:
+            let kind = ev{"kind"}.getInt(-1)
+            if kind == 4: # evTrackEnded
+              handleAutoAdvance(daemon)
+            elif kind == 1: # evPlaybackStarted
+              daemon.autoAdvancing = false
+              if ev{"track_title"}.getStr("").len > 0:
+                notifyChan.send((ev{"track_title"}.getStr(""), ev{"track_channel"}.getStr("")))
+      except:
+        discard
+
+    # yt-dlp download task management
     let dlTimeout = 600.0
     var dlDone: seq[int] = @[]
     for i in 0..<daemon.ytDownloadTasks.len:
-      if not daemon.ytDownloadTasks[i].completed:
+      if daemon.ytDownloadTasks[i].completed:
+        dlDone.add(i)
+      elif daemon.ytDownloadTasks[i].process == nil:
+        # Pending — not yet started, try to start now if a slot is free
+        if daemon.ytActiveDownloads < daemon.ytMaxConcurrentDownloads:
+          let (cSrc, cPath) = cookiesForUrl(daemon, daemon.ytDownloadTasks[i].url)
+          var newTask: DownloadTask
+          if startDownload(YtSearchResult(url: daemon.ytDownloadTasks[i].url, title: daemon.ytDownloadTasks[i].title, channel: daemon.ytDownloadTasks[i].channel), daemon.ytDownloadDir, newTask.process, cSrc, daemon.ytJsRuntime, cPath):
+            daemon.ytDownloadTasks[i].process = newTask.process
+            daemon.ytDownloadTasks[i].startedAt = epochTime()
+            daemon.ytActiveDownloads.inc
+          else:
+            daemon.ytDownloadTasks[i].completed = true
+            dlDone.add(i)
+      else:
         let p = daemon.ytDownloadTasks[i].process
         if epochTime() - daemon.ytDownloadTasks[i].startedAt > dlTimeout:
           try: p.terminate() except: discard
           close(p)
           daemon.ytDownloadTasks[i].completed = true
+          daemon.ytActiveDownloads.dec
           dlDone.add(i)
         elif not p.running():
           var path = ""
           try: path = pollDownload(daemon.ytDownloadTasks[i].process, daemon.ytDownloadTasks[i].buf)
           except: discard
           daemon.ytDownloadTasks[i].completed = true
+          daemon.ytActiveDownloads.dec
           dlDone.add(i)
           if path.len > 0:
             let dlUrl = daemon.ytDownloadTasks[i].url
@@ -1773,19 +2365,16 @@ proc runDaemon*() =
             if daemon.lib != nil:
               daemon.lib.addDownload(dlUrl, path, daemon.ytDownloadTasks[i].title, daemon.ytDownloadTasks[i].channel)
               daemon.lib.updateTrackPath(dlUrl, path, daemon.ytDownloadTasks[i].title)
-              # Add as a new library track if not already present
               let existingId = daemon.lib.findTrackByPath(path)
               if existingId == 0:
                 discard daemon.lib.addTrack(path, daemon.ytDownloadTasks[i].title,
                   daemon.ytDownloadTasks[i].channel, "", 0.0, 0, 0, "")
             let ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "yt_download_done", "url": %dlUrl, "path": %path, "title": %daemon.ytDownloadTasks[i].title}]}
-            daemon.broadcastAll($ev & "\n")
-      else:
-        dlDone.add(i)
+            daemon.broadcastJson(ev)
     for i in countdown(dlDone.len - 1, 0):
       daemon.ytDownloadTasks.delete(dlDone[i])
 
-    # yt-dlp stream URL resolution for queue items
+    # yt-dlp stream URL resolution (for queue items — writes ytStreamResolvedFor/Url)
     if daemon.ytStreamResolving:
       if not daemon.ytStreamResolveProcess.running():
         let url = pollStreamUrlFetch(daemon.ytStreamResolveProcess, daemon.ytStreamResolveBuf)
@@ -1796,7 +2385,7 @@ proc runDaemon*() =
           daemon.ytStreamResolvedUrl = url
           daemon.ytStreamResolveUrl = ""
 
-    # Auto-poll yt-dlp search results & broadcast via events (no client polling needed)
+    # Auto-poll yt-dlp search results
     if daemon.ytSearchActive:
       let newResults = pollYoutubeSearch(daemon.ytSearchProcess, daemon.ytSearchBuf)
       for r in newResults:
@@ -1806,7 +2395,7 @@ proc runDaemon*() =
         for r in daemon.ytSearchResults:
           arr.add(%*{"title": %r.title, "url": %r.url, "duration": %r.duration, "channel": %r.channel, "kind": %r.kind.int})
         let ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "yt_search_partial", "results": arr}]}
-        daemon.broadcastAll($ev & "\n")
+        daemon.broadcastJson(ev)
       if not daemon.ytSearchProcess.running():
         let finalResults = finishYoutubeSearch(daemon.ytSearchProcess, daemon.ytSearchBuf)
         for r in finalResults:
@@ -1817,10 +2406,10 @@ proc runDaemon*() =
         for r in daemon.ytSearchResults:
           arr.add(%*{"title": %r.title, "url": %r.url, "duration": %r.duration, "channel": %r.channel, "kind": %r.kind.int})
         let ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "yt_search_done", "results": arr}]}
-        daemon.broadcastAll($ev & "\n")
+        daemon.broadcastJson(ev)
         daemon.ytSearchResults = @[]
 
-    # Auto-poll yt-dlp playlist fetch results & broadcast via events
+    # Auto-poll yt-dlp playlist fetch results
     if daemon.ytPlaylistActive:
       let newTracks = pollPlaylistFetch(daemon.ytPlaylistProcess, daemon.ytPlaylistBuf)
       for t in newTracks:
@@ -1829,7 +2418,6 @@ proc runDaemon*() =
         let finalTracks = finishPlaylistFetch(daemon.ytPlaylistProcess, daemon.ytPlaylistBuf)
         for t in finalTracks:
           daemon.ytPlaylistResult.tracks.add(t)
-        # Parse title/channel from first result
         if daemon.ytPlaylistResult.tracks.len > 0:
           let first = daemon.ytPlaylistResult.tracks[0]
           if daemon.ytPlaylistResult.title.len == 0:
@@ -1837,15 +2425,14 @@ proc runDaemon*() =
             daemon.ytPlaylistResult.channel = first.channel
         daemon.ytPlaylistActive = false
         daemon.ytPlaylistBuf = ""
-        # Broadcast playlist fetched event
         var tracksArr = newJArray()
         for t in daemon.ytPlaylistResult.tracks:
           tracksArr.add(%*{"title": %t.title, "url": %t.url, "duration": %t.duration, "channel": %t.channel, "kind": %t.kind.int})
         let ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "yt_playlist_fetched",
           "title": %daemon.ytPlaylistResult.title, "tracks": tracksArr}]}
-        daemon.broadcastAll($ev & "\n")
+        daemon.broadcastJson(ev)
 
-    # Auto-poll explicit stream URL resolution (for user-initiated "Play" on search result)
+    # Auto-poll explicit stream URL resolution
     if daemon.ytStreamActive:
       if not daemon.ytStreamProcess.running():
         daemon.ytStreamResultUrl = pollStreamUrlFetch(daemon.ytStreamProcess, daemon.ytStreamBuf)
@@ -1855,73 +2442,8 @@ proc runDaemon*() =
           "url": %daemon.ytStreamResultUrl,
           "title": %daemon.ytStreamPendingTitle,
           "channel": %daemon.ytStreamPendingChannel}]}
-        daemon.broadcastAll($ev & "\n")
+        daemon.broadcastJson(ev)
 
-    # Retry advancing if player stopped with items pending (e.g. waiting for YT download)
-    try:
-      if daemon.currentTrackPath.len > 0 and daemon.player.state == 0 and daemon.playbackQueue.len > 0:
-        if daemon.advanceToNextTrack(true):
-          daemon.sendQueueEvent()
-    except Exception as ex:
-      if debugMode: stderr.writeLine("[gtmd] retry advance error: " & ex.msg)
-
-    # Determine next queue path for up_next and crossfade scheduling
-    var nextQueuedPath = ""
-    if daemon.player.state == 1:
-      if daemon.shuffleEnabled and daemon.shuffleOrder.len > 0 and daemon.shuffleIndex < daemon.shuffleOrder.len:
-        nextQueuedPath = daemon.playbackQueue[daemon.shuffleOrder[daemon.shuffleIndex]]
-      elif not daemon.shuffleEnabled and daemon.playbackQueue.len > 0:
-        nextQueuedPath = daemon.playbackQueue[0]
-
-    # Send "up_next" notification when near end of current track
-    try:
-      if nextQueuedPath.len > 0 and not daemon.upNextSent:
-        let dur = daemon.player.duration
-        let tpos = daemon.player.timePos
-        if dur > 0.0 and tpos >= 0.0:
-          let timeRemaining = dur - tpos
-          if timeRemaining <= 8.0 and timeRemaining > 0.0:
-            daemon.upNextSent = true
-            var nextTitle = ""; var nextChannel = ""
-            if isYtWatchUrl(nextQueuedPath) and daemon.lib != nil:
-              let meta = daemon.lib.getDownloadMetaByUrl(nextQueuedPath)
-              nextTitle = meta.title; nextChannel = meta.channel
-            let ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "up_next",
-              "next_path": %nextQueuedPath, "next_title": %nextTitle, "next_channel": %nextChannel}]}
-            daemon.broadcastAll($ev & "\n")
-    except Exception as ex:
-      if debugMode: stderr.writeLine("[gtmd] up_next error: " & ex.msg)
-
-    # Crossfade scheduling
-    try:
-      if daemon.player.state == 1 and daemon.crossfadeDuration > 0:
-        if nextQueuedPath.len > 0:
-          let dur = daemon.player.duration
-          let tpos = daemon.player.timePos
-          if dur > 0.0 and tpos >= 0.0:
-            let timeRemaining = dur - tpos
-            if timeRemaining > 0.0:
-              let prepareThreshold = float(daemon.crossfadeDuration) + 2.0
-              if not daemon.crossfadePrepared and timeRemaining <= prepareThreshold:
-                var loadNextPath = nextQueuedPath
-                if isYtWatchUrl(nextQueuedPath) and daemon.lib != nil:
-                  let meta = daemon.lib.getDownloadMetaByUrl(nextQueuedPath)
-                  if meta.path.len > 0:
-                    loadNextPath = meta.path
-                  elif daemon.ytStreamResolvedFor == nextQueuedPath and daemon.ytStreamResolvedUrl.len > 0:
-                    loadNextPath = daemon.ytStreamResolvedUrl
-                daemon.player.prepareNext(loadNextPath)
-                daemon.crossfadePrepared = true
-                daemon.crossfadeNextPath = loadNextPath
-              if daemon.crossfadePrepared and not daemon.crossfadeStarted and timeRemaining <= float(daemon.crossfadeDuration):
-                daemon.upNextSent = true
-                if daemon.shuffleEnabled and not daemon.crossfadeConsumed:
-                  daemon.crossfadeConsumed = true
-                  daemon.shuffleIndex.inc
-                daemon.player.startCrossfade(float(daemon.crossfadeDuration))
-                daemon.crossfadeStarted = true
-    except Exception as ex:
-      if debugMode: stderr.writeLine("[gtmd] crossfade error: " & ex.msg)
     # Background scan: process up to 10 files per iteration
     if daemon.scanningDir.len > 0 and daemon.scanningFiles.len > 0:
       let batchEnd = min(daemon.scanningIdx + 10, daemon.scanningFiles.len)
@@ -1936,8 +2458,68 @@ proc runDaemon*() =
         daemon.scanningFiles = @[]
         daemon.scanningIdx = 0
         let ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "scan_done"}]}
-        daemon.broadcastAll($ev & "\n")
+        daemon.broadcastJson(ev)
 
+    # --- Duration monitoring ---
+    let currentDur = daemon.playerDuration
+    if currentDur > 0 and abs(currentDur - daemon.lastTrackDuration) > 0.5:
+      daemon.lastTrackDuration = currentDur
+      daemon.stateVersion.inc
+      let durEv = %*{"events": [%*{"kind": %evDurationChanged.int, "duration": %currentDur, "version": %daemon.stateVersion}]}
+      daemon.broadcastJson(durEv)
+
+    # --- up_next notification + crossfade scheduling (snapshot-based) ---
+    var nextQueuedPath = ""
+    if daemon.playerState == 1:
+      if daemon.shuffleEnabled and daemon.shuffleOrder.len > 0 and daemon.shuffleIndex < daemon.shuffleOrder.len:
+        nextQueuedPath = daemon.playbackQueue[daemon.shuffleOrder[daemon.shuffleIndex]]
+      elif not daemon.shuffleEnabled and daemon.playbackQueue.len > 0:
+        nextQueuedPath = daemon.playbackQueue[0]
+
+    if nextQueuedPath.len > 0 and not daemon.upNextSent:
+      let dur = daemon.playerDuration
+      let tpos = daemon.playerTimePos
+      if dur > 0.0 and tpos >= 0.0:
+        let timeRemaining = dur - tpos
+        if timeRemaining <= 8.0 and timeRemaining > 0.0:
+          daemon.upNextSent = true
+          var nextTitle = ""; var nextChannel = ""
+          if isYtWatchUrl(nextQueuedPath) and daemon.lib != nil:
+            let meta = daemon.lib.getDownloadMetaByUrl(nextQueuedPath)
+            nextTitle = meta.title; nextChannel = meta.channel
+          let ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "up_next",
+            "next_path": %nextQueuedPath, "next_title": %nextTitle, "next_channel": %nextChannel}]}
+          daemon.broadcastJson(ev)
+
+    # Crossfade scheduling
+    if daemon.playerState == 1 and daemon.crossfadeDuration > 0 and nextQueuedPath.len > 0 and not isYtWatchUrl(nextQueuedPath):
+      let dur = daemon.playerDuration
+      let tpos = daemon.playerTimePos
+      if dur > 0.0 and tpos >= 0.0:
+        let timeRemaining = dur - tpos
+        if timeRemaining > 0.0:
+          let prepareThreshold = float(daemon.crossfadeDuration) + 2.0
+          if not daemon.crossfadePrepared and timeRemaining <= prepareThreshold:
+            acquire(daemon.lock)
+            daemon.pendingActions.add(PulseAction(kind: pakPrepareNext, strVal: nextQueuedPath))
+            release(daemon.lock)
+            daemon.crossfadePrepared = true
+            daemon.crossfadeNextPath = nextQueuedPath
+          if daemon.crossfadePrepared and not daemon.crossfadeStarted and timeRemaining <= float(daemon.crossfadeDuration):
+            daemon.upNextSent = true
+            if daemon.shuffleEnabled and not daemon.crossfadeConsumed:
+              daemon.crossfadeConsumed = true
+              daemon.shuffleIndex.inc
+            acquire(daemon.lock)
+            daemon.pendingActions.add(PulseAction(kind: pakStartCrossfade, floatVal: float(daemon.crossfadeDuration)))
+            release(daemon.lock)
+            daemon.crossfadeStarted = true
+
+    # --- Retry advance: player stopped but queue has items ---
+    if daemon.currentTrackPath.len > 0 and daemon.playerState == 0 and daemon.playbackQueue.len > 0:
+      handleAutoAdvance(daemon)
+
+    # --- Sleep timer ---
     if daemon.sleepTimerRemaining > 0:
       daemon.sleepTimerFrames.inc
       if daemon.sleepTimerFrames >= 60:
@@ -1949,9 +2531,12 @@ proc runDaemon*() =
             shutdownMpris()
           if daemon.lib != nil:
             daemon.lib.closeDb()
-          daemon.player.shutdown()
+          acquire(daemon.lock)
+          daemon.pendingActions.add(PulseAction(kind: pakShutdown))
+          release(daemon.lock)
           daemon.running = false
           break
+
     daemon.persistFrames.inc
     if daemon.persistFrames >= 1800:
       daemon.persistFrames = 0
@@ -1963,17 +2548,15 @@ proc runDaemon*() =
         for item in daemon.lib.purgeExpiredTrash():
           if fileExists(item.trashPath):
             try: removeFile(item.trashPath) except: discard
-    daemon.idleFrames.inc
-    if daemon.player != nil and daemon.idleFrames > daemon.idleTimeout * 60 and daemon.player.state == 0:
-      daemon.savePlaybackState()
-      shutdownMpris()
-      shutdownNotifications()
-      if daemon.lib != nil:
-        daemon.lib.closeDb()
-      daemon.player.shutdown()
-      break
+
+  # Cleanup: join pulse thread + notify thread, close sockets, remove PID
+  pulseThread.joinThread()
+  notifyChan.send(("", ""))  # poison pill
+  notifyThread.joinThread()
+  notifyChan.close()
   for c in daemon.clients:
     try: c.sock.close() except: discard
   daemon.server.close()
   removeFile(sockPath())
   removePidFile()
+  deinitLock(daemonLock)

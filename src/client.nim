@@ -147,14 +147,17 @@ proc drainEventLinesFromJson(j: JsonNode, cli: DaemonClient) =
     else: discard
     cli.drainedEvents.add(ev)
 
+proc readLineFromBuf(buf: var string): string =
+  let nli = buf.find('\n')
+  if nli < 0: return ""
+  result = buf[0..<nli]
+  buf = buf[nli+1..^1]
+
 proc drainEventLines(cli: DaemonClient, buf: var string) =
   cli.drainedEvents = @[]
   while true:
-    let nli = buf.find('\n')
-    if nli < 0: break
-    let line = buf[0..<nli]
-    buf = buf[nli+1..^1]
-    if line.len == 0: continue
+    let line = readLineFromBuf(buf)
+    if line.len == 0: break
     try:
       let j = parseJson(line)
       if not j.hasKey("events"):
@@ -167,44 +170,47 @@ proc drainEventLines(cli: DaemonClient, buf: var string) =
 
 proc clearPending*(cli: DaemonClient)
 
+proc readAvailable(cli: DaemonClient, timeoutUsec: int): int =
+  ## Returns bytes read (>0), 0 on timeout, -1 on disconnect
+  var tmp: array[16384, char]
+  var rfds: posix.TFdSet
+  FD_ZERO(rfds)
+  FD_SET(cli.sock.getFd, rfds)
+  var tv: posix.Timeval
+  tv.tv_sec = 0.Time
+  tv.tv_usec = timeoutUsec.Suseconds
+  let sel = posix.select(cint(int(cli.sock.getFd) + 1), addr(rfds), nil, nil, addr(tv))
+  if sel <= 0: return 0
+  let n = posix.recv(cli.sock.getFd, addr tmp[0], tmp.len, 0.cint)
+  if n > 0:
+    let old = cli.buf.len; cli.buf.setLen(old + n); copyMem(addr cli.buf[old], addr tmp[0], n)
+    return n
+  return if n == 0: -1 else: n
+
 proc sendDaemonCmd*(cli: DaemonClient, cmd: JsonNode): JsonNode =
+  cli.ensureDaemon()
   if cli == nil or cli.sock == nil or not cli.connected: return %*{"ok": false, "error": "not connected"}
   try:
     drainEventLines(cli, cli.buf)
     let seqNo = cli.nextSeq
     cli.nextSeq.inc
     cmd["seq"] = %seqNo
-    let data = $cmd & "\n"
-    cli.sock.send(data)
-    var tmp: array[16384, char]
+    cli.sock.send($cmd & "\n")
     let timeout = if cli.ipcTimeoutSec > 0: cli.ipcTimeoutSec else: 3.0
     var totalWait = 0.0
     while totalWait < timeout:
-      var rfds: posix.TFdSet
-      FD_ZERO(rfds)
-      FD_SET(cli.sock.getFd, rfds)
-      var tv: posix.Timeval
-      tv.tv_sec = 0.Time
-      tv.tv_usec = 100_000.Suseconds
-      let sel = posix.select(cint(int(cli.sock.getFd) + 1), addr(rfds), nil, nil, addr(tv))
-      if sel > 0:
-        let n = posix.recv(cli.sock.getFd, addr tmp[0], tmp.len, 0.cint)
-        if n > 0:
-          let old = cli.buf.len; cli.buf.setLen(old + n); copyMem(addr cli.buf[old], addr tmp[0], n)
-        elif n == 0:
-          cli.connected = false
-          cli.clearPending()
-          return %*{"ok": false, "error": "connection closed"}
-      while true:
-        let nli = cli.buf.find('\n')
-        if nli < 0: break
-        let line = cli.buf[0..<nli]
-        cli.buf = cli.buf[nli+1..^1]
+      let n = readAvailable(cli, 100_000)
+      if n < 0:
+        cli.connected = false
+        cli.clearPending()
+        return %*{"ok": false, "error": "connection closed"}
+      while n > 0:
+        let line = readLineFromBuf(cli.buf)
+        if line.len == 0: break
         if line.len == 0: continue
         let j = parseJson(line)
         if j.hasKey("seq") and j["seq"].getInt(-1) == seqNo:
           return j
-        # Drain events into drainedEvents instead of discarding them
         if j.hasKey("events"):
           drainEventLinesFromJson(j, cli)
           continue
@@ -216,19 +222,18 @@ proc sendDaemonCmd*(cli: DaemonClient, cmd: JsonNode): JsonNode =
   return %*{"ok": false, "error": "no response"}
 
 proc sendOnly*(cli: DaemonClient, cmd: JsonNode) =
+  cli.ensureDaemon()
   if cli == nil or cli.sock == nil or not cli.connected: return
   try:
     drainEventLines(cli, cli.buf)
     cmd["seq"] = %cli.nextSeq
     cli.nextSeq.inc
-    let data = $cmd & "\n"
-    cli.sock.send(data)
+    cli.sock.send($cmd & "\n")
   except:
     cli.connected = false
     cli.clearPending()
 
 proc daemonSimpleCmd*(cli: DaemonClient, cmd: string): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": cmd})
 
 proc sendAsync*(cli: DaemonClient, cmd: JsonNode, callback: proc(resp: JsonNode) {.closure.}) =
@@ -245,7 +250,6 @@ proc sendAsync*(cli: DaemonClient, cmd: JsonNode, callback: proc(resp: JsonNode)
     discard
 
 method loadFile*(cli: DaemonClient, path: string, title: string = "", channel: string = ""): bool =
-  cli.ensureDaemon()
   let resp = sendDaemonCmd(cli, %*{"cmd": "load_file", "path": path, "title": title, "channel": channel})
   cli.lastTrackId = 0
   if resp.hasKey("track_id"):
@@ -260,61 +264,47 @@ method loadFile*(cli: DaemonClient, path: string, title: string = "", channel: s
   result = resp.hasKey("ok") and resp["ok"].getBool(false)
 
 method play*(cli: DaemonClient) =
-  cli.ensureDaemon()
   cli.sendOnly(%*{"cmd": "play"})
 
 method pause*(cli: DaemonClient) =
-  cli.ensureDaemon()
   cli.sendOnly(%*{"cmd": "pause"})
 
 method stop*(cli: DaemonClient) =
-  cli.ensureDaemon()
   cli.sendOnly(%*{"cmd": "stop"})
 
 method seek*(cli: DaemonClient, seconds: float) =
-  cli.ensureDaemon()
   cli.sendOnly(%*{"cmd": "seek", "seconds": seconds})
 
 method setVolume*(cli: DaemonClient, vol: int) =
-  cli.ensureDaemon()
   if cli.sock == nil: return
   cli.sendOnly(%*{"cmd": "set_volume", "volume": vol})
 
 method prepareNext*(cli: DaemonClient, path: string) =
-  cli.ensureDaemon()
   cli.sendOnly(%*{"cmd": "prepare_next", "path": path})
 
 method getStatusFlags*(cli: DaemonClient): tuple[crossfading, masterEnded: bool] =
-  cli.ensureDaemon()
   let resp = daemonSimpleCmd(cli, "status")
   (resp{"crossfading"}.getBool(false), resp{"master_ended"}.getBool(false))
 
 method startCrossfade*(cli: DaemonClient, durationSeconds: float) {.base.} =
-  cli.ensureDaemon()
   cli.sendOnly(%*{"cmd": "crossfade", "duration": durationSeconds})
 
 method setEqBand*(cli: DaemonClient, band: int, gainDb: float) =
-  cli.ensureDaemon()
   cli.sendOnly(%*{"cmd": "set_eq_band", "band": band, "gain_db": gainDb})
 
 method setEqPreset*(cli: DaemonClient, name: string) =
-  cli.ensureDaemon()
   cli.sendOnly(%*{"cmd": "set_eq_preset", "name": name})
 
 method setSpatialWidth*(cli: DaemonClient, width: float) =
-  cli.ensureDaemon()
   cli.sendOnly(%*{"cmd": "set_spatial_width", "width": width})
 
 method setCrossfadeDuration*(cli: DaemonClient, duration: int) {.base.} =
-  cli.ensureDaemon()
   cli.sendOnly(%*{"cmd": "set_crossfade_duration", "duration": duration})
 
 method setCrossfadeCurve*(cli: DaemonClient, curveType: int) =
-  cli.ensureDaemon()
   cli.sendOnly(%*{"cmd": "set_crossfade_curve", "curve_type": curveType})
 
 method togglePause*(cli: DaemonClient) =
-  cli.ensureDaemon()
   cli.sendOnly(%*{"cmd": "toggle_pause"})
 
 method pollEvents*(cli: DaemonClient): seq[AudioEvent] =
@@ -322,24 +312,10 @@ method pollEvents*(cli: DaemonClient): seq[AudioEvent] =
   cli.drainedEvents = @[]
   if not cli.connected: return
   try:
-    var tmp: array[16384, char]
-    var rfds: posix.TFdSet
-    FD_ZERO(rfds)
-    FD_SET(cli.sock.getFd, rfds)
-    var tv: posix.Timeval
-    tv.tv_sec = 0.Time
-    tv.tv_usec = 0.Suseconds
-    let sel = posix.select(cint(int(cli.sock.getFd) + 1), addr(rfds), nil, nil, addr(tv))
-    if sel > 0:
-      let n = posix.recv(cli.sock.getFd, addr tmp[0], tmp.len, 0.cint)
-      if n > 0:
-        let old = cli.buf.len; cli.buf.setLen(old + n); copyMem(addr cli.buf[old], addr tmp[0], n)
+    discard readAvailable(cli, 0)
     while true:
-      let nli = cli.buf.find('\n')
-      if nli < 0: break
-      let line = cli.buf[0..<nli]
-      cli.buf = cli.buf[nli+1..^1]
-      if line.len == 0: continue
+      let line = readLineFromBuf(cli.buf)
+      if line.len == 0: break
       let json = parseJson(line)
       if json.hasKey("events"):
         let prevDrained = cli.drainedEvents.len
@@ -386,7 +362,6 @@ method pollEvents*(cli: DaemonClient): seq[AudioEvent] =
     cli.clearPending()
 
 method getVolume*(cli: DaemonClient): int =
-  cli.ensureDaemon()
   let resp = daemonSimpleCmd(cli, "get_volume")
   if resp.hasKey("volume"):
     return resp["volume"].getInt(80)
@@ -405,221 +380,180 @@ proc sendQuitDaemon*(cli: DaemonClient) =
   sendOnly(cli, %*{"cmd": "quit"})
 
 proc createPlaylist*(cli: DaemonClient, name: string): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "create_playlist", "name": name})
 
 proc deletePlaylist*(cli: DaemonClient, playlistId: int64): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "delete_playlist", "playlist_id": playlistId})
 
 proc renamePlaylist*(cli: DaemonClient, playlistId: int64, name: string): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "rename_playlist", "playlist_id": playlistId, "name": name})
 
 proc addToPlaylist*(cli: DaemonClient, playlistId, trackId: int64, position: int = 0): JsonNode =
-  cli.ensureDaemon()
   let data = %*{"playlist_id": playlistId, "track_id": trackId, "position": position}
   sendDaemonCmd(cli, %*{"cmd": "add_to_playlist", "data": data})
 
 proc removeFromPlaylist*(cli: DaemonClient, playlistId, trackId: int64): JsonNode =
-  cli.ensureDaemon()
   let data = %*{"playlist_id": playlistId, "track_id": trackId}
   sendDaemonCmd(cli, %*{"cmd": "remove_from_playlist", "data": data})
 
 proc listPlaylists*(cli: DaemonClient): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "list_playlists"})
 
 proc getPlaylistTracks*(cli: DaemonClient, playlistId: int64): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "get_playlist_tracks", "playlist_id": playlistId})
 
 proc setShuffle*(cli: DaemonClient, enabled: bool): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "set_shuffle", "enabled": enabled.int})
 
 proc setRepeat*(cli: DaemonClient, mode: int): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "set_repeat", "mode": mode})
 
 proc setSleepTimer*(cli: DaemonClient, minutes: int): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "set_sleep_timer", "minutes": minutes})
 
 proc getDaemonState*(cli: DaemonClient): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "get_state"})
 
 proc resumePlayback*(cli: DaemonClient): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "resume"})
 
 proc getLibrary*(cli: DaemonClient): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "get_library"})
 
 proc addTrack*(cli: DaemonClient, data: JsonNode): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "add_track", "data": data})
 
 proc updateTrackPath*(cli: DaemonClient, oldPath, newPath, newTitle: string): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "update_track_path", "data": {"old_path": oldPath, "new_path": newPath, "title": newTitle}})
 
 proc scanDir*(cli: DaemonClient, path: string): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "scan", "path": path})
 
 proc queueAdd*(cli: DaemonClient, items: seq[tuple[path, title, channel: string]]): JsonNode =
-  cli.ensureDaemon()
   var arr = newJArray()
   for (path, title, channel) in items:
     arr.add(%*{"path": path, "title": title, "channel": channel})
   sendDaemonCmd(cli, %*{"cmd": "queue_add", "data": arr})
 
 proc queueRemove*(cli: DaemonClient, index: int): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "queue_remove", "index": index})
 
 proc queueRemovePath*(cli: DaemonClient, path: string): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "queue_remove_path", "path": path})
 
 proc queueClear*(cli: DaemonClient): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "queue_clear"})
 
 proc queueValidate*(cli: DaemonClient): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "queue_validate"})
 
 proc queueList*(cli: DaemonClient): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "queue_list"})
 
 proc queueSetCursor*(cli: DaemonClient, index: int): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "queue_set_cursor", "index": index})
 
 proc addFavourite*(cli: DaemonClient, trackId: int64): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "add_favourite", "track_id": trackId})
 
 proc removeFavourite*(cli: DaemonClient, trackId: int64): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "remove_favourite", "track_id": trackId})
 
 proc getFavouritesFromDaemon*(cli: DaemonClient): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "get_favourites"})
 
 proc getFullState*(cli: DaemonClient): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "get_full_state"})
 
 proc ytSearch*(cli: DaemonClient, query: string, pageSize: int = 10) =
-  cli.ensureDaemon()
   sendOnly(cli, %*{"cmd": "yt_search", "query": query, "page_size": pageSize})
 
 proc ytSearchPoll*(cli: DaemonClient): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "yt_search_poll"})
 
 proc ytSearchCancel*(cli: DaemonClient) =
-  cli.ensureDaemon()
   sendOnly(cli, %*{"cmd": "yt_search_cancel"})
 
 proc ytResolveStream*(cli: DaemonClient, url: string): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "yt_resolve_stream", "url": url})
 
 proc ytResolveStreamPoll*(cli: DaemonClient): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "yt_resolve_stream_poll"})
 
 proc ytDownload*(cli: DaemonClient, url, title, channel: string): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "yt_download", "url": url, "title": title, "channel": channel})
 
 proc ytDownloadPoll*(cli: DaemonClient): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "yt_download_poll"})
 
 proc ytCancelDownload*(cli: DaemonClient, url: string): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "yt_cancel_download", "url": url})
 
 proc ytListDownloads*(cli: DaemonClient): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "yt_list_downloads"})
 
 proc ytFetchPlaylist*(cli: DaemonClient, url: string): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "yt_fetch_playlist", "url": url})
 
 proc ytFetchPlaylistPoll*(cli: DaemonClient): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "yt_fetch_playlist_poll"})
 
 proc ping*(cli: DaemonClient): bool =
-  cli.ensureDaemon()
   let resp = sendDaemonCmd(cli, %*{"cmd": "ping"})
   result = resp.hasKey("pong") and resp["pong"].getBool(false)
 
 proc ytSetConfig*(cli: DaemonClient, cookieSource, jsRuntime, downloadDir: string, maxConcurrent: int): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "yt_set_config", "cookie_source": cookieSource, "js_runtime": jsRuntime, "download_dir": downloadDir, "max_concurrent": maxConcurrent})
 
 proc ytGetSearchHistory*(cli: DaemonClient): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "yt_get_search_history"})
 
 proc ytClearSearchHistory*(cli: DaemonClient): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "yt_clear_search_history"})
 
 proc spSetConfig*(cli: DaemonClient, cookieSource, cookiePath, audioFormat: string): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "sp_set_config", "cookie_source": cookieSource, "cookie_path": cookiePath, "audio_format": audioFormat})
 
 proc spListDownloads*(cli: DaemonClient): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "sp_list_downloads"})
 
+proc spOAuthUrl*(cli: DaemonClient): JsonNode =
+  sendDaemonCmd(cli, %*{"cmd": "sp_oauth_url"})
+
+proc spOAuthCallback*(cli: DaemonClient, code: string): JsonNode =
+  sendDaemonCmd(cli, %*{"cmd": "sp_oauth_callback", "code": code})
+
+proc spFeed*(cli: DaemonClient): JsonNode =
+  sendDaemonCmd(cli, %*{"cmd": "sp_feed"})
+
+proc spDisconnect*(cli: DaemonClient): JsonNode =
+  sendDaemonCmd(cli, %*{"cmd": "sp_disconnect"})
+
 proc getCoverArt*(cli: DaemonClient, path: string): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "get_cover_art", "path": path})
 
 proc getLyrics*(cli: DaemonClient, path, title, artist, album: string, duration: float): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "get_lyrics", "path": path, "title": title, "artist": artist, "album": album, "duration": duration})
 
 proc searchLyrics*(cli: DaemonClient, title, artist: string): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "search_lyrics", "title": title, "artist": artist})
 
 proc getEqPresets*(cli: DaemonClient): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "list_eq_presets"})
 
 proc deleteTrack*(cli: DaemonClient, trackId: int64, permanent: bool = false): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "delete_track", "track_id": trackId, "permanent": permanent.int})
 
 proc restoreTrack*(cli: DaemonClient, trashId: int): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "restore_track", "trash_id": trashId})
 
 proc permanentDeleteTrash*(cli: DaemonClient, trashId: int): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "permanent_delete_trash", "trash_id": trashId})
 
 proc listTrash*(cli: DaemonClient): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "list_trash"})
 
 proc purgeTrash*(cli: DaemonClient): JsonNode =
-  cli.ensureDaemon()
   sendDaemonCmd(cli, %*{"cmd": "purge_trash"})
 
 proc newDaemonClient*(): DaemonClient =

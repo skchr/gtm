@@ -5,6 +5,8 @@ switch("outdir", "bin")
 switch("define", "useFFmpeg")
 switch("define", "useSqlite")
 switch("define", "ssl")
+switch("threads", "on")
+switch("threadAnalysis", "off")
 
 let projectDir = currentSourcePath().parentDir()
 
@@ -26,12 +28,13 @@ switch("define", "gtmVersion:" & gitVersion())
 when defined(useSqlite):
   switch("passC", "-I" & projectDir / "vendor/sqlite")
 
-# Optional MPRIS support via libdbus-1 + nim-dbus
-when (staticExec("pkg-config --exists dbus-1 2>/dev/null && echo yes || echo no").strip == "yes"):
-  switch("define", "useMpris")
-  switch("passC", staticExec("pkg-config --cflags dbus-1").strip)
-  switch("passL", staticExec("pkg-config --libs dbus-1").strip)
-  # nim-dbus source path (cloned from https://github.com/zielmicha/nim-dbus)
-  const nimDbusPath {.strdefine.} = "/tmp/nim-dbus"
-  if dirExists(nimDbusPath):
-    switch("path", nimDbusPath)
+# Optional MPRIS support via libdbus-1 + nim-dbus (not on Android/Termux)
+when not defined(android) and not defined(termux):
+  when (staticExec("pkg-config --exists dbus-1 2>/dev/null && echo yes || echo no").strip == "yes"):
+    switch("define", "useMpris")
+    switch("passC", staticExec("pkg-config --cflags dbus-1").strip)
+    switch("passL", staticExec("pkg-config --libs dbus-1").strip)
+    # nim-dbus source path (cloned from https://github.com/zielmicha/nim-dbus)
+    const nimDbusPath {.strdefine.} = "/tmp/nim-dbus"
+    if dirExists(nimDbusPath):
+      switch("path", nimDbusPath)

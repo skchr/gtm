@@ -1,6 +1,8 @@
-import os, strutils
+import os, strutils, tables
 
 type
+  IconPreference* = enum ipAuto, ipNerdFont, ipEmoji
+
   IconPack* = object
     play*, pause*, stop*, nextTrack*, prevTrack*: string
     volumeHigh*, volumeMedium*, volumeLow*, volumeMuted*: string
@@ -43,6 +45,8 @@ proc emojiIcons*(): IconPack =
 var
   gNerdFontDetected*: bool = false
   gNerdDetectionDone: bool = false
+  gIconPreference*: IconPreference = ipAuto
+  gIconOverrides*: TableRef[string, string] = nil
 
 proc detectNerdFonts*(): bool =
   if gNerdDetectionDone:
@@ -73,8 +77,65 @@ proc detectNerdFonts*(): bool =
   gNerdFontDetected = false
   return false
 
+proc setIconPreference*(pref: IconPreference) =
+  gIconPreference = pref
+  gNerdDetectionDone = false
+
+proc setIconOverrides*(overrides: TableRef[string, string]) =
+  gIconOverrides = overrides
+
+proc applyOverrides(pack: IconPack): IconPack =
+  result = pack
+  if gIconOverrides == nil: return
+  if gIconOverrides.hasKey("play"): result.play = gIconOverrides["play"]
+  if gIconOverrides.hasKey("pause"): result.pause = gIconOverrides["pause"]
+  if gIconOverrides.hasKey("stop"): result.stop = gIconOverrides["stop"]
+  if gIconOverrides.hasKey("nextTrack"): result.nextTrack = gIconOverrides["nextTrack"]
+  if gIconOverrides.hasKey("prevTrack"): result.prevTrack = gIconOverrides["prevTrack"]
+  if gIconOverrides.hasKey("volumeHigh"): result.volumeHigh = gIconOverrides["volumeHigh"]
+  if gIconOverrides.hasKey("volumeMedium"): result.volumeMedium = gIconOverrides["volumeMedium"]
+  if gIconOverrides.hasKey("volumeLow"): result.volumeLow = gIconOverrides["volumeLow"]
+  if gIconOverrides.hasKey("volumeMuted"): result.volumeMuted = gIconOverrides["volumeMuted"]
+  if gIconOverrides.hasKey("music"): result.music = gIconOverrides["music"]
+  if gIconOverrides.hasKey("artist"): result.artist = gIconOverrides["artist"]
+  if gIconOverrides.hasKey("album"): result.album = gIconOverrides["album"]
+  if gIconOverrides.hasKey("playlist"): result.playlist = gIconOverrides["playlist"]
+  if gIconOverrides.hasKey("search"): result.search = gIconOverrides["search"]
+  if gIconOverrides.hasKey("heart"): result.heart = gIconOverrides["heart"]
+  if gIconOverrides.hasKey("shuffle"): result.shuffle = gIconOverrides["shuffle"]
+  if gIconOverrides.hasKey("repeatOne"): result.repeatOne = gIconOverrides["repeatOne"]
+  if gIconOverrides.hasKey("repeatAll"): result.repeatAll = gIconOverrides["repeatAll"]
+  if gIconOverrides.hasKey("queue"): result.queue = gIconOverrides["queue"]
+  if gIconOverrides.hasKey("library"): result.library = gIconOverrides["library"]
+  if gIconOverrides.hasKey("settings"): result.settings = gIconOverrides["settings"]
+  if gIconOverrides.hasKey("help"): result.help = gIconOverrides["help"]
+  if gIconOverrides.hasKey("checkmark"): result.checkmark = gIconOverrides["checkmark"]
+  if gIconOverrides.hasKey("cross"): result.cross = gIconOverrides["cross"]
+  if gIconOverrides.hasKey("arrowUp"): result.arrowUp = gIconOverrides["arrowUp"]
+  if gIconOverrides.hasKey("arrowDown"): result.arrowDown = gIconOverrides["arrowDown"]
+  if gIconOverrides.hasKey("arrowLeft"): result.arrowLeft = gIconOverrides["arrowLeft"]
+  if gIconOverrides.hasKey("arrowRight"): result.arrowRight = gIconOverrides["arrowRight"]
+  if gIconOverrides.hasKey("musicNote"): result.musicNote = gIconOverrides["musicNote"]
+  if gIconOverrides.hasKey("disk"): result.disk = gIconOverrides["disk"]
+  if gIconOverrides.hasKey("headphone"): result.headphone = gIconOverrides["headphone"]
+  if gIconOverrides.hasKey("speaker"): result.speaker = gIconOverrides["speaker"]
+  if gIconOverrides.hasKey("commandPalette"): result.commandPalette = gIconOverrides["commandPalette"]
+  if gIconOverrides.hasKey("filter"): result.filter = gIconOverrides["filter"]
+  if gIconOverrides.hasKey("selectMode"): result.selectMode = gIconOverrides["selectMode"]
+  if gIconOverrides.hasKey("track"): result.track = gIconOverrides["track"]
+  if gIconOverrides.hasKey("time"): result.time = gIconOverrides["time"]
+  if gIconOverrides.hasKey("folder"): result.folder = gIconOverrides["folder"]
+  if gIconOverrides.hasKey("file"): result.file = gIconOverrides["file"]
+
 proc currentIcons*(): IconPack =
-  if detectNerdFonts():
-    nerdFontIcons()
-  else:
-    emojiIcons()
+  result =
+    if gIconPreference == ipEmoji:
+      emojiIcons()
+    elif gIconPreference == ipNerdFont:
+      nerdFontIcons()
+    elif detectNerdFonts():
+      nerdFontIcons()
+    else:
+      emojiIcons()
+  if gIconOverrides != nil:
+    result = applyOverrides(result)

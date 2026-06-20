@@ -13,10 +13,14 @@
 #include <libavutil/channel_layout.h>
 #include <libavutil/error.h>
 #include <libswresample/swresample.h>
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(__ANDROID__)
 #include <alsa/asoundlib.h>
 #endif
 #include <math.h>
+
+#if !defined(__APPLE__) && !defined(__ANDROID__)
+#define HAS_ALSA 1
+#endif
 
 #define PCM_RING_SIZE (16384)
 
@@ -39,7 +43,7 @@ typedef struct {
   volatile double   seek_target;
   double            current_time;
 
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(__ANDROID__)
   snd_pcm_t*        alsa_handle;
 #endif
   int               alsa_open;
@@ -62,7 +66,7 @@ typedef struct {
   pthread_mutex_t   mutex;
 } FfmpegAudioCtx;
 
-#ifndef __APPLE__
+#ifdef HAS_ALSA
 static int alsa_open_device(FfmpegAudioCtx* ctx) {
   snd_pcm_hw_params_t* hw;
   unsigned int rate = ctx->sample_rate;
@@ -117,7 +121,7 @@ static int probe_alsa_default(void) { return 0; }
 FfmpegAudioCtx* ffmpeg_audio_init(void) {
   FfmpegAudioCtx* ctx = calloc(1, sizeof(FfmpegAudioCtx));
   if (!ctx) return NULL;
-#ifndef __APPLE__
+#ifdef HAS_ALSA
   if (!probe_alsa_default()) {
     fprintf(stderr, "[ffmpeg] ALSA default device not available\n");
     free(ctx);
@@ -358,14 +362,14 @@ static void* decode_thread(void* arg) {
         if (ctx->fade_out_remaining <= 0) {
           ctx->paused = 1;
           ctx->playing = 0;
-#ifndef __APPLE__
+#ifdef HAS_ALSA
           if (ctx->alsa_open) { snd_pcm_drop(ctx->alsa_handle); snd_pcm_prepare(ctx->alsa_handle); }
 #endif
           break;
         }
       }
 
-#ifndef __APPLE__
+#ifdef HAS_ALSA
       if (ctx->alsa_open) {
         int fw = snd_pcm_writei(ctx->alsa_handle, conv_buf, conv);
         if (fw < 0) snd_pcm_recover(ctx->alsa_handle, fw, 1);
@@ -419,7 +423,7 @@ void ffmpeg_audio_stop(FfmpegAudioCtx* ctx) {
   if (!ctx) return;
   ctx->playing = 0;
   ctx->paused = 1;
-#ifndef __APPLE__
+#ifdef HAS_ALSA
   if (ctx->alsa_open) {
     snd_pcm_drop(ctx->alsa_handle);
     snd_pcm_prepare(ctx->alsa_handle);
@@ -631,7 +635,7 @@ typedef struct {
   volatile int      playing;
   volatile int      paused;
 
-#ifndef __APPLE__
+#ifdef HAS_ALSA
   snd_pcm_t*        alsa_handle;
 #endif
   int               alsa_open;
@@ -662,7 +666,7 @@ typedef struct {
   SpatialCtx        spatial;
 } MixerCtx;
 
-#ifndef __APPLE__
+#ifdef HAS_ALSA
 static int mixer_alsa_open(MixerCtx* mx) {
   if (!mx->master) { fprintf(stderr, "[ffmpeg] mixer_alsa_open: no master\n"); return 0; }
   snd_pcm_hw_params_t* hw;
@@ -859,14 +863,14 @@ static void* mixer_thread(void* arg) {
           if (mx->fade_out_remaining <= 0) {
             mx->paused = 1;
             mx->playing = 0;
-#ifndef __APPLE__
+#ifdef HAS_ALSA
             if (mx->alsa_open) { snd_pcm_drop(mx->alsa_handle); snd_pcm_prepare(mx->alsa_handle); }
 #endif
             continue;
           }
         }
 
-#ifndef __APPLE__
+#ifdef HAS_ALSA
         if (mx->alsa_open) {
           int fw = snd_pcm_writei(mx->alsa_handle, mixbuf, nsamples / ch);
           if (fw < 0) snd_pcm_recover(mx->alsa_handle, fw, 1);
@@ -956,14 +960,14 @@ static void* mixer_thread(void* arg) {
           if (mx->fade_out_remaining <= 0) {
             mx->paused = 1;
             mx->playing = 0;
-#ifndef __APPLE__
+#ifdef HAS_ALSA
             if (mx->alsa_open) { snd_pcm_drop(mx->alsa_handle); snd_pcm_prepare(mx->alsa_handle); }
 #endif
             continue;
           }
         }
 
-#ifndef __APPLE__
+#ifdef HAS_ALSA
         if (mx->alsa_open && mx->priming) {
         // Accumulate samples to prevent ALSA underrun on slow streams
         if (prime_filled + mtotal > prime_cap) {
@@ -1003,7 +1007,7 @@ static void* mixer_thread(void* arg) {
       }
 #endif
       // On macOS, the non-ALSA branch above handles the ring buffer write
-#ifndef __APPLE__
+#ifdef HAS_ALSA
       // If priming still active, already forwarded samples via prime_buf above
       if (!mx->priming) {
         for (int i = 0; i < mtotal; i++) {
@@ -1029,7 +1033,7 @@ static void* mixer_thread(void* arg) {
 MixerCtx* ffmpeg_mixer_init(void) {
   MixerCtx* mx = calloc(1, sizeof(MixerCtx));
   if (!mx) return NULL;
-#ifndef __APPLE__
+#ifdef HAS_ALSA
   if (!probe_alsa_default()) {
     fprintf(stderr, "[ffmpeg] mixer: ALSA default device not available\n");
     free(mx);
@@ -1118,7 +1122,7 @@ void ffmpeg_mixer_stop(MixerCtx* mx) {
   if (!mx) return;
       mx->playing = 0;
   mx->paused = 1;
-#ifndef __APPLE__
+#ifdef HAS_ALSA
   if (mx->alsa_open) { snd_pcm_drop(mx->alsa_handle); snd_pcm_prepare(mx->alsa_handle); }
 #endif
   mx->current_time = 0.0;

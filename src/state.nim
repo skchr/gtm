@@ -29,9 +29,17 @@
 ## └───────────────────────────────────────────────────────┘
 
 import illwave as iw
-import os, tables, sets, osproc, audio, theme, math, json, options, colors, strutils
+import os, tables, sets, osproc, audio, theme, math, json, options, colors, strutils, icons
+
+const
+  DefaultVolume* = 80
+  CrossfadeCurveLabels* = ["EqualPower", "Quadratic", "Cubic", "Asymmetric"]
+  JsRuntimes* = ["node", "bun", "deno"]
+  SpotifyFormats* = ["opus", "m4a", "best"]
 
 var debugMode*: bool
+
+const ActionDebounceMs* = 150
 
 type
   PlaybackStatus* = enum
@@ -42,6 +50,13 @@ type
     ceSearchResults, ceSearchLoading, ceSettings,
     cePlaylists, ceQueueCursor, ceFeedback, ceDownloadProgress,
     ceReconnecting
+
+  KeyboardMode* = enum
+    kmDesktop, kmTermux
+
+  StartupPhase* = enum
+    spInit, spDaemonConnecting, spConfigLoading, spLibraryLoading,
+    spSpotifySync, spReady
 
   HighlightAttr* = object
     fg*, bg*: Option[colors.Color]
@@ -109,6 +124,15 @@ type
   AppTab* = enum
     tabNowPlaying = 0, tabLibrary, tabSettings
 
+  TabSavedState* = object
+    selectIndex*: int
+    filterText*: string
+    filterScope*: FilterScope
+    librarySidebarSelect*: int
+    playlistContentsIdx*: int
+    settingsCategory*: SettingsCategory
+    settingsFocusPanel*: LibraryPanel
+
   Track* = object
     path*: string
     title*: string
@@ -150,6 +174,7 @@ type
     refreshTheme*: bool
     idleTimeout*: int
     ipcTimeout*: int
+    onConfigApply*: seq[tuple[cmd, arg: string]]
 
   LibraryItemKind* = enum
     likTrack, likArtist, likAlbum, likPlaylist
@@ -284,6 +309,7 @@ type
     userHighlightOverrides*: JsonNode
     footerPreset*: FooterPresetName
     player*: AudioBackend
+    svc*: ref RootObj
     status*: PlaybackStatus
     timePos*: float
     duration*: float
@@ -301,6 +327,7 @@ type
     selectIndex*: int
     needsRedraw*: bool
     tab*: AppTab
+    tabSaved*: array[AppTab, TabSavedState]
     selectMode*: bool
     selectedIndices*: HashSet[int]
     selectionAnchor*: int
@@ -326,6 +353,8 @@ type
     audioAvailable*: bool
     currentPlayingPath*: string
     currentPlayingId*: int64
+    cachedPlayingTrack*: Track
+    cachedPlayingPath*: string
     volumeCueTimer*: int
     volumeCueVolume*: int
     highVolAccumFrames*: int
@@ -372,6 +401,18 @@ type
     spAudioFormat*: string
     spDownloaded*: Table[string, string]
     spDownloadCount*: int
+    spConnected*: bool
+    spFeedRecentlyPlayed*: seq[tuple[id, name, artist, album, url, playedAt: string]]
+    spFeedTopTracks*: seq[tuple[id, name, artist, album, url: string]]
+    spFeedNewReleases*: seq[tuple[id, name, artist, album, url: string]]
+    spFeedPlaylists*: seq[tuple[id, name: string]]
+    spFeedFetchedAt*: float
+    spFeedFetching*: bool
+    dashboardVisible*: bool
+    totalPlayTime*: float
+    totalTracksPlayed*: int
+    sessionStartAt*: float
+    sessionTracksPlayed*: int
     downloadsTab*: DownloadsTab
     downloadProgress*: Table[string, int]
     ytMaxConcurrentDownloads*: int
@@ -387,6 +428,11 @@ type
     ytSearchPage*: int
     ytSearchPageSize*: int
     ytSearchLoading*: bool
+    actionDebounceAt*: float
+    iconPreference*: IconPreference
+    transparentBg*: bool
+    overlayOpacity*: float
+    keyboardMode*: KeyboardMode
     ytProgressCurrent*: int
     ytProgressTotal*: int
     crossfadeDuration*: int
@@ -434,6 +480,8 @@ type
     coverFetching*: bool
     coverImageId*: int
     daemonStateVersion*: int
+    startupPhase*: StartupPhase
+    configDirty*: bool
     currentLyrics*: LrcData
     lyricsLineIdx*: int
 
@@ -482,12 +530,16 @@ const
       "Color theme seed. Type a name or use a preset (mocha/latte).",
       "Randomize the theme seed on each application launch.",
       "Choose a preset layout for the status bar footer modules.",
-      "Individually enable/disable footer modules and assign them to left or right side."
+      "Individually enable/disable footer modules and assign them to left or right side.",
+      "Transparent background mode. Uses terminal's native background color.",
+      "Overlay background opacity (0\u2013100%). Only applies in transparent mode.",
+      "Icon style: Auto-detect, Nerd Font, or Emoji fallback."
     ],
     scSystem: @[
       "Seconds of inactivity before auto-shutdown (0 = never).",
       "Timeout in seconds for daemon IPC communication (1\u201330).",
-      "Restore all settings to factory defaults (cannot be undone)."
+      "Restore all settings to factory defaults (cannot be undone).",
+      "Keyboard mode: Desktop or Termux. Auto-detected on startup."
     ],
     scSpotify: @[
       "Browser cookie source for Spotify authentication.",
@@ -540,12 +592,37 @@ proc clear*(o: var OverlayState) =
 proc isPlaylistView*(state: AppState): bool =
   state.tab == tabLibrary and state.filterScope == fsPlaylists
 
-proc getPlayingTrack*(state: AppState): Track =
+proc getPlayingTrack*(state: var AppState): Track =
   if state.currentPlayingPath.len > 0:
+    if state.cachedPlayingPath == state.currentPlayingPath:
+      return state.cachedPlayingTrack
     for t in state.libraryTracks:
       if t.path == state.currentPlayingPath:
+        state.cachedPlayingPath = state.currentPlayingPath
+        state.cachedPlayingTrack = t
         return t
   Track()
+
+proc saveTabState*(state: var AppState) =
+  let idx = ord(state.tab)
+  state.tabSaved[idx].selectIndex = state.selectIndex
+  state.tabSaved[idx].filterText = state.filterText
+  state.tabSaved[idx].filterScope = state.filterScope
+  state.tabSaved[idx].librarySidebarSelect = state.librarySidebarSelect
+  state.tabSaved[idx].playlistContentsIdx = state.playlistContentsIdx
+  state.tabSaved[idx].settingsCategory = state.settingsCategory
+  state.tabSaved[idx].settingsFocusPanel = state.settingsFocusPanel
+
+proc restoreTabState*(state: var AppState) =
+  let idx = ord(state.tab)
+  let saved = state.tabSaved[idx]
+  state.selectIndex = saved.selectIndex
+  state.filterText = saved.filterText
+  state.filterScope = saved.filterScope
+  state.librarySidebarSelect = saved.librarySidebarSelect
+  state.playlistContentsIdx = saved.playlistContentsIdx
+  state.settingsCategory = saved.settingsCategory
+  state.settingsFocusPanel = saved.settingsFocusPanel
 
 template markDirty*(state: var AppState, event: ChangeEvent) =
   state.dirtyFlags.incl(event)
@@ -558,5 +635,14 @@ template clearDirty*(state: var AppState) =
 
 template isDirty*(state: AppState, event: ChangeEvent): bool =
   event in state.dirtyFlags
+
+template guardDebounce*(state: var AppState): bool =
+  ## Returns true if action should be skipped (debounced). Seek exempt.
+  let now = epochTime()
+  if state.actionDebounceAt > 0 and now < state.actionDebounceAt:
+    true
+  else:
+    state.actionDebounceAt = now + (ActionDebounceMs / 1000.0)
+    false
 
 

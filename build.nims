@@ -41,13 +41,17 @@ proc buildManpage(version: string) =
     sh("pandoc " & MAN_SRC & " -s -t man -o " & MAN_DST & " --variable=version:" & version)
     echo "    manpage -> " & MAN_DST
 
-proc buildBinary(src, label: string, version:string ) =
+proc buildBinary(src, label: string, version: string, musl: bool = false, termux: bool = false) =
   if not fileExists(src):
     echo "  " & src & " not found"
     return
-  let flags = "-f -d:release" &
+  var flags = "-f -d:release" &
     " -d:gtmVersion:" & version &
     " -d:gtmBuildTime:"
+  if musl:
+    flags &= " --gcc.exe:musl-gcc --gcc.linkerexe:musl-gcc -d:staticFfmpeg -d:musl"
+  if termux:
+    flags &= " -d:android -d:termux --gcc.exe:musl-gcc --gcc.linkerexe:musl-gcc -d:staticFfmpeg"
   sh("nim c " & flags & " " & src & " 2>&1")
 
   echo ""
@@ -58,10 +62,14 @@ proc buildBinary(src, label: string, version:string ) =
 when isMainModule:
   var buildTui = false
   var buildDmd = false
+  var buildMusl = false
+  var buildTermux = false
   for i in 1..paramCount():
     let p = paramStr(i)
     if p == "-t": buildTui = true
     if p == "-d": buildDmd = true
+    if p == "-m" or p == "--musl": buildMusl = true
+    if p == "--termux": buildTermux = true
   if not buildTui and not buildDmd:
     buildTui = true
     buildDmd = true
@@ -72,24 +80,30 @@ when isMainModule:
 
   let version = detectVersion()
   echo "  Version: " & version
+  if buildMusl: echo "  Target: musl (static)"
+  if buildTermux: echo "  Target: termux (android static)"
   echo ""
 
   echo "-- Prerequisites --"
   discard checkCmd("nim", "nim --version 2>/dev/null | head -1")
-  discard checkCmd("gcc", "gcc --version 2>/dev/null | head -1")
-  discard checkCmd("dbus-1", "pkg-config --modversion dbus-1 2>/dev/null")
-  discard checkCmd("viu", "viu --version 2>/dev/null")
+  if not buildTermux:
+    discard checkCmd("gcc", "gcc --version 2>/dev/null | head -1")
+    discard checkCmd("dbus-1", "pkg-config --modversion dbus-1 2>/dev/null")
+    discard checkCmd("viu", "viu --version 2>/dev/null")
+  else:
+    discard checkCmd("musl-gcc", "musl-gcc --version 2>/dev/null | head -1")
   echo ""
 
   echo "-- Manpage --"
-  buildManpage(version)
+  if not buildTermux:
+    buildManpage(version)
   echo ""
 
   echo "-- Build --"
   if buildDmd:
-    buildBinary(GTMD_SRC, "gtmd", version)
+    buildBinary(GTMD_SRC, "gtmd", version, musl = buildMusl or buildTermux, termux = buildTermux)
   if buildTui:
-    buildBinary(GTM_SRC, "gtm", version)
+    buildBinary(GTM_SRC, "gtm", version, musl = buildMusl or buildTermux, termux = buildTermux)
   echo ""
 
   echo "-- Summary --"
