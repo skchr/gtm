@@ -371,7 +371,7 @@ method render*(node: NowPlayingView, ctx: var nw.Context[State]) =
     let dashY = line + 1
     let dashW = min(60, w - 4)
     let hello = if state.totalTracksPlayed > 0:
-      let h = epochTime().toTime().getLocalTime().hour
+      let h = int64(epochTime()).fromUnix().inZone(local()).hour
       if h < 12: "Good morning"
       elif h < 17: "Good afternoon"
       else: "Good evening"

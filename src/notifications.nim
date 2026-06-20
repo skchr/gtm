@@ -1,9 +1,10 @@
 import dbus, os
+{.push warning[GcUnsafe2]:off.}
 
 var gNotifyConn: ptr DBusConnection = nil
 var gIconPath: string = ""
 
-proc initNotifications*() =
+proc initNotifications*() {.gcsafe.} =
   if gNotifyConn != nil: return
   discard dbus_threads_init_default()
   var err: DBusError
@@ -24,7 +25,7 @@ proc initNotifications*() =
     if fileExists(cwdIcon):
       gIconPath = cwdIcon
 
-proc sendDesktopNotification*(title, body: string) =
+proc sendDesktopNotification*(title, body: string) {.gcsafe.} =
   if gNotifyConn == nil: return
   var msg = makeCall("org.freedesktop.Notifications",
     ObjectPath("/org/freedesktop/Notifications"),
@@ -51,3 +52,4 @@ proc shutdownNotifications*() =
   dbus_connection_flush(gNotifyConn)
   dbus_connection_close(gNotifyConn)
   gNotifyConn = nil
+{.pop.}

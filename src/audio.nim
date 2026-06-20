@@ -64,25 +64,25 @@ type
     backendType*: AudioBackendType
     working*: bool
 
-method loadFile*(b: AudioBackend, path: string, title: string = "", channel: string = ""): bool {.base.} = false
-method play*(b: AudioBackend) {.base.} = discard
-method pause*(b: AudioBackend) {.base.} = discard
-method stop*(b: AudioBackend) {.base.} = discard
-method seek*(b: AudioBackend, seconds: float) {.base.} = discard
-method setVolume*(b: AudioBackend, vol: int) {.base.} = discard
-method getVolume*(b: AudioBackend): int {.base.} = 80
-method togglePause*(b: AudioBackend) {.base.} = discard
-method pollEvents*(b: AudioBackend): seq[AudioEvent] {.base.} = @[]
-method shutdown*(b: AudioBackend) {.base.} = discard
-method getMetadata*(b: AudioBackend, path: string): TrackMetadata {.base.} = TrackMetadata()
-method readPcmFrames*(b: AudioBackend, output: var seq[float32], maxCount: int) {.base.} = discard
-method prepareNext*(b: AudioBackend, path: string) {.base.} = discard
-method startCrossfade*(b: AudioBackend, durationSeconds: float, reverse: bool = false) {.base.} = discard
-method getStatusFlags*(b: AudioBackend): tuple[crossfading, masterEnded: bool] {.base.} = (false, false)
-method setEqBand*(b: AudioBackend, band: int, gainDb: float) {.base.} = discard
-method setEqPreset*(b: AudioBackend, name: string) {.base.} = discard
-method setCrossfadeCurve*(b: AudioBackend, curveType: int) {.base.} = discard
-method setSpatialWidth*(b: AudioBackend, width: float) {.base.} = discard
+method loadFile*(b: AudioBackend, path: string, title: string = "", channel: string = ""): bool {.base, gcsafe.} = false
+method play*(b: AudioBackend) {.base, gcsafe.} = discard
+method pause*(b: AudioBackend) {.base, gcsafe.} = discard
+method stop*(b: AudioBackend) {.base, gcsafe.} = discard
+method seek*(b: AudioBackend, seconds: float) {.base, gcsafe.} = discard
+method setVolume*(b: AudioBackend, vol: int) {.base, gcsafe.} = discard
+method getVolume*(b: AudioBackend): int {.base, gcsafe.} = 80
+method togglePause*(b: AudioBackend) {.base, gcsafe.} = discard
+method pollEvents*(b: AudioBackend): seq[AudioEvent] {.base, gcsafe.} = @[]
+method shutdown*(b: AudioBackend) {.base, gcsafe.} = discard
+method getMetadata*(b: AudioBackend, path: string): TrackMetadata {.base, gcsafe.} = TrackMetadata()
+method readPcmFrames*(b: AudioBackend, output: var seq[float32], maxCount: int) {.base, gcsafe.} = discard
+method prepareNext*(b: AudioBackend, path: string) {.base, gcsafe.} = discard
+method startCrossfade*(b: AudioBackend, durationSeconds: float, reverse: bool = false) {.base, gcsafe.} = discard
+method getStatusFlags*(b: AudioBackend): tuple[crossfading, masterEnded: bool] {.base, gcsafe.} = (false, false)
+method setEqBand*(b: AudioBackend, band: int, gainDb: float) {.base, gcsafe.} = discard
+method setEqPreset*(b: AudioBackend, name: string) {.base, gcsafe.} = discard
+method setCrossfadeCurve*(b: AudioBackend, curveType: int) {.base, gcsafe.} = discard
+method setSpatialWidth*(b: AudioBackend, width: float) {.base, gcsafe.} = discard
 
 when defined(useFFmpeg):
   {.compile: "vendor/ffmpeg/ffmpeg_impl.c".}
@@ -189,15 +189,18 @@ when defined(useFFmpeg):
     return true
 
   method play*(b: FfmpegBackend) =
+    if b.ctx == nil: return
     ffmpeg_audio_start(b.ctx)
     b.state = 1
     b.running = true
 
   method pause*(b: FfmpegBackend) =
+    if b.ctx == nil: return
     ffmpeg_audio_pause(b.ctx)
     if b.state == 1: b.state = 2
 
   method stop*(b: FfmpegBackend) =
+    if b.ctx == nil: return
     ffmpeg_audio_stop(b.ctx)
     b.state = 0
     b.timePos = 0.0
@@ -205,10 +208,12 @@ when defined(useFFmpeg):
     b.lastPlaying = false
 
   method seek*(b: FfmpegBackend, seconds: float) =
+    if b.ctx == nil: return
     ffmpeg_audio_seek(b.ctx, seconds)
     b.timePos = ffmpeg_audio_get_time(b.ctx)
 
   method setVolume*(b: FfmpegBackend, vol: int) =
+    if b.ctx == nil: return
     b.volume = max(0, min(100, vol))
     ffmpeg_audio_set_volume(b.ctx, float(b.volume) / 100.0)
 
@@ -315,15 +320,18 @@ when defined(useFFmpeg):
     return true
 
   method play*(b: MixerBackend) =
+    if b.ctx == nil: return
     ffmpeg_mixer_start(b.ctx)
     b.state = 1
     b.running = true
 
   method pause*(b: MixerBackend) =
+    if b.ctx == nil: return
     ffmpeg_mixer_pause(b.ctx)
     if b.state == 1: b.state = 2
 
   method stop*(b: MixerBackend) =
+    if b.ctx == nil: return
     ffmpeg_mixer_stop(b.ctx)
     b.state = 0
     b.timePos = 0.0
@@ -332,10 +340,12 @@ when defined(useFFmpeg):
     b.lastCrossfading = false
 
   method seek*(b: MixerBackend, seconds: float) =
+    if b.ctx == nil: return
     ffmpeg_mixer_seek(b.ctx, seconds)
     b.timePos = ffmpeg_mixer_get_time(b.ctx)
 
   method setVolume*(b: MixerBackend, vol: int) =
+    if b.ctx == nil: return
     b.volume = max(0, min(100, vol))
     ffmpeg_mixer_set_volume(b.ctx, float(b.volume) / 100.0)
 
@@ -347,6 +357,7 @@ when defined(useFFmpeg):
     else: b.play()
 
   method prepareNext*(b: MixerBackend, path: string) =
+    if b.ctx == nil: return
     discard ffmpeg_mixer_load_slave(b.ctx, path.cstring)
 
   method startCrossfade*(b: MixerBackend, durationSeconds: float, reverse: bool = false) =
@@ -366,15 +377,19 @@ when defined(useFFmpeg):
     )
 
   method setEqBand*(b: MixerBackend, band: int, gainDb: float) =
+    if b.ctx == nil: return
     discard ffmpeg_mixer_set_eq_band(b.ctx, band.cint, gainDb.cfloat)
 
   method setEqPreset*(b: MixerBackend, name: string) =
+    if b.ctx == nil: return
     discard ffmpeg_mixer_set_eq_preset(b.ctx, name.cstring)
 
   method setCrossfadeCurve*(b: MixerBackend, curveType: int) =
+    if b.ctx == nil: return
     ffmpeg_mixer_set_crossfade_curve(b.ctx, curveType.cint)
 
   method setSpatialWidth*(b: MixerBackend, width: float) =
+    if b.ctx == nil: return
     discard ffmpeg_mixer_set_spatial_width(b.ctx, width.cfloat)
 
   method pollEvents*(b: MixerBackend): seq[AudioEvent] =

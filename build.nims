@@ -8,7 +8,9 @@ const
 
 proc sh(cmd: string) =
   echo "  -> " & cmd
-  discard staticExec(cmd)
+  let output = staticExec(cmd)
+  if output.len > 0:
+    echo output
 
 proc checkCmd(name, test: string): bool =
   let r = staticExec(test).strip
@@ -21,8 +23,9 @@ proc checkCmd(name, test: string): bool =
 proc detectVersion: string =
   let tag = staticExec("git describe --tags --abbrev=0 2>/dev/null").strip
   if tag.len > 0:
+    let clean = if tag.startsWith("v"): tag[1..^1] else: tag
     let dirty = staticExec("git diff --quiet HEAD 2>/dev/null || echo '-dirty'").strip
-    result = tag & dirty
+    result = clean & dirty
   else:
     result = staticExec("git rev-parse --short=7 HEAD 2>/dev/null").strip
   if result.len == 0: result = "0.0.0-dev"
@@ -46,8 +49,8 @@ proc buildBinary(src, label: string, version: string, musl: bool = false, termux
     echo "  " & src & " not found"
     return
   var flags = "-f -d:release" &
-    " -d:gtmVersion:" & version &
-    " -d:gtmBuildTime:"
+    " -d:GTM_VERSION:" & version &
+    " -d:GTM_BUILD_TIME:"
   if musl:
     flags &= " --gcc.exe:musl-gcc --gcc.linkerexe:musl-gcc -d:staticFfmpeg -d:musl"
   if termux:

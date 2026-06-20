@@ -117,7 +117,7 @@ when defined(useSqlite):
       createDir(dir)
     result = LibraryDb()
     if sqlite3_open(path.cstring, addr result.db) != SQLITE_OK:
-      sqlerror(result.db, "open")
+      stderr.writeLine("[sqlite3] openLibrary: " & $sqlite3_errmsg(result.db))
       result = nil
 
   proc initSchema*(lib: LibraryDb) =

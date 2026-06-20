@@ -30,7 +30,7 @@
 ## │  Every poll: write queued events → each client   │
 ## └──────────────────────────────────────────────────┘
 
-import os, json, strutils, net, posix, random, osproc, times, base64, locks
+import os, json, strutils, net, posix, random, osproc, times, base64, locks, uri
 from nativesockets import setBlocking, selectRead, SocketHandle
 from std/typedthreads import Thread, createThread, joinThread
 when not defined(macosx):
@@ -484,22 +484,6 @@ proc pushFullState(d: Daemon) =
     "version": %d.stateVersion}]}
   d.broadcastJson(ev)
 
-proc buildFullStateEvent(d: Daemon): string =
-  d.stateVersion.inc
-  var ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "full_state_sync",
-    "state": $(d.playerState),
-    "track_path": d.currentTrackPath,
-    "track_title": d.currentTrackTitle,
-    "track_channel": d.currentTrackChannel,
-    "time_pos": %d.playerTimePos,
-    "duration": %d.playerDuration,
-    "volume": %d.playerVolume,
-    "shuffle": %d.shuffleEnabled,
-    "repeat": %d.repeatMode,
-    "sleep_timer": %d.sleepTimerRemaining,
-    "version": %d.stateVersion}]}
-  result = $ev & "\n"
-
 proc savePlaybackState(d: Daemon) =
   if d.lib != nil and d.player != nil:
     d.lib.setPlaybackState("volume", $d.playerVolume)
@@ -695,280 +679,6 @@ proc advanceToNextTrack(d: Daemon, forward: bool = true): bool =
     return true
 
 include mpris, notifications
-
-proc execPlaybackControl(d: Daemon, cmd: DaemonCmd): JsonNode =
-  result = %*{"ok": true}
-  case cmd.kind
-  of dckLoadFile:
-    if cmd.strArg.len > 0:
-      d.upNextSent = false
-      d.autoAdvancing = false
-      if d.currentTrackPath.len > 0 and d.currentTrackPath != cmd.strArg:
-        d.trackHistory.add(d.currentTrackPath)
-        if d.trackHistory.len > 50:
-          d.trackHistory.delete(0)
-      if d.crossfadeDuration > 0 and d.player.state == 1:
-        d.startCrossfadeTransition(cmd.strArg, cmd.strArg2, cmd.strArg3)
-      else:
-        if not d.loadAndPlayTrack(cmd.strArg, cmd.strArg2, cmd.strArg3):
-          result["ok"] = %false
-          result["error"] = %"failed to load file"
-          return
-      d.idleFrames = 0
-      discard d.player.pollEvents()
-      var trackId = d.lib.findTrackByPath(d.currentTrackPath)
-      if trackId == 0 and d.currentTrackTitle.len > 0:
-        trackId = d.lib.addTrack(d.currentTrackPath, d.currentTrackTitle, d.currentTrackChannel, "YouTube", 0.0, 0, 0, "")
-      if trackId > 0:
-        d.lib.updatePlayCount(trackId)
-        result["track_id"] = %trackId
-      let st = case d.player.state
-        of 1: "playing"
-        of 2: "paused"
-        else: "stopped"
-      result["state"] = %st
-      result["duration"] = %d.player.duration
-      result["time_pos"] = %d.player.timePos
-      when defined(useMpris):
-        emitMprisPlayerChanged(d)
-  of dckPlay:
-    if d.player.state != 1:
-      d.player.play()
-    d.idleFrames = 0
-    d.pushFullState()
-    when defined(useMpris):
-      emitMprisPlayerChanged(d)
-  of dckPause:
-    d.player.pause()
-    d.pushFullState()
-    when defined(useMpris):
-      emitMprisPlayerChanged(d)
-  of dckTogglePause:
-    d.player.togglePause(); d.idleFrames = 0
-    d.pushFullState()
-    when defined(useMpris):
-      emitMprisPlayerChanged(d)
-  of dckStop:
-    if d.player != nil:
-      d.player.stop()
-    d.crossfadePrepared = false
-    d.crossfadeStarted = false
-    d.crossfadeNextPath = ""
-    d.crossfadeConsumed = false
-    d.pushFullState()
-    when defined(useMpris):
-      emitMprisPlayerChanged(d)
-  of dckSeek:
-    d.player.seek(cmd.floatArg)
-    when defined(useMpris):
-      let pos = int64(d.player.timePos * 1_000_000)
-      emitMprisSeeked(pos)
-  of dckNext:
-    d.autoAdvancing = false
-    if d.crossfadePrepared and d.player.state == 1:
-      let nextPath = d.crossfadeNextPath
-      d.player.startCrossfade(float(d.crossfadeDuration), reverse = false)
-      d.currentTrackPath = nextPath
-      let meta = resolveTrackMetadata(d, nextPath)
-      d.currentTrackTitle = meta.title
-      d.currentTrackChannel = meta.channel
-      d.crossfadePrepared = false
-      d.crossfadeStarted = true
-      d.crossfadeConsumed = false
-      d.idleFrames = 0
-      d.pushFullState()
-      when defined(useMpris):
-        emitMprisPlayerChanged(d)
-    elif d.advanceToNextTrack(true):
-      d.sendQueueEvent()
-      d.pushFullState()
-      when defined(useMpris):
-        emitMprisPlayerChanged(d)
-    elif d.playbackQueue.len > 0 or d.shuffleOrder.len > 0:
-      result = %*{"ok": true, "deferred": true}
-    else:
-      result = %*{"ok": false, "error": "no next track"}
-  of dckPrev:
-    d.autoAdvancing = false
-    var prevPath = ""
-    if d.lastConsumedFromQueue.len > 1:
-      let idx = d.lastConsumedFromQueue.len - 2
-      if idx >= 0:
-        prevPath = d.lastConsumedFromQueue[idx]
-        d.lastConsumedFromQueue.setLen(idx + 1)
-    if prevPath.len == 0 and d.trackHistory.len > 0:
-      prevPath = d.trackHistory.pop()
-    if prevPath.len > 0:
-      d.pushTrackHistory(prevPath)
-      if d.crossfadeDuration > 0 and d.player.state == 1:
-        let meta = resolveTrackMetadata(d, prevPath)
-        d.startCrossfadeTransition(prevPath, meta.title, meta.channel, reverse = true)
-      else:
-        discard d.loadAndPlayTrack(prevPath)
-      d.idleFrames = 0
-      d.pushFullState()
-      when defined(useMpris):
-        emitMprisPlayerChanged(d)
-      if d.lib != nil:
-        var trackId = d.lib.findTrackByPath(prevPath)
-        if trackId > 0:
-          d.lib.updatePlayCount(trackId)
-          result["track_id"] = %trackId
-    else:
-      result = %*{"ok": false, "error": "no previous track"}
-  else: discard
-
-proc execVolume(d: Daemon, cmd: DaemonCmd): JsonNode =
-  result = %*{"ok": true}
-  case cmd.kind
-  of dckSetVolume:
-    d.player.setVolume(cmd.intArg)
-    when defined(useMpris):
-      emitMprisPlayerChanged(d)
-  of dckGetVolume:
-    result["volume"] = %d.player.volume
-  else: discard
-
-proc execSystem(d: Daemon, cmd: DaemonCmd): JsonNode =
-  result = %*{"ok": true}
-  case cmd.kind
-  of dckQuit:
-    when defined(useMpris):
-      shutdownMpris()
-    d.savePlaybackState()
-    if d.lib != nil:
-      d.lib.closeDb()
-    d.player.shutdown()
-    d.running = false
-  of dckPing:
-    result["pong"] = %true
-  else: discard
-
-proc execStatus(d: Daemon, cmd: DaemonCmd): JsonNode =
-  result = %*{"ok": true}
-  case cmd.kind
-  of dckStatus, dckNowPlaying:
-    let st = case d.player.state
-      of 0: "stopped"
-      of 1: "playing"
-      of 2: "paused"
-      else: "unknown"
-    result["state"] = %st
-    result["volume"] = %d.player.volume
-    result["time_pos"] = %d.player.timePos
-    result["duration"] = %d.player.duration
-    result["track"] = %d.currentTrackPath
-    result["audio_working"] = %d.player.working
-    result["sleep_timer"] = %d.sleepTimerRemaining
-    let flags = d.player.getStatusFlags()
-    result["crossfading"] = %flags.crossfading
-    result["master_ended"] = %flags.masterEnded
-  of dckGetState:
-    result["shuffle"] = %d.shuffleEnabled
-    result["repeat"] = %d.repeatMode
-    result["sleep_timer"] = %d.sleepTimerRemaining
-    result["time_pos"] = %d.player.timePos
-    result["duration"] = %d.player.duration
-    result["track_path"] = %d.currentTrackPath
-    if d.currentTrackPath.len > 0:
-      if d.currentTrackTitle.len > 0:
-        result["track_title"] = %d.currentTrackTitle
-      elif d.currentTrackPath.contains("youtube.com") or d.currentTrackPath.contains("googlevideo.com"):
-        result["track_title"] = %d.player.metadata.title
-      else:
-        result["track_title"] = %(splitFile(d.currentTrackPath).name.replace(".", " "))
-      if d.currentTrackChannel.len > 0:
-        result["track_channel"] = %d.currentTrackChannel
-      elif d.player.metadata.artist.len > 0:
-        result["track_channel"] = %d.player.metadata.artist
-      if d.player.metadata.album.len > 0:
-        result["track_album"] = %d.player.metadata.album
-    let flags2 = d.player.getStatusFlags()
-    result["crossfading"] = %flags2.crossfading
-    result["master_ended"] = %flags2.masterEnded
-    let st2 = case d.player.state
-      of 0: "stopped"
-      of 1: "playing"
-      of 2: "paused"
-      else: "unknown"
-    result["state"] = %st2
-    result["volume"] = %d.player.volume
-    result["backend_type"] = %(if d.player of MixerBackend: "Mixer" elif d.player of FfmpegBackend: "FFmpeg" else: "ALSA")
-  of dckResume:
-    if d.currentTrackPath.len > 0:
-      d.idleFrames = 0
-      let st = case d.player.state
-        of 0: "stopped"
-        of 1: "playing"
-        of 2: "paused"
-        else: "stopped"
-      result["state"] = %st
-      result["track"] = %d.currentTrackPath
-      result["time_pos"] = %d.player.timePos
-      result["duration"] = %d.player.duration
-    else:
-      result["state"] = %"stopped"
-  of dckGetFullState:
-    result["shuffle"] = %d.shuffleEnabled
-    result["repeat"] = %d.repeatMode
-    result["sleep_timer"] = %d.sleepTimerRemaining
-    result["volume"] = %d.player.volume
-    result["time_pos"] = %d.player.timePos
-    result["duration"] = %d.player.duration
-    result["track_path"] = %d.currentTrackPath
-    result["track_title"] = %d.currentTrackTitle
-    result["track_channel"] = %d.currentTrackChannel
-    result["track_album"] = %d.player.metadata.album
-    result["crossfading"] = %d.player.getStatusFlags().crossfading
-    result["master_ended"] = %d.player.getStatusFlags().masterEnded
-    var qArr = newJArray()
-    for p in d.playbackQueue:
-      qArr.add(%p)
-    result["queue"] = qArr
-    var soArr = newJArray()
-    for i in d.shuffleOrder:
-      soArr.add(%i)
-    result["shuffleOrder"] = soArr
-    result["shuffleIndex"] = %d.shuffleIndex
-    result["version"] = %d.stateVersion
-    result["spatialWidth"] = %d.spatialWidth
-    result["crossfadeDuration"] = %d.crossfadeDuration
-    result["crossfadeCurve"] = %d.crossfadeCurve
-    result["crossfadePrepared"] = %d.crossfadePrepared
-    result["crossfadeStarted"] = %d.crossfadeStarted
-    result["crossfadeNextPath"] = %d.crossfadeNextPath
-    let st = case d.player.state
-      of 0: "stopped"
-      of 1: "playing"
-      of 2: "paused"
-      else: "unknown"
-    result["state"] = %st
-  else: discard
-
-proc execAudioPipeline(d: Daemon, cmd: DaemonCmd): JsonNode =
-  result = %*{"ok": true}
-  case cmd.kind
-  of dckPrepareNext:
-    d.player.prepareNext(cmd.strArg)
-  of dckCrossfade:
-    d.player.startCrossfade(cmd.floatArg)
-  of dckSetEqBand:
-    d.player.setEqBand(cmd.intArg, cmd.floatArg)
-  of dckSetEqPreset:
-    d.player.setEqPreset(cmd.strArg)
-  of dckSetSpatialWidth:
-    d.spatialWidth = cmd.floatArg
-    d.player.setSpatialWidth(cmd.floatArg)
-    if d.lib != nil: d.lib.setPlaybackState("spatial_width", $(cmd.floatArg))
-  of dckSetCrossfadeDuration:
-    d.crossfadeDuration = cmd.intArg
-    d.lib.setPlaybackState("crossfade_duration", $(d.crossfadeDuration))
-  of dckSetCrossfadeCurve:
-    d.crossfadeCurve = cmd.intArg
-    d.player.setCrossfadeCurve(cmd.intArg)
-  of dckListEqPresets:
-    result["presets"] = %["Flat", "Rock", "Pop", "Classical", "Jazz", "HipHop", "Vocal", "BassBoost", "Headphones", "Laptop", "Electronic", "Acoustic", "Podcast", "Dance", "Soul", "Metal", "Reggae", "Blues", "Country", "Folk", "ClassicalAlt", "Speech", "Loudness", "TrebleBoost", "FullBass", "Soft", "Custom"]
-  else: discard
 
 proc execLibrary(d: Daemon, cmd: DaemonCmd): JsonNode =
   result = %*{"ok": true}
@@ -1185,7 +895,7 @@ proc execQueue(d: Daemon, cmd: DaemonCmd): JsonNode =
             channel = item{"channel"}.getStr("")
           if path.len > 0:
             d.playbackQueue.add(path)
-              if isYtWatchUrl(path):
+            if isYtWatchUrl(path):
                 let existingPath = if d.lib != nil: d.lib.getDownloadByUrl(path) else: ""
                 if existingPath.len == 0:
                   var alreadyDL = false
@@ -1206,7 +916,7 @@ proc execQueue(d: Daemon, cmd: DaemonCmd): JsonNode =
                       if startDownload(YtSearchResult(url: path, title: title, channel: channel), d.ytDownloadDir, task.process, cSrc, d.ytJsRuntime, cPath):
                         d.ytActiveDownloads.inc
                     d.ytDownloadTasks.add(task)
-              if d.ytStreamResolvedFor != path and not d.ytStreamResolving:
+            if d.ytStreamResolvedFor != path and not d.ytStreamResolving:
                 d.ytStreamResolveBuf = ""
                 d.ytStreamResolveUrl = path
                 let (cSrc, cPath) = cookiesForUrl(d, path)
@@ -1966,7 +1676,7 @@ proc runPulseWorker(d: ptr Daemon) {.thread.} =
       sleep(int(remaining * 1000))
 
 
-proc runNotifyWorker() {.thread.} =
+proc runNotifyWorker() {.thread, gcsafe.} =
   when not defined(macosx):
     discard prctl(15.cint, "notify")
   else:
@@ -2014,8 +1724,6 @@ proc handleAutoAdvance(d: Daemon) =
           d.playbackQueue.add(nextPath)
 
   let copyCtp = d.currentTrackPath
-  let copyCtt = d.currentTrackTitle
-  let copyCtc = d.currentTrackChannel
   release(d.lock)
 
   if nextPath.len > 0:
@@ -2198,7 +1906,6 @@ proc runDaemon*() =
     if spCookieFile.len > 0: daemon.spCookieFilePath = spCookieFile
     let spAudio = daemon.lib.getPlaybackState("sp_audio_format")
     if spAudio.len > 0: daemon.spAudioFormat = spAudio
-  discard daemon.spClient.loadTokens()
     # Completed downloads are queried from DB on demand
     let queueStr = daemon.lib.getPlaybackState("queue_json")
     if queueStr.len > 0:
@@ -2208,25 +1915,26 @@ proc runDaemon*() =
         for p in qj:
           daemon.playbackQueue.add(p.getStr(""))
       except: discard
-    # Restore shuffle cursor
-    let siStr = daemon.lib.getPlaybackState("shuffle_index")
-    if siStr.len > 0:
-      try: daemon.shuffleIndex = parseInt(siStr) except: discard
-    # Validate restored queue paths
-    var i = 0
-    while i < daemon.playbackQueue.len:
-      let p = daemon.playbackQueue[i]
-      if p.len > 0 and not isYtWatchUrl(p) and not fileExists(p):
-        daemon.playbackQueue.delete(i)
-      else:
-        i.inc
-    # Auto-scan download directory for files not yet in library
-    if dirExists(daemon.ytDownloadDir):
-      let existing = scanDirectoryRecursive(daemon.ytDownloadDir)
-      for p in existing:
-        if daemon.lib.findTrackByPath(p) == 0:
-          let (ftitle, fartist) = parseFilenameForMetadata(p)
-          discard daemon.lib.addTrack(p, ftitle, fartist, "", 0.0, 0, 0, "")
+      # Restore shuffle cursor
+      let siStr = daemon.lib.getPlaybackState("shuffle_index")
+      if siStr.len > 0:
+        try: daemon.shuffleIndex = parseInt(siStr) except: discard
+      # Validate restored queue paths
+      var i = 0
+      while i < daemon.playbackQueue.len:
+        let p = daemon.playbackQueue[i]
+        if p.len > 0 and not isYtWatchUrl(p) and not fileExists(p):
+          daemon.playbackQueue.delete(i)
+        else:
+          i.inc
+      # Auto-scan download directory for files not yet in library
+      if dirExists(daemon.ytDownloadDir):
+        let existing = scanDirectoryRecursive(daemon.ytDownloadDir)
+        for p in existing:
+          if daemon.lib.findTrackByPath(p) == 0:
+            let (ftitle, fartist) = parseFilenameForMetadata(p)
+            discard daemon.lib.addTrack(p, ftitle, fartist, "", 0.0, 0, 0, "")
+  discard daemon.spClient.loadTokens()
   removeFile(sockPath())
   let srvFd = posix.socket(posix.AF_UNIX, posix.SOCK_STREAM, 0)
   daemon.server = newSocket(srvFd, Domain.AF_UNIX, SockType.SOCK_STREAM)

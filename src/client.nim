@@ -27,6 +27,7 @@
 import os, json, strutils, net, osproc, posix, tables
 from nativesockets import setBlocking
 import state, audio
+{.push warning[GcUnsafe2]:off.}
 
 type
   PendingRequest* = object
@@ -249,7 +250,7 @@ proc sendAsync*(cli: DaemonClient, cmd: JsonNode, callback: proc(resp: JsonNode)
   except:
     discard
 
-method loadFile*(cli: DaemonClient, path: string, title: string = "", channel: string = ""): bool =
+method loadFile*(cli: DaemonClient, path: string, title: string = "", channel: string = ""): bool {.gcsafe.} =
   let resp = sendDaemonCmd(cli, %*{"cmd": "load_file", "path": path, "title": title, "channel": channel})
   cli.lastTrackId = 0
   if resp.hasKey("track_id"):
@@ -263,51 +264,51 @@ method loadFile*(cli: DaemonClient, path: string, title: string = "", channel: s
     cli.state = (if s == "playing": 1 elif s == "paused": 2 else: 0)
   result = resp.hasKey("ok") and resp["ok"].getBool(false)
 
-method play*(cli: DaemonClient) =
+method play*(cli: DaemonClient) {.gcsafe.} =
   cli.sendOnly(%*{"cmd": "play"})
 
-method pause*(cli: DaemonClient) =
+method pause*(cli: DaemonClient) {.gcsafe.} =
   cli.sendOnly(%*{"cmd": "pause"})
 
-method stop*(cli: DaemonClient) =
+method stop*(cli: DaemonClient) {.gcsafe.} =
   cli.sendOnly(%*{"cmd": "stop"})
 
-method seek*(cli: DaemonClient, seconds: float) =
+method seek*(cli: DaemonClient, seconds: float) {.gcsafe.} =
   cli.sendOnly(%*{"cmd": "seek", "seconds": seconds})
 
-method setVolume*(cli: DaemonClient, vol: int) =
+method setVolume*(cli: DaemonClient, vol: int) {.gcsafe.} =
   if cli.sock == nil: return
   cli.sendOnly(%*{"cmd": "set_volume", "volume": vol})
 
-method prepareNext*(cli: DaemonClient, path: string) =
+method prepareNext*(cli: DaemonClient, path: string) {.gcsafe.} =
   cli.sendOnly(%*{"cmd": "prepare_next", "path": path})
 
-method getStatusFlags*(cli: DaemonClient): tuple[crossfading, masterEnded: bool] =
+method getStatusFlags*(cli: DaemonClient): tuple[crossfading, masterEnded: bool] {.gcsafe.} =
   let resp = daemonSimpleCmd(cli, "status")
   (resp{"crossfading"}.getBool(false), resp{"master_ended"}.getBool(false))
 
-method startCrossfade*(cli: DaemonClient, durationSeconds: float) {.base.} =
+method startCrossfade*(cli: DaemonClient, durationSeconds: float) {.base, gcsafe.} =
   cli.sendOnly(%*{"cmd": "crossfade", "duration": durationSeconds})
 
-method setEqBand*(cli: DaemonClient, band: int, gainDb: float) =
+method setEqBand*(cli: DaemonClient, band: int, gainDb: float) {.gcsafe.} =
   cli.sendOnly(%*{"cmd": "set_eq_band", "band": band, "gain_db": gainDb})
 
-method setEqPreset*(cli: DaemonClient, name: string) =
+method setEqPreset*(cli: DaemonClient, name: string) {.gcsafe.} =
   cli.sendOnly(%*{"cmd": "set_eq_preset", "name": name})
 
-method setSpatialWidth*(cli: DaemonClient, width: float) =
+method setSpatialWidth*(cli: DaemonClient, width: float) {.gcsafe.} =
   cli.sendOnly(%*{"cmd": "set_spatial_width", "width": width})
 
-method setCrossfadeDuration*(cli: DaemonClient, duration: int) {.base.} =
+method setCrossfadeDuration*(cli: DaemonClient, duration: int) {.base, gcsafe.} =
   cli.sendOnly(%*{"cmd": "set_crossfade_duration", "duration": duration})
 
-method setCrossfadeCurve*(cli: DaemonClient, curveType: int) =
+method setCrossfadeCurve*(cli: DaemonClient, curveType: int) {.gcsafe.} =
   cli.sendOnly(%*{"cmd": "set_crossfade_curve", "curve_type": curveType})
 
-method togglePause*(cli: DaemonClient) =
+method togglePause*(cli: DaemonClient) {.gcsafe.} =
   cli.sendOnly(%*{"cmd": "toggle_pause"})
 
-method pollEvents*(cli: DaemonClient): seq[AudioEvent] =
+method pollEvents*(cli: DaemonClient): seq[AudioEvent] {.gcsafe.} =
   result = cli.drainedEvents
   cli.drainedEvents = @[]
   if not cli.connected: return
@@ -361,7 +362,7 @@ method pollEvents*(cli: DaemonClient): seq[AudioEvent] =
     cli.connected = false
     cli.clearPending()
 
-method getVolume*(cli: DaemonClient): int =
+method getVolume*(cli: DaemonClient): int {.gcsafe.} =
   let resp = daemonSimpleCmd(cli, "get_volume")
   if resp.hasKey("volume"):
     return resp["volume"].getInt(80)
@@ -564,3 +565,4 @@ proc newDaemonClient*(): DaemonClient =
     ipcTimeoutSec: 3.0, pingMissed: 0, reconnectCooldown: 0,
     nextSeq: 0, pending: @[]
   )
+{.pop.}

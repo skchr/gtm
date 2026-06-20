@@ -486,7 +486,7 @@ type
     lyricsLineIdx*: int
 
 const
-  GTM_VERSION* {.strdefine.} = staticExec("git describe --tags --abbrev=0 2>/dev/null").strip
+  GTM_VERSION* {.strdefine.} = staticExec("git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//'").strip
   GTM_BUILD_TIME* {.strdefine.} = staticExec("date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null").strip
 
   FooterPresets*: Table[FooterPresetName, set[FooterModule]] = {
@@ -604,18 +604,18 @@ proc getPlayingTrack*(state: var AppState): Track =
   Track()
 
 proc saveTabState*(state: var AppState) =
-  let idx = ord(state.tab)
-  state.tabSaved[idx].selectIndex = state.selectIndex
-  state.tabSaved[idx].filterText = state.filterText
-  state.tabSaved[idx].filterScope = state.filterScope
-  state.tabSaved[idx].librarySidebarSelect = state.librarySidebarSelect
-  state.tabSaved[idx].playlistContentsIdx = state.playlistContentsIdx
-  state.tabSaved[idx].settingsCategory = state.settingsCategory
-  state.tabSaved[idx].settingsFocusPanel = state.settingsFocusPanel
+  let t = state.tab
+  state.tabSaved[t].selectIndex = state.selectIndex
+  state.tabSaved[t].filterText = state.filterText
+  state.tabSaved[t].filterScope = state.filterScope
+  state.tabSaved[t].librarySidebarSelect = state.librarySidebarSelect
+  state.tabSaved[t].playlistContentsIdx = state.playlistContentsIdx
+  state.tabSaved[t].settingsCategory = state.settingsCategory
+  state.tabSaved[t].settingsFocusPanel = state.settingsFocusPanel
 
 proc restoreTabState*(state: var AppState) =
-  let idx = ord(state.tab)
-  let saved = state.tabSaved[idx]
+  let t = state.tab
+  let saved = state.tabSaved[t]
   state.selectIndex = saved.selectIndex
   state.filterText = saved.filterText
   state.filterScope = saved.filterScope

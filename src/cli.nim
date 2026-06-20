@@ -116,13 +116,6 @@ proc stateColor(state: string): string =
   of "stopped": "\e[31m" & state & "\e[0m"  # red
   else: state
 
-proc coloredText(text: string, code: string): string =
-  "\e[" & code & "m" & text & "\e[0m"
-
-template maybeColor(body: untyped): untyped =
-  let hasColor = useColor()
-  body
-
 proc execSubcommand*(args: CliArgs): bool =
   result = true
   case args.subcmd

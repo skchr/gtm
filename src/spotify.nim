@@ -1,4 +1,4 @@
-import std/[json, httpclient, strutils, base64, os, uri, asyncdispatch, asyncnet, tables, times]
+import std/[json, httpclient, strutils, base64, os, uri, times]
 
 const
   SpotifyAuthUrl* = "https://accounts.spotify.com/authorize"

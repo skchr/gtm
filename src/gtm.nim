@@ -542,12 +542,6 @@ proc cleanQuit(state: var AppState, stopDaemon: bool) =
   setCursorPos(0, 0)
   quit(0)
 
-proc syncSearchHistoryLower(state: var AppState) =
-  if state.ytSearchHistoryLower.len != state.ytSearchHistory.len:
-    state.ytSearchHistoryLower = @[]
-    for h in state.ytSearchHistory:
-      state.ytSearchHistoryLower.add(h.toLowerAscii())
-
 proc checkAutocomplete(state: var AppState) =
   let query = state.overlay.query
   if query.len < 2:
@@ -641,43 +635,6 @@ proc addToPlaylist(state: var AppState) =
         else:
           state.libraryPlaylists[idx].trackIds.add(track.id)
   state.selectedIndices = initHashSet[int]()
-  state.rebuildItems()
-
-proc addTracksToPl(state: var AppState, playlistId: int64) =
-  if state.selectedIndices.len == 0:
-    state.addingToPlaylistId = -1
-    state.addingToPlaylistName = ""
-    state.tab = tabLibrary
-    state.filterScope = fsPlaylists
-    state.rebuildItems()
-    return
-  var plIdx = -1
-  for i, pl in state.libraryPlaylists:
-    if pl.id == playlistId:
-      plIdx = i
-      break
-  if plIdx < 0: return
-  var added = 0
-  for selIdx in state.selectedIndices:
-    let realIdx = state.filteredIndex(selIdx)
-    if realIdx >= 0 and realIdx < state.libraryTracks.len:
-      let track = state.libraryTracks[realIdx]
-      if track.id notin state.libraryPlaylists[plIdx].trackIds:
-        if state.player.backendType == abtDaemon:
-          let resp = DaemonService(state.svc).addToPlaylist(playlistId, track.id, state.libraryPlaylists[plIdx].trackIds.len - 1)
-          if resp{"ok"}.getBool(false):
-            state.libraryPlaylists[plIdx].trackIds.add(track.id)
-            added += 1
-        else:
-          state.libraryPlaylists[plIdx].trackIds.add(track.id)
-          added += 1
-  state.selectedIndices = initHashSet[int]()
-  state.addingToPlaylistId = -1
-  state.addingToPlaylistName = ""
-  state.tab = tabLibrary
-  state.filterScope = fsPlaylists
-  state.playlistContentsIdx = plIdx
-  state.selectIndex = 0
   state.rebuildItems()
 
 proc handleQuitSignal() {.noconv.} =
@@ -1037,126 +994,6 @@ proc persistConfigIfDirty(state: var AppState) =
     state.configDirty = false
     state.saveConfig()
     state.applyOnConfig()
-
-proc adjustSetting(state: var AppState, delta: int) =
-  if state.tab != tabSettings: return
-  state.configDirty = true
-  case state.settingsCategory
-  of scAudio:
-    case state.selectIndex
-    of 0: # Volume
-      state.volume = max(0, min(100, state.volume + delta * 5))
-      state.player.setVolume(state.volume)
-      state.showVolumeCue()
-    of 1: # Crossfade Duration
-      state.crossfadeDuration = max(0, min(10, state.crossfadeDuration + delta))
-      if state.player.backendType == abtDaemon:
-        DaemonService(state.svc).setCrossfadeDuration(state.crossfadeDuration)
-    of 2: # Crossfade Curve
-      let curves = [cctEqualPower, cctQuadratic, cctCubic, cctAsymmetric]
-      var i = 0
-      for idx, v in curves:
-        if v == state.crossfadeCurve:
-          i = (idx + delta + curves.len) mod curves.len
-          break
-      state.crossfadeCurve = curves[i]
-      if state.player.backendType == abtDaemon:
-        DaemonService(state.svc).setCrossfadeCurve(state.crossfadeCurve.ord)
-    else: discard
-  of scYouTube:
-    case state.selectIndex
-    of 0: # Cookie Source — detect on Enter only
-      discard
-    of 1: # JS Runtime — cycle
-      var i = 0
-      for idx, r in JsRuntimes:
-        if r == state.ytJsRuntime:
-          i = (idx + delta + JsRuntimes.len) mod JsRuntimes.len
-          break
-      state.ytJsRuntime = JsRuntimes[i]
-    of 2: # Max Downloads
-      state.ytMaxConcurrentDownloads = max(1, min(10, state.ytMaxConcurrentDownloads + delta))
-    of 3: # Results Per Page
-      state.ytSearchPageSize = max(5, min(50, state.ytSearchPageSize + delta * 5))
-    of 4: # Search History — info on Enter only
-      discard
-    of 5: # Batch Mode
-      state.ytBatchDownloadMode = not state.ytBatchDownloadMode
-    of 6: # Clear Search History — action on Enter only
-      discard
-    else: discard
-  of scAppearance:
-    case state.selectIndex
-    of 0: # Theme — open picker on Enter only
-      discard
-    of 1: # Refresh Theme
-      state.config.refreshTheme = not state.config.refreshTheme
-    of 2: # Footer Preset
-      let vals = [fpnMinimal, fpnCompact, fpnFull, fpnInfo, fpnNavigator, fpnDebug, fpnMusic, fpnClock]
-      var i = 0
-      for idx, v in vals:
-        if v == state.footerPreset:
-          i = (idx + delta + vals.len) mod vals.len
-          break
-      state.footerPreset = vals[i]
-    of 3: # Footer Module Editor — Enter only
-      discard
-    of 4: # Transparent Background
-      state.transparentBg = not state.transparentBg
-      state.highlightGroups = initHighlightGroups(state.theme, state.transparentBg)
-    of 5: # Overlay Opacity
-      state.overlayOpacity = max(0.0, min(1.0, state.overlayOpacity + float(delta) * 0.05))
-    of 6: # Icon Style
-      let prefs = [ipAuto, ipNerdFont, ipEmoji]
-      var i = 0
-      for idx, v in prefs:
-        if v == state.iconPreference:
-          i = (idx + delta + prefs.len) mod prefs.len
-          break
-      state.iconPreference = prefs[i]
-      setIconPreference(state.iconPreference)
-    else: discard
-  of scSystem:
-    case state.selectIndex
-    of 0: # Idle Timeout
-      state.config.idleTimeout = max(30, min(600, state.config.idleTimeout + delta * 30))
-    of 1: # Daemon IPC Timeout
-      state.config.ipcTimeout = max(1, min(30, state.config.ipcTimeout + delta))
-      if state.player.backendType == abtDaemon:
-        DaemonService(state.svc).setIpcTimeout(float(state.config.ipcTimeout))
-    of 2: # Reset All — action on Enter only
-      discard
-    of 3: # Keyboard Mode
-      state.keyboardMode = if state.keyboardMode == kmDesktop: kmTermux else: kmDesktop
-    else: discard
-  of scSpotify:
-    case state.selectIndex
-    of 0: # Cookie Source — detect on Enter only
-      discard
-    of 1: # Cookie File — Enter opens filter mode
-      discard
-    of 2: # Audio Format — cycle
-      var i = 0
-      for idx, f in SpotifyFormats:
-        if f == state.spAudioFormat:
-          i = (idx + delta + SpotifyFormats.len) mod SpotifyFormats.len
-          break
-      state.spAudioFormat = SpotifyFormats[i]
-      if state.player.backendType == abtDaemon:
-        discard DaemonService(state.svc).spSetConfig(state.spCookieSource, state.spCookieFilePath, state.spAudioFormat)
-    of 3: # Max Downloads
-      state.ytMaxConcurrentDownloads = max(1, min(10, state.ytMaxConcurrentDownloads + delta))
-      if state.player.backendType == abtDaemon:
-        discard DaemonService(state.svc).spSetConfig(state.spCookieSource, state.spCookieFilePath, state.spAudioFormat)
-    of 4: # Download History — Enter to view
-      discard
-    of 5: # Clear History — action on Enter only
-      discard
-    of 6: # Import Playlist — action on Enter only
-      discard
-    else: discard
-  state.rebuildItems()
-  state.markDirty(ceSettings)
 
 proc handleThemePickerOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
   case key
