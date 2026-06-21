@@ -13,6 +13,7 @@ jobs:
     name: build-${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: linux-amd64

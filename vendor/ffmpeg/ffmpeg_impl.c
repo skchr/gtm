@@ -926,6 +926,7 @@ static void* mixer_thread(void* arg) {
             mx->master_duration = mx->master->duration;
             ffmpeg_audio_uninit(old);
             // Avoid ALSA reopen if sample rate/channels/format match
+#ifdef HAS_ALSA
             if (old->sample_rate == mx->master->sample_rate &&
                 old->channels == mx->master->channels &&
                 old->codec_ctx->sample_fmt == mx->master->codec_ctx->sample_fmt) {
@@ -937,6 +938,9 @@ static void* mixer_thread(void* arg) {
               mx->priming = 1;
               mx->prime_target = 8192;
             }
+#else
+            (void)old;
+#endif
             continue;
           }
           mx->master_ended = 1;
