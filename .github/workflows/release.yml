@@ -50,7 +50,7 @@ jobs:
         run: |
           sudo apt-get update -qq -o Acquire::Retries=3 -o Acquire::http::Timeout=30
           sudo apt-get install -y -qq --fix-missing -o Acquire::Retries=3 \
-            pkg-config libdbus-1-dev nasm
+            pkg-config libdbus-1-dev nasm libasound2-dev
 
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
