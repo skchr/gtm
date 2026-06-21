@@ -31,10 +31,10 @@
 ## │  └──────────────┘                                      │
 ## └────────────────────────────────────────────────────────┘
 
-import os, terminal, strutils, unicode, json, sets, math, sequtils, algorithm, times, posix, tables, osproc, hashes, base64
+import os, terminal, strutils, unicode, json, sets, math, times, posix, tables, osproc, hashes, base64
 from illwave as iw import nil
 from ../vendor/nimwave/nimwave as nw import nil
-import state, ui, audio, library, theme, commands, client, cli, ytdlp, graphics, lyrics
+import state, ui, audio, library, theme, commands, session, cli, ytdlp, graphics, lyrics
 
 proc loadConfig(state: var AppState) =
   let path = state.configPath
@@ -175,7 +175,7 @@ proc saveConfig(state: AppState) =
   except:
     stderr.writeLine("[gtm] saveConfig error: " & getCurrentExceptionMsg())
 
-proc loadLibraryFromDaemon(state: var AppState, cli: DaemonClient, resp: JsonNode) =
+proc loadLibraryFromDaemon(state: var AppState, resp: JsonNode) =
   state.libraryTracks = @[]
   state.libraryArtists = @[]
   state.libraryAlbums = @[]
@@ -228,20 +228,18 @@ proc scanLocalDir(state: var AppState, dir: string) =
 proc loadLibrary(state: var AppState) =
   if state.libraryTracks.len > 0: return
   let musicDir = getEnv("HOME", "") & "/Music"
-  if state.player of DaemonClient:
-    let cli = DaemonClient(state.player)
-    if cli.connected:
-      let resp = cli.getLibrary()
-      if resp.hasKey("tracks") and resp["tracks"].len > 0:
-        state.loadLibraryFromDaemon(cli, resp)
+  if state.session.connected:
+    let resp = state.session.request(%*{"cmd": "get_library"})
+    if resp.hasKey("tracks") and resp["tracks"].len > 0:
+      state.loadLibraryFromDaemon(resp)
+      return
+    # Daemon library empty: trigger server-side scan, then re-query
+    if dirExists(musicDir):
+      state.session.send(%*{"cmd": "scan", "path": musicDir})
+      let resp2 = state.session.request(%*{"cmd": "get_library"})
+      if resp2.hasKey("tracks") and resp2["tracks"].len > 0:
+        state.loadLibraryFromDaemon(resp2)
         return
-      # Daemon library empty: trigger server-side scan, then re-query
-      if dirExists(musicDir):
-        discard cli.scanDir(musicDir)
-        let resp2 = cli.getLibrary()
-        if resp2.hasKey("tracks") and resp2["tracks"].len > 0:
-          state.loadLibraryFromDaemon(cli, resp2)
-          return
   # Fallback: scan local files
   state.scanLocalDir(musicDir)
   state.rebuildItems()
@@ -270,16 +268,13 @@ proc buildPlaylistFromArgs(state: var AppState, args: seq[string]) =
       state.playbackQueue = @[]
       for i in startIdx..<state.libraryTracks.len:
         state.playbackQueue.add(i)
-      # Sync queue to daemon (clear first, then add)
-      if state.player of DaemonClient:
-        let cli = DaemonClient(state.player)
-        if cli.connected:
-          discard daemonSimpleCmd(cli, "queue_clear")
-          var items: seq[(string, string, string)] = @[]
-          for idx in state.playbackQueue:
-            let t = state.libraryTracks[idx]
-            items.add((t.path, t.title, t.artist))
-          discard cli.queueAdd(items)
+      # Sync queue to daemon
+      if state.session.connected:
+        var arr = newJArray()
+        for idx in state.playbackQueue:
+          let t = state.libraryTracks[idx]
+          arr.add(%*{"path": t.path, "title": t.title, "channel": t.artist})
+        state.session.send(%*{"cmd": "queue_set", "data": arr})
 
 proc getCurrentTrack(state: AppState): Track =
   let items = state.displayItems
@@ -353,72 +348,58 @@ proc playSelected(state: var AppState) =
     queueLog("playSelected: track=" & track.path & " title=" & track.title & " id=" & $track.id)
     # Skip queue rebuild when resuming the same track
     if track.path == state.currentPlayingPath and state.status == psPlaying:
-      state.player.togglePause()
+      state.session.send(%*{"cmd": "toggle_pause"})
       state.markDirtyBatch(cePlayState, ceTrack)
       return
-    # Async sendOnly for daemon mode (non-blocking), blocking loadFile for local backends
-    if state.player of DaemonClient:
-      let cli = DaemonClient(state.player)
-      cli.sendOnly(%*{"cmd": "load_file", "path": track.path, "title": track.title, "channel": track.artist})
-      cli.sendOnly(%*{"cmd": "play"})
-    else:
-      discard state.player.loadFile(track.path, track.title, track.artist)
-      state.player.play()
+    state.session.send(%*{"cmd": "load_file", "path": track.path, "title": track.title, "channel": track.artist})
+    state.session.send(%*{"cmd": "play"})
     # Build queue from current view and send to daemon — daemon owns queue from here
-    if state.tab == tabLibrary and state.player of DaemonClient:
-      let cli = DaemonClient(state.player)
-      if cli.connected:
-        cli.sendOnly(%*{"cmd": "queue_clear"})
-        var arr = newJArray()
-        var started = false
-        for item in state.displayItems:
-          if item.kind == likTrack:
-            if not started and item.id == track.id:
-              started = true
-              continue
-            if started and item.trackIdx >= 0 and item.trackIdx < state.libraryTracks.len:
-              let t = state.libraryTracks[item.trackIdx]
-              arr.add(%*{"path": t.path, "title": t.title, "channel": t.artist})
-        if arr.len > 0:
-          cli.sendOnly(%*{"cmd": "queue_add", "data": arr})
+    if state.tab == tabLibrary and state.session.connected:
+      var arr = newJArray()
+      var started = false
+      for item in state.displayItems:
+        if item.kind == likTrack:
+          if not started and item.id == track.id:
+            started = true
+            continue
+          if started and item.trackIdx >= 0 and item.trackIdx < state.libraryTracks.len:
+            let t = state.libraryTracks[item.trackIdx]
+            arr.add(%*{"path": t.path, "title": t.title, "channel": t.artist})
+      state.session.send(%*{"cmd": "queue_set", "data": arr})
     state.markDirtyBatch(cePlayState, ceTrack)
 
 proc nextTrack(state: var AppState) =
   state.upNextTimer = 0
   state.upNextMsg = ""
-  if state.player of DaemonClient:
-    DaemonClient(state.player).sendOnly(%*{"cmd": "next"})
+  state.session.send(%*{"cmd": "next"})
   state.markDirty(cePlayState)
 
 proc prevTrack(state: var AppState) =
   state.upNextTimer = 0
   state.upNextMsg = ""
-  if state.player of DaemonClient:
-    DaemonClient(state.player).sendOnly(%*{"cmd": "prev"})
+  state.session.send(%*{"cmd": "prev"})
   state.markDirty(cePlayState)
 
 proc adjustVolume(state: var AppState, delta: int) =
   let newVol = max(0, min(100, state.volume + delta))
-  state.player.setVolume(newVol)
+  state.session.send(%*{"cmd": "set_volume", "volume": newVol})
   state.showVolumeCue()
   if state.tab == tabSettings: state.rebuildItems()
 
 proc toggleShuffle(state: var AppState) =
-  if state.player of DaemonClient:
-    DaemonClient(state.player).sendOnly(%*{"cmd": "set_shuffle", "enabled": (not state.shuffleEnabled).int})
+  state.session.send(%*{"cmd": "set_shuffle", "enabled": (not state.shuffleEnabled).int})
 
 proc cycleRepeat(state: var AppState) =
-  if state.player of DaemonClient:
-    let newMode = (state.repeatMode + 1) mod 3
-    DaemonClient(state.player).sendOnly(%*{"cmd": "set_repeat", "mode": newMode})
+  let newMode = (state.repeatMode + 1) mod 3
+  state.session.send(%*{"cmd": "set_repeat", "mode": newMode})
 
 proc toggleMute(state: var AppState) =
   if state.volume > 0:
     state.prevVolume = state.volume
-    state.player.setVolume(0)
+    state.session.send(%*{"cmd": "set_volume", "volume": 0})
   else:
     let restore = if state.prevVolume > 0: state.prevVolume else: 80
-    state.player.setVolume(restore)
+    state.session.send(%*{"cmd": "set_volume", "volume": restore})
     state.prevVolume = 0
   state.showVolumeCue()
 
@@ -464,24 +445,13 @@ proc selectAll(state: var AppState) =
 
 proc deleteSelected(state: var AppState, permanent: bool) =
   if state.selectedIndices.len == 0: return
-  if state.player of DaemonClient:
-    let cli = DaemonClient(state.player)
-    for selIdx in state.selectedIndices:
-      if selIdx >= 0 and selIdx < state.libraryTracks.len:
-        let track = state.libraryTracks[selIdx]
-        if track.id > 0:
-          discard cli.deleteTrack(track.id, permanent)
-    state.selectedIndices = initHashSet[int]()
-    state.loadLibrary()
-  else:
-    var sortedIdx = toSeq(state.selectedIndices.items)
-    sortedIdx.sort(SortOrder.Descending)
-    for idx in sortedIdx:
-      if idx >= 0 and idx < state.libraryTracks.len:
-        state.libraryTracks.delete(idx)
-    state.selectedIndices = initHashSet[int]()
-    state.rebuildItems()
-    state.selectIndex = min(state.selectIndex, state.displayItems.len - 1)
+  for selIdx in state.selectedIndices:
+    if selIdx >= 0 and selIdx < state.libraryTracks.len:
+      let track = state.libraryTracks[selIdx]
+      if track.id > 0:
+        discard state.session.request(%*{"cmd": "delete_track", "track_id": track.id, "permanent": permanent.int})
+  state.selectedIndices = initHashSet[int]()
+  state.loadLibrary()
 
 proc deleteConfirm(state: var AppState) =
   if state.selectedIndices.len == 0:
@@ -493,10 +463,10 @@ proc deleteConfirm(state: var AppState) =
 
 proc cleanQuit(state: var AppState, stopDaemon: bool) =
   state.saveConfig()
-  if state.player of DaemonClient and stopDaemon:
-    DaemonClient(state.player).sendQuitDaemon()
-  elif not stopDaemon:
-    state.player.shutdown()
+  if stopDaemon:
+    state.session.send(%*{"cmd": "quit"})
+  else:
+    state.session = newDaemonSession()
   iw.deinit()
   terminal.showCursor()
   write(stdout, "\e[0m\e[39m\e[49m")
@@ -564,9 +534,8 @@ proc parsePlaylists(state: var AppState, resp: JsonNode) =
     state.libraryPlaylists = @[]
     for plJson in resp["playlists"]:
       var trackIds: seq[int64] = @[]
-      if state.player of DaemonClient:
-        let cli = DaemonClient(state.player)
-        let tracksResp = cli.getPlaylistTracks(plJson["id"].getInt(0).int64)
+      if state.session.connected:
+        let tracksResp = state.session.request(%*{"cmd": "get_playlist_tracks", "playlist_id": plJson["id"].getInt(0).int64})
         if tracksResp.hasKey("track_ids"):
           for tid in tracksResp["track_ids"]:
             trackIds.add(tid.getInt(0).int64)
@@ -578,9 +547,8 @@ proc parsePlaylists(state: var AppState, resp: JsonNode) =
     state.rebuildItems()
 
 proc loadPlaylists(state: var AppState) =
-  if state.player of DaemonClient:
-    let cli = DaemonClient(state.player)
-    let resp = cli.listPlaylists()
+  if state.session.connected:
+    let resp = state.session.request(%*{"cmd": "list_playlists"})
     state.parsePlaylists(resp)
 
 proc addToPlaylist(state: var AppState) =
@@ -596,8 +564,8 @@ proc addToPlaylist(state: var AppState) =
     if realIdx >= 0 and realIdx < state.libraryTracks.len:
       let track = state.libraryTracks[realIdx]
       if track.id notin state.libraryPlaylists[idx].trackIds:
-        if state.player of DaemonClient:
-          let resp = DaemonClient(state.player).addToPlaylist(state.libraryPlaylists[idx].id, track.id, state.libraryPlaylists[idx].trackIds.len - 1)
+        if state.session.connected:
+          let resp = state.session.request(%*{"cmd": "add_to_playlist", "playlist_id": state.libraryPlaylists[idx].id, "track_id": track.id, "position": state.libraryPlaylists[idx].trackIds.len - 1})
           if resp{"ok"}.getBool(false):
             state.libraryPlaylists[idx].trackIds.add(track.id)
         else:
@@ -625,8 +593,8 @@ proc addTracksToPl(state: var AppState, playlistId: int64) =
     if realIdx >= 0 and realIdx < state.libraryTracks.len:
       let track = state.libraryTracks[realIdx]
       if track.id notin state.libraryPlaylists[plIdx].trackIds:
-        if state.player of DaemonClient:
-          let resp = DaemonClient(state.player).addToPlaylist(playlistId, track.id, state.libraryPlaylists[plIdx].trackIds.len - 1)
+        if state.session.connected:
+          let resp = state.session.request(%*{"cmd": "add_to_playlist", "playlist_id": playlistId, "track_id": track.id, "position": state.libraryPlaylists[plIdx].trackIds.len - 1})
           if resp{"ok"}.getBool(false):
             state.libraryPlaylists[plIdx].trackIds.add(track.id)
             added += 1
@@ -687,8 +655,8 @@ proc updateTrashResults(state: var AppState) =
 
 proc applyEqPreset(state: var AppState, name: string) =
   state.eqPreset = name
-  if state.player of DaemonClient:
-    DaemonClient(state.player).setEqPreset(name)
+  if state.session.connected:
+    discard state.session.request(%*{"cmd": "set_eq_preset", "name": name})
 
 proc initCommands(state: var AppState) =
   state.registerCommand("leader_menu", "Actions Menu",
@@ -696,16 +664,16 @@ proc initCommands(state: var AppState) =
     proc(s: var AppState) = s.mode = imLeaderMode)
   state.registerCommand("toggle_play_pause", "Toggle Play/Pause",
     "Toggle between play and pause states", "\u25B6", @["Space"],
-    proc(s: var AppState) = s.player.togglePause())
+    proc(s: var AppState) = s.session.send(%*{"cmd": "toggle_pause"}))
   state.registerCommand("stop_playback", "Stop",
     "Stop playback and reset position", "\u25A0", @["CtrlS", "s"],
-    proc(s: var AppState) = s.player.stop(); s.status = psStopped)
+    proc(s: var AppState) = s.session.send(%*{"cmd": "stop"}); s.status = psStopped)
   state.registerCommand("seek_forward", "Seek Forward",
     "Seek forward 5 seconds", "\u23E9", @[".", "Right"],
-    proc(s: var AppState) = s.player.seek(5.0))
+    proc(s: var AppState) = s.session.send(%*{"cmd": "seek", "seconds": 5.0}))
   state.registerCommand("seek_backward", "Seek Backward",
     "Seek backward 5 seconds", "\u23EA", @[",", "Left"],
-    proc(s: var AppState) = s.player.seek(-5.0))
+    proc(s: var AppState) = s.session.send(%*{"cmd": "seek", "seconds": -5.0}))
   state.registerCommand("volume_up", "Volume Up",
     "Increase volume by 5%", "\uF028", @["CtrlU", "ShiftJ", "Plus", "Equals"],
     proc(s: var AppState) = s.adjustVolume(5))
@@ -769,9 +737,8 @@ proc initCommands(state: var AppState) =
   state.registerCommand("show_trash", "Trash",
     "Browse trashed files and restore or delete them", "\U0001F5D1", @["AltT"],
     proc(s: var AppState) =
-      if s.player of DaemonClient:
-        let cli = DaemonClient(s.player)
-        let resp = cli.listTrash()
+      if s.session.connected:
+        let resp = s.session.request(%*{"cmd": "list_trash"})
         if resp.hasKey("trash"):
           s.overlay = OverlayState(kind: okTrashView, query: "")
           s.trashItems = @[]
@@ -791,9 +758,8 @@ proc initCommands(state: var AppState) =
   state.registerCommand("show_eq_presets", "EQ Presets",
     "Browse and preview equalizer presets", "\U0001F3B5", @[],
     proc(s: var AppState) =
-      if s.player of DaemonClient:
-        let cli = DaemonClient(s.player)
-        let resp = cli.getEqPresets()
+      if s.session.connected:
+        let resp = s.session.request(%*{"cmd": "get_eq_presets"})
         if resp.hasKey("presets"):
           s.eqPresetList = @[]
           for p in resp["presets"]:
@@ -854,13 +820,13 @@ proc initCommands(state: var AppState) =
         if tid > 0:
           if tid in s.favouriteIds:
             s.favouriteIds.excl(tid)
-            if s.player of DaemonClient:
-              discard DaemonClient(s.player).removeFavourite(tid)
+            if s.session.connected:
+              discard s.session.request(%*{"cmd": "remove_favourite", "track_id": tid})
             s.showNotification("Removed from favourites", nkInfo)
           else:
             s.favouriteIds.incl(tid)
-            if s.player of DaemonClient:
-              discard DaemonClient(s.player).addFavourite(tid)
+            if s.session.connected:
+              discard s.session.request(%*{"cmd": "add_favourite", "track_id": tid})
             s.showNotification("Added to favourites", nkSuccess)
           s.markDirty(ceTrack))
   state.registerCommand("import_m3u", "Import M3U",
@@ -927,9 +893,8 @@ proc execCmd(state: var AppState, cmdId: string) =
     state.commands[idx].handler(state)
 
 proc cycleEqPreset(state: var AppState) =
-  if state.player of DaemonClient:
-    let cli = DaemonClient(state.player)
-    let resp = cli.getEqPresets()
+  if state.session.connected:
+    let resp = state.session.request(%*{"cmd": "get_eq_presets"})
     if resp.hasKey("presets"):
       let presets = resp["presets"]
       var idx = 0
@@ -979,13 +944,13 @@ proc adjustSetting(state: var AppState, delta: int) =
     case state.selectIndex
     of 0: # Volume
       state.volume = max(0, min(100, state.volume + delta * 5))
-      state.player.setVolume(state.volume)
+      state.session.send(%*{"cmd": "set_volume", "volume": state.volume})
       state.showVolumeCue()
       state.saveConfig()
     of 1: # Crossfade Duration
       state.crossfadeDuration = max(0, min(10, state.crossfadeDuration + delta))
-      if state.player of DaemonClient:
-        DaemonClient(state.player).setCrossfadeDuration(state.crossfadeDuration)
+      if state.session.connected:
+        discard state.session.request(%*{"cmd": "set_crossfade_duration", "duration": state.crossfadeDuration})
       state.saveConfig()
     of 2: # Crossfade Curve
       let curves = [cctEqualPower, cctQuadratic, cctCubic, cctAsymmetric]
@@ -995,8 +960,8 @@ proc adjustSetting(state: var AppState, delta: int) =
           i = (idx + delta + curves.len) mod curves.len
           break
       state.crossfadeCurve = curves[i]
-      if state.player of DaemonClient:
-        DaemonClient(state.player).setCrossfadeCurve(state.crossfadeCurve.ord)
+      if state.session.connected:
+        discard state.session.request(%*{"cmd": "set_crossfade_curve", "curve": state.crossfadeCurve.ord})
       state.saveConfig()
     else: discard
   of scYouTube:
@@ -1050,8 +1015,8 @@ proc adjustSetting(state: var AppState, delta: int) =
       state.saveConfig()
     of 1: # Daemon IPC Timeout
       state.config.ipcTimeout = max(1, min(30, state.config.ipcTimeout + delta))
-      if state.player of DaemonClient:
-        DaemonClient(state.player).ipcTimeoutSec = float(state.config.ipcTimeout)
+      if state.session.connected:
+        state.session.ipcTimeoutSec = float(state.config.ipcTimeout)
       state.saveConfig()
     of 2: # Reset All — action on Enter only
       discard
@@ -1070,13 +1035,13 @@ proc adjustSetting(state: var AppState, delta: int) =
           i = (idx + delta + formats.len) mod formats.len
           break
       state.spAudioFormat = formats[i]
-      if state.player of DaemonClient:
-        discard DaemonClient(state.player).spSetConfig(state.spCookieSource, state.spCookieFilePath, state.spAudioFormat)
+      if state.session.connected:
+        discard state.session.request(%*{"cmd": "sp_set_config", "cookie_source": state.spCookieSource, "cookie_file": state.spCookieFilePath, "audio_format": state.spAudioFormat})
       state.saveConfig()
     of 3: # Max Downloads
       state.ytMaxConcurrentDownloads = max(1, min(10, state.ytMaxConcurrentDownloads + delta))
-      if state.player of DaemonClient:
-        discard DaemonClient(state.player).spSetConfig(state.spCookieSource, state.spCookieFilePath, state.spAudioFormat)
+      if state.session.connected:
+        discard state.session.request(%*{"cmd": "sp_set_config", "cookie_source": state.spCookieSource, "cookie_file": state.spCookieFilePath, "audio_format": state.spAudioFormat})
       state.saveConfig()
     of 4: # Download History — Enter to view
       discard
@@ -1175,12 +1140,11 @@ proc handleYtSearchOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         else: state.overlay.selected.incl(idx)
       else:
         let r = state.overlay.ytResults[state.overlay.cursor]
-        if r.kind == srkPlaylist and state.player of DaemonClient:
-          let cli = DaemonClient(state.player)
+        if r.kind == srkPlaylist and state.session.connected:
           if state.ytPlaylistFetching:
             state.setFeedback("Playlist fetch already in progress")
           else:
-            let plResp = cli.ytFetchPlaylist(r.url)
+            let plResp = state.session.request(%*{"cmd": "yt_fetch_playlist", "url": r.url})
             if plResp.hasKey("pending") and plResp["pending"].getBool():
               state.ytPlaylistFetching = true
               state.ytSearchLoading = true
@@ -1190,14 +1154,13 @@ proc handleYtSearchOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         else:
           state.overlay.clear()
           state.ytStreamPendingItem = r
-          if state.player of DaemonClient:
-            let cli = DaemonClient(state.player)
+          if state.session.connected:
             if state.ytBatchDownloadMode:
-              discard cli.ytDownload(r.url, r.title, r.channel)
+              state.session.send(%*{"cmd": "yt_download", "url": r.url})
               state.ytDownloadActive = true
               state.setFeedback("Downloading: " & r.title)
             else:
-              discard cli.ytResolveStream(r.url)
+              state.session.send(%*{"cmd": "yt_resolve_stream", "url": r.url})
               state.ytStreamResolving = true
               state.setFeedback("Resolving stream URL...")
   of iw.Key.CtrlD:
@@ -1214,10 +1177,11 @@ proc handleYtSearchOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         daemonItems.add((item.url, item.title, item.channel))
       state.rebuildItems()
       state.markDirty(ceQueue)
-      if daemonItems.len > 0 and state.player of DaemonClient:
-        let cli = DaemonClient(state.player)
-        if cli.connected:
-          discard cli.queueAdd(daemonItems)
+      if daemonItems.len > 0 and state.session.connected:
+        var arr = newJArray()
+        for item in daemonItems:
+          arr.add(%*{"path": item.path, "title": item.title, "channel": item.channel})
+        state.session.send(%*{"cmd": "queue_add", "data": arr})
     if state.overlay.multiMode:
       if state.overlay.selected.len > 0:
         var items: seq[YtSearchResult] = @[]
@@ -1298,10 +1262,11 @@ proc handleYtBatchOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           daemonItems.add((item.url, item.title, item.channel))
         state.rebuildItems()
         state.markDirty(ceQueue)
-        if daemonItems.len > 0 and state.player of DaemonClient:
-          let cli = DaemonClient(state.player)
-          if cli.connected:
-            discard cli.queueAdd(daemonItems)
+        if daemonItems.len > 0 and state.session.connected:
+          var arr = newJArray()
+          for item in daemonItems:
+            arr.add(%*{"path": item.path, "title": item.title, "channel": item.channel})
+          state.session.send(%*{"cmd": "queue_add", "data": arr})
         state.showNotification("Added " & $items.len & " items to queue")
       of 1:
         state.overlay = OverlayState(kind: okYtBatch, batchItems: items, batchShowPls: true)
@@ -1330,9 +1295,8 @@ proc handleSpotifyUrlOverlay(state: var AppState, key: iw.Key, chars: seq[Rune])
         state.overlay.ytAutocompleteVisible = false
         state.overlay.ytResults = @[]
         state.ytSearchLoading = true
-        if state.player of DaemonClient:
-          let cli = DaemonClient(state.player)
-          let resp = cli.ytFetchPlaylist(input)
+        if state.session.connected:
+          let resp = state.session.request(%*{"cmd": "yt_fetch_playlist", "url": input})
           if resp.hasKey("ok") and resp["ok"].getBool(false):
             state.showNotification("Fetching Spotify playlist...")
           else:
@@ -1371,8 +1335,11 @@ proc handleQueuePickerOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]
         state.playbackQueue.add(idx)
         let t = state.libraryTracks[idx]
         items.add((t.path, t.title, t.artist))
-    if items.len > 0 and state.player of DaemonClient:
-      discard DaemonClient(state.player).queueAdd(items)
+    if items.len > 0 and state.session.connected:
+      var arr = newJArray()
+      for item in items:
+        arr.add(%*{"path": item[0], "title": item[1], "channel": item[2]})
+      state.session.send(%*{"cmd": "queue_add", "data": arr})
     state.markDirty(ceQueue)
     if state.status == psStopped and state.playbackQueue.len > 0:
       state.overlay.clear()
@@ -1433,15 +1400,15 @@ proc handleQueueOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           state.queuePaths[qIdx]
         else: ""
       if trackPath.len > 0:
-        if state.player of DaemonClient:
-          discard DaemonClient(state.player).queueRemovePath(trackPath)
+        if state.session.connected:
+          state.session.send(%*{"cmd": "queue_remove_path", "path": trackPath})
         state.playbackQueue.delete(qIdx)
         if state.queuePaths.len > qIdx:
           state.queuePaths.delete(qIdx)
         if state.queueCursor >= qIdx and state.queueCursor > 0:
           state.queueCursor.dec
-        discard state.player.loadFile(trackPath)
-        state.player.play()
+        state.session.send(%*{"cmd": "load_file", "path": trackPath})
+        state.session.send(%*{"cmd": "play"})
         state.status = psPlaying
         state.currentPlayingPath = trackPath
         if tIdx >= 0 and tIdx < state.libraryTracks.len:
@@ -1470,8 +1437,8 @@ proc handleQueueOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           state.queuePaths[qIdx]
         else: ""
       state.showNotification("Removed '" & dName & "' from queue")
-      if state.player of DaemonClient and removePath.len > 0:
-        discard DaemonClient(state.player).queueRemovePath(removePath)
+      if state.session.connected and removePath.len > 0:
+        state.session.send(%*{"cmd": "queue_remove_path", "path": removePath})
       state.playbackQueue.delete(qIdx)
       if state.queuePaths.len > qIdx:
         state.queuePaths.delete(qIdx)
@@ -1512,8 +1479,8 @@ proc handlePlaylistSearchOverlay(state: var AppState, key: iw.Key, chars: seq[Ru
             let track = state.libraryTracks[idx]
             if track.id notin state.libraryPlaylists[plIdx].trackIds:
               state.libraryPlaylists[plIdx].trackIds.add(track.id)
-              if state.player of DaemonClient:
-                discard DaemonClient(state.player).addToPlaylist(state.libraryPlaylists[plIdx].id, track.id, state.libraryPlaylists[plIdx].trackIds.len - 1)
+              if state.session.connected:
+                state.session.send(%*{"cmd": "add_to_playlist", "playlist_id": state.libraryPlaylists[plIdx].id, "track_id": track.id, "position": state.libraryPlaylists[plIdx].trackIds.len - 1})
         state.rebuildItems()
       state.overlay.clear()
   of iw.Key.X:
@@ -1526,8 +1493,8 @@ proc handlePlaylistSearchOverlay(state: var AppState, key: iw.Key, chars: seq[Ru
             let removeIdx = state.libraryPlaylists[plIdx].trackIds.find(trackId)
             if removeIdx >= 0:
               state.libraryPlaylists[plIdx].trackIds.delete(removeIdx)
-              if state.player of DaemonClient:
-                discard DaemonClient(state.player).removeFromPlaylist(state.libraryPlaylists[plIdx].id, trackId)
+              if state.session.connected:
+                state.session.send(%*{"cmd": "remove_from_playlist", "playlist_id": state.libraryPlaylists[plIdx].id, "track_id": trackId})
         state.rebuildItems()
       state.overlay.clear()
   else:
@@ -1639,12 +1606,11 @@ proc handleTrashOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
        state.overlay.cursor < state.overlay.results.len:
       let idx = state.overlay.results[state.overlay.cursor]
       let item = state.trashItems[idx]
-      if state.player of DaemonClient:
-        let cli = DaemonClient(state.player)
-        let resp = cli.restoreTrack(item.id)
+      if state.session.connected:
+        let resp = state.session.request(%*{"cmd": "restore_track", "track_id": item.id})
         if resp{"ok"}.getBool(false):
           state.showNotification("Restored: " & item.originalPath.splitPath().tail, nkSuccess)
-          let resp2 = cli.listTrash()
+          let resp2 = state.session.request(%*{"cmd": "list_trash"})
           if resp2.hasKey("trash"):
             state.trashItems = @[]
             for ti in resp2["trash"]:
@@ -1665,10 +1631,9 @@ proc handleTrashOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
        state.overlay.cursor < state.overlay.results.len:
       let idx = state.overlay.results[state.overlay.cursor]
       let item = state.trashItems[idx]
-      if state.player of DaemonClient:
-        let cli = DaemonClient(state.player)
-        discard cli.permanentDeleteTrash(item.id)
-        let resp2 = cli.listTrash()
+      if state.session.connected:
+        discard state.session.request(%*{"cmd": "permanent_delete_trash", "track_id": item.id})
+        let resp2 = state.session.request(%*{"cmd": "list_trash"})
         if resp2.hasKey("trash"):
           state.trashItems = @[]
           for ti in resp2["trash"]:
@@ -1684,11 +1649,10 @@ proc handleTrashOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         state.updateTrashResults()
         state.showNotification("Permanently deleted", nkWarning)
   of iw.Key.P:
-    if state.player of DaemonClient:
-      let cli = DaemonClient(state.player)
-      let resp = cli.purgeTrash()
+    if state.session.connected:
+      let resp = state.session.request(%*{"cmd": "purge_trash"})
       let n = resp{"purged"}.getInt(0)
-      let resp2 = cli.listTrash()
+      let resp2 = state.session.request(%*{"cmd": "list_trash"})
       if resp2.hasKey("trash"):
         state.trashItems = @[]
         for ti in resp2["trash"]:
@@ -1772,15 +1736,15 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
       let b = state.eqBandSelect.clamp(0, 9)
       state.eqBands[b] = max(-12.0, state.eqBands[b] - 0.5)
       state.eqPreset = ""
-      if state.player of DaemonClient:
-        DaemonClient(state.player).setEqBand(b, state.eqBands[b])
+      if state.session.connected:
+        state.session.send(%*{"cmd": "set_eq_band", "band": b, "value": state.eqBands[b]})
       state.saveConfig()
     of iw.Key.Right:
       let b = state.eqBandSelect.clamp(0, 9)
       state.eqBands[b] = min(12.0, state.eqBands[b] + 0.5)
       state.eqPreset = ""
-      if state.player of DaemonClient:
-        DaemonClient(state.player).setEqBand(b, state.eqBands[b])
+      if state.session.connected:
+        state.session.send(%*{"cmd": "set_eq_band", "band": b, "value": state.eqBands[b]})
       state.saveConfig()
     of iw.Key.Down:
       state.eqBandSelect = min(9, state.eqBandSelect + 1)
@@ -1790,9 +1754,8 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
       cycleEqPreset(state)
       state.saveConfig()
     of iw.Key.ShiftP:
-      if state.player of DaemonClient:
-        let cli = DaemonClient(state.player)
-        let resp = cli.getEqPresets()
+      if state.session.connected:
+        let resp = state.session.request(%*{"cmd": "list_eq_presets"})
         if resp.hasKey("presets"):
           state.eqPresetList = @[]
           for p in resp["presets"]:
@@ -1825,8 +1788,8 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
             let idx = state.selectIndex
             if idx >= 0 and idx < state.libraryPlaylists.len:
               let plId = state.libraryPlaylists[idx].id
-              if state.player of DaemonClient:
-                let resp = DaemonClient(state.player).deletePlaylist(plId)
+              if state.session.connected:
+                let resp = state.session.request(%*{"cmd": "delete_playlist", "playlist_id": plId})
                 state.parsePlaylists(resp)
               else:
                 state.libraryPlaylists.delete(idx)
@@ -1835,8 +1798,8 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           let idx = state.selectIndex
           if idx >= 0 and idx < state.libraryPlaylists.len:
             let plId = state.libraryPlaylists[idx].id
-            if state.player of DaemonClient:
-              let resp = DaemonClient(state.player).renamePlaylist(plId, state.playlistInputBuffer)
+            if state.session.connected:
+              let resp = state.session.request(%*{"cmd": "rename_playlist", "playlist_id": plId, "name": state.playlistInputBuffer})
               state.parsePlaylists(resp)
             else:
               state.libraryPlaylists[idx].name = state.playlistInputBuffer
@@ -1859,25 +1822,22 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
               state.playbackQueue = @[]
               for i in startIdx..<state.libraryTracks.len:
                 state.playbackQueue.add(i)
-              if state.player of DaemonClient:
-                let cli = DaemonClient(state.player)
-                if cli.connected:
-                  discard daemonSimpleCmd(cli, "queue_clear")
-                  var items: seq[(string, string, string)] = @[]
-                  for idx in state.playbackQueue:
-                    let t = state.libraryTracks[idx]
-                    items.add((t.path, t.title, t.artist))
-                  discard cli.queueAdd(items)
+              if state.session.connected:
+                var items = newJArray()
+                for idx in state.playbackQueue:
+                  let t = state.libraryTracks[idx]
+                  items.add(%*{"path": t.path, "title": t.title, "channel": t.artist})
+                state.session.send(%*{"cmd": "queue_set", "data": items})
             state.nextTrack()
             state.setFeedback("Imported " & $addedCount & " tracks from M3U")
         elif state.playlistInputPrompt.contains("Sleep timer"):
           let minutes = state.playlistInputBuffer.parseInt()
-          if state.player of DaemonClient:
-            discard DaemonClient(state.player).setSleepTimer(minutes)
+          if state.session.connected:
+            state.session.send(%*{"cmd": "set_sleep_timer", "minutes": minutes})
           state.sleepTimerRemaining = if minutes > 0: minutes else: 0
         else:
-          if state.player of DaemonClient:
-            let resp = DaemonClient(state.player).createPlaylist(state.playlistInputBuffer)
+          if state.session.connected:
+            let resp = state.session.request(%*{"cmd": "create_playlist", "name": state.playlistInputBuffer})
             state.parsePlaylists(resp)
             if state.libraryPlaylists.len > 0:
               if state.overlay.batchItems.len > 0:
@@ -1962,10 +1922,10 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     of iw.Key.Escape:
       state.mode = imNormal
     of iw.Key.Space:
-      state.player.togglePause()
+      state.session.send(%*{"cmd": "toggle_pause"})
       state.mode = imNormal
     of iw.Key.S:
-      state.player.stop()
+      state.session.send(%*{"cmd": "stop"})
       state.status = psStopped
       state.mode = imNormal
     of iw.Key.N:
@@ -2049,8 +2009,8 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     of iw.Key.One: state.tab = tabNowPlaying; state.rebuildItems(); state.mode = imNormal
     of iw.Key.Two: state.tab = tabLibrary; state.rebuildItems(); state.mode = imNormal
     of iw.Key.Three: state.tab = tabSettings; state.rebuildItems(); state.mode = imNormal
-    of iw.Key.Comma: state.player.seek(-5.0); state.setFeedback("[Seeking -5s]"); state.mode = imNormal
-    of iw.Key.Dot: state.player.seek(5.0); state.setFeedback("[Seeking +5s]"); state.mode = imNormal
+    of iw.Key.Comma: state.session.send(%*{"cmd": "seek", "seconds": -5.0}); state.setFeedback("[Seeking -5s]"); state.mode = imNormal
+    of iw.Key.Dot: state.session.send(%*{"cmd": "seek", "seconds": 5.0}); state.setFeedback("[Seeking +5s]"); state.mode = imNormal
     else:
       state.mode = imNormal
     return
@@ -2070,8 +2030,8 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         state.filterText = ""
       elif state.tab == tabSettings and state.settingsCategory == scSpotify and state.selectIndex == 1:
         state.spCookieFilePath = state.filterText
-        if state.player of DaemonClient:
-          discard DaemonClient(state.player).spSetConfig(state.spCookieSource, state.spCookieFilePath, state.spAudioFormat)
+        if state.session.connected:
+          state.session.send(%*{"cmd": "sp_set_config", "cookie_source": state.spCookieSource, "cookie_file_path": state.spCookieFilePath, "audio_format": state.spAudioFormat})
         state.saveConfig()
         state.setFeedback("Cookie file set: " & state.spCookieFilePath)
         state.filterText = ""
@@ -2106,14 +2066,14 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
             state.queuePaths.delete(state.queueCursor)
           if state.queueCursor >= state.playbackQueue.len and state.queueCursor > 0:
             state.queueCursor.dec
-          if state.player of DaemonClient and removePath.len > 0:
-            discard DaemonClient(state.player).queueRemovePath(removePath)
+          if state.session.connected and removePath.len > 0:
+            state.session.send(%*{"cmd": "queue_remove_path", "path": removePath})
       elif state.queuePendingConfirm == 2:
         state.playbackQueue = @[]
         state.queuePaths = @[]
         state.queueCursor = 0
-        if state.player of DaemonClient:
-          discard daemonSimpleCmd(DaemonClient(state.player), "queue_clear")
+        if state.session.connected:
+          state.session.send(%*{"cmd": "queue_clear"})
     state.queuePendingConfirm = 0
     state.markDirty(ceQueue)
     state.setFeedback("")
@@ -2155,7 +2115,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
       state.toggleSelect()
       state.lastCommandName = "Toggle Select"
     elif state.status == psPlaying or state.status == psPaused:
-      state.player.togglePause()
+      state.session.send(%*{"cmd": "toggle_pause"})
       state.lastCommandName = "Play/Pause"
     else:
       state.playSelected()
@@ -2175,7 +2135,8 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
       state.needsRedraw = true
     state.lastCommandName = "Switch Focus"
   of iw.Key.CtrlS:
-    state.player.stop(); state.status = psStopped
+    state.session.send(%*{"cmd": "stop"})
+    state.status = psStopped
     state.markDirty(cePlayState)
     state.lastCommandName = "Stop"
   of iw.Key.CtrlN: state.nextTrack(); state.lastCommandName = "Next Track"
@@ -2271,7 +2232,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
                 state.queuePaths.delete(0)
           state.queueCursor = 0
           state.upNextScrollOffset = 0
-          discard daemonSimpleCmd(DaemonClient(state.player), "next")
+          state.session.send(%*{"cmd": "next"})
           state.markDirty(cePlayState)
     if state.isPlaylistView():
       if state.playlistContentsIdx >= 0:
@@ -2289,7 +2250,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
       of scAudio:
         case state.selectIndex
         of 3: # Daemon status (refresh)
-          state.daemonConnected = state.player of DaemonClient and DaemonClient(state.player).connected
+          state.daemonConnected = state.session.connected
         else: discard
       of scYouTube:
         case state.selectIndex
@@ -2346,7 +2307,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           state.theme = getTheme("mocha")
           state.volume = 80
           state.config.refreshTheme = false
-          state.player.setVolume(80)
+          state.session.send(%*{"cmd": "set_volume", "volume": 80})
           state.shuffleEnabled = false
           state.repeatMode = 0
           state.sleepTimerRemaining = 0
@@ -2385,8 +2346,8 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
               state.setFeedback("No browser cookies found — set a Cookie File path below")
             else:
               state.showNotification("Detected cookies: " & state.spCookieSource)
-          if state.player of DaemonClient:
-            discard DaemonClient(state.player).spSetConfig(state.spCookieSource, state.spCookieFilePath, state.spAudioFormat)
+          if state.session.connected:
+            state.session.send(%*{"cmd": "sp_set_config", "cookie_source": state.spCookieSource, "cookie_file_path": state.spCookieFilePath, "audio_format": state.spAudioFormat})
           state.saveConfig()
         of 1: # Cookie File — enter path via filter mode
           state.mode = imFilter
@@ -2400,12 +2361,12 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
               i = (idx + 1) mod formats2.len
               break
           state.spAudioFormat = formats2[i]
-          if state.player of DaemonClient:
-            discard DaemonClient(state.player).spSetConfig(state.spCookieSource, state.spCookieFilePath, state.spAudioFormat)
+          if state.session.connected:
+            state.session.send(%*{"cmd": "sp_set_config", "cookie_source": state.spCookieSource, "cookie_file_path": state.spCookieFilePath, "audio_format": state.spAudioFormat})
           state.saveConfig()
         of 4: # Download History (view)
-          if state.player of DaemonClient:
-            let resp = DaemonClient(state.player).spListDownloads()
+          if state.session.connected:
+            let resp = state.session.request(%*{"cmd": "sp_list_downloads"})
             if resp.hasKey("downloads"):
               let arr = resp["downloads"]
               state.spDownloadCount = arr.len
@@ -2428,7 +2389,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     elif state.tab != tabNowPlaying:
       state.playSelected()
     state.lastCommandName = "Open / Play"
-  of iw.Key.S: state.player.stop(); state.status = psStopped; state.lastCommandName = "Stop"
+  of iw.Key.S: state.session.send(%*{"cmd": "stop"}); state.status = psStopped; state.lastCommandName = "Stop"
   of iw.Key.H:
     if state.tab == tabLibrary:
       const sbar = [fsAll, fsArtists, fsAlbums, fsPlaylists, fsRecent, fsFavourites, fsLastPlayed, fsMostPlayed, fsLeastPlayed, fsDownloads, fsSpotify]
@@ -2460,8 +2421,8 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           state.rebuildItems()
           state.setFeedback("[Playlist Down]")
     state.lastCommandName = "Navigate Right"
-  of iw.Key.Comma: state.player.seek(-5.0); state.setFeedback("[Seeking -5s]"); state.lastCommandName = "Seek Backward"
-  of iw.Key.Dot: state.player.seek(5.0); state.setFeedback("[Seeking +5s]"); state.lastCommandName = "Seek Forward"
+  of iw.Key.Comma: state.session.send(%*{"cmd": "seek", "seconds": -5.0}); state.setFeedback("[Seeking -5s]"); state.lastCommandName = "Seek Backward"
+  of iw.Key.Dot: state.session.send(%*{"cmd": "seek", "seconds": 5.0}); state.setFeedback("[Seeking +5s]"); state.lastCommandName = "Seek Forward"
   of iw.Key.Left:
     if state.tab == tabSettings:
       if state.settingsFocusPanel == lpContent:
@@ -2545,9 +2506,9 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     if state.tab == tabLibrary and state.libraryFocusPanel == lpContent:
       let idx = state.selectIndex
       let items = state.displayItems
-      if idx >= 0 and idx < items.len and items[idx].trackIdx >= 0 and state.player of DaemonClient:
+      if idx >= 0 and idx < items.len and items[idx].trackIdx >= 0 and state.session.connected:
         let t = state.libraryTracks[items[idx].trackIdx]
-        discard DaemonClient(state.player).queueAdd(@[(t.path, t.title, t.artist)])
+        state.session.send(%*{"cmd": "queue_add", "data": [%*{"path": t.path, "title": t.title, "channel": t.artist}]})
         state.setFeedback("Added '" & t.displayName() & "' to queue")
         state.markDirty(ceQueue)
     elif state.isPlaylistView() and state.playlistContentsIdx < 0:
@@ -2583,8 +2544,8 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
       if abs(state.spatialWidth - w) < 0.01:
         idx = (i + 1) mod widths.len; break
     state.spatialWidth = widths[idx]
-    if state.player of DaemonClient:
-      DaemonClient(state.player).setSpatialWidth(state.spatialWidth)
+    if state.session.connected:
+      state.session.send(%*{"cmd": "set_spatial_width", "width": state.spatialWidth})
     let label = if idx == 0: "Mono" elif idx == 1: "Narrow" elif idx == 2: "Normal" elif idx == 3: "Wide" else: "Max"
     state.showNotification("Spatial: " & label & " (" & $state.spatialWidth & "x)")
     state.lastCommandName = "Cycle Spatial Width"
@@ -2645,9 +2606,8 @@ proc parseDurationToSec*(dur: string): float =
 proc fullStateSync(state: var AppState, daemonState: JsonNode)
 
 proc processEvents(state: var AppState) =
-  let events = state.player.pollEvents()
-  if state.player of DaemonClient:
-    state.audioAvailable = DaemonClient(state.player).working
+  let events = state.session.drainEvents()
+  state.audioAvailable = state.session.connected
   for ev in events:
     if ev.version > state.daemonStateVersion:
       state.daemonStateVersion = ev.version
@@ -2674,10 +2634,12 @@ proc processEvents(state: var AppState) =
       state.notificationMsg = ""
       state.nowPlayingCueTimer = 0
       state.nowPlayingCueMsg = ""
-      if state.player.duration > 0.0:
-        state.duration = state.player.duration
-      if state.player.timePos >= 0.0:
-        state.timePos = state.player.timePos
+      if ev.metadata.hasKey("duration"):
+        try: state.duration = parseFloat(ev.metadata["duration"])
+        except: discard
+      if ev.metadata.hasKey("time_pos"):
+        try: state.timePos = parseFloat(ev.metadata["time_pos"])
+        except: discard
       let autoAdvanced = ev.metadata.getOrDefault("auto_advanced", "false") == "true"
       # Sync track info from event metadata (daemon always includes it)
       if ev.metadata.hasKey("track_path"):
@@ -2686,8 +2648,7 @@ proc processEvents(state: var AppState) =
         state.currentPlayingChannel = ev.metadata.getOrDefault("track_channel", "")
         state.ytStreamTitle = state.currentPlayingTitle
         state.ytStreamChannel = state.currentPlayingChannel
-      # Fallback: derive from player state if metadata not available
-      elif state.player.timePos >= 0 and state.player.duration > 0:
+      elif state.timePos >= 0 and state.duration > 0:
         state.setFeedback("[Track changed]", nkInfo)
       # Resolve currentPlayingId from path and sync title/artist into library
       if state.currentPlayingPath.len > 0:
@@ -2707,14 +2668,14 @@ proc processEvents(state: var AppState) =
         let cacheKey = hash(state.currentPlayingPath).toHex
         if cacheKey notin state.coverCache:
           state.coverFetching = true
-          if state.player of DaemonClient:
-            DaemonClient(state.player).sendOnly(%*{"cmd": "request_cover_art", "path": state.currentPlayingPath})
+          if state.session.connected:
+            state.session.send(%*{"cmd": "request_cover_art", "path": state.currentPlayingPath})
       # Request lyrics from daemon — non-blocking, response via lyrics_sync event
       if not isSameTrack and state.currentPlayingPath.len > 0:
         state.currentLyrics = LrcData(lines: @[])
         state.lyricsLineIdx = -1
-        if state.player of DaemonClient:
-          DaemonClient(state.player).sendOnly(%*{"cmd": "request_lyrics",
+        if state.session.connected:
+          state.session.send(%*{"cmd": "request_lyrics",
             "path": state.currentPlayingPath, "title": state.currentPlayingTitle,
             "artist": state.currentPlayingChannel, "duration": state.duration})
       # Show Now Playing notification — skip if same track (play/pause resume) or auto-advanced
@@ -2793,7 +2754,7 @@ proc processEvents(state: var AppState) =
           if fs.len > 0:
             fullStateSync(state, fs)
             state.markDirtyBatch(cePlayState, ceTrack, cePosition, ceVolume)
-      elif ev.strVal == "queue_changed" and state.player of DaemonClient:
+      elif ev.strVal == "queue_changed":
         state.shuffleIndex = ev.intVal
         state.markDirty(ceQueue)
         # Rebuild TUI playbackQueue from daemon queue paths
@@ -2886,8 +2847,8 @@ proc processEvents(state: var AppState) =
         let channel = ev.metadata.getOrDefault("channel", "")
         if url.len > 0:
           state.ytStreamResolving = false
-          discard state.player.loadFile(url, title, channel)
-          state.player.play()
+          state.session.send(%*{"cmd": "load_file", "path": url, "title": title, "channel": channel})
+          state.session.send(%*{"cmd": "play"})
           state.status = psPlaying
           state.currentPlayingPath = url
           state.currentPlayingTitle = title
@@ -2947,11 +2908,6 @@ proc processEvents(state: var AppState) =
               state.currentLyrics = lrcData
             except: discard
     else: discard
-  if state.player.timePos != state.timePos and state.status == psPlaying:
-    state.timePos = state.player.timePos
-    state.markDirty(cePosition)
-  if state.duration == 0.0 and state.player.duration > 0.0:
-    state.duration = state.player.duration
 
 proc fullStateSync(state: var AppState, daemonState: JsonNode) =
   let s = daemonState{"state"}.getStr("stopped")
@@ -2995,34 +2951,33 @@ proc runTui(args: seq[string]) =
   setControlCHook(handleQuitSignal)
   terminal.hideCursor()
   let hasKittyGraphics = supportsKittyGraphics()
-  var dClient = newDaemonClient()
-  dClient.ensureDaemon()
+  var session = newDaemonSession()
+  session.ensureRunning()
   var ctx = nw.initContext[AppState]()
-  ctx.data.player = dClient
-  ctx.data.daemonConnected = dClient.connected
+  ctx.data.session = session
+  ctx.data.daemonConnected = session.connected
   ctx.data.loadPlaylists()
-  ctx.data.audioAvailable = dClient.working
+  ctx.data.audioAvailable = session.connected
   initApp(ctx.data)
   ctx.data.hasKittyGraphics = hasKittyGraphics
   ctx.data.highlightGroups = initHighlightGroups(ctx.data.theme)
   ctx.data.loadConfig()
   ctx.data.deviceName = getPlaybackDeviceName()
-  dClient.ipcTimeoutSec = float(ctx.data.config.ipcTimeout)
   if ctx.data.ytCookieSource.len == 0:
     ctx.data.ytCookieSource = detectBrowserCookieSource()
   if ctx.data.spCookieSource.len == 0:
     ctx.data.spCookieSource = detectBrowserCookieSource()
-  if dClient.connected:
-    discard dClient.spSetConfig(ctx.data.spCookieSource, ctx.data.spCookieFilePath, ctx.data.spAudioFormat)
-  ctx.data.player.setVolume(ctx.data.volume)
+  if session.connected:
+    session.send(%*{"cmd": "sp_set_config", "cookie_source": ctx.data.spCookieSource, "cookie_file_path": ctx.data.spCookieFilePath, "audio_format": ctx.data.spAudioFormat})
+  session.send(%*{"cmd": "set_volume", "volume": ctx.data.volume})
   ctx.data.initCommands()
   ctx.data.applyKeybindings()
   ctx.data.loadLibrary()
   ctx.data.buildPlaylistFromArgs(args)
   # Sync queue from daemon (after loadLibrary so libraryTracks is populated for path→index mapping)
-  if dClient.connected and args.len == 0:
+  if session.connected and args.len == 0:
     try:
-      let daemonState = dClient.getFullState()
+      let daemonState = session.request(%*{"cmd": "get_full_state"})
       fullStateSync(ctx.data, daemonState)
       # Restore queue from daemon's persisted state
       if daemonState.hasKey("queue"):
@@ -3047,9 +3002,9 @@ proc runTui(args: seq[string]) =
           ctx.data.markDirty(ceQueue)
         except: discard
     except: discard
-  if dClient.connected:
+  if session.connected:
     try:
-      let spResp = dClient.spListDownloads()
+      let spResp = session.request(%*{"cmd": "sp_list_downloads"})
       if spResp.hasKey("downloads"):
         let arr = spResp["downloads"]
         ctx.data.spDownloadCount = arr.len
@@ -3057,7 +3012,7 @@ proc runTui(args: seq[string]) =
           ctx.data.spDownloaded[item{"url"}.getStr("")] = item{"path"}.getStr("")
     except: discard
   ctx.data.rebuildItems()
-  if dClient.connected and ctx.data.currentPlayingPath.len > 0:
+  if session.connected and ctx.data.currentPlayingPath.len > 0:
     for i, t in ctx.data.libraryTracks:
       if t.path == ctx.data.currentPlayingPath:
         ctx.data.selectIndex = i
@@ -3105,90 +3060,82 @@ proc runTui(args: seq[string]) =
         else:
           ctx.data.needsRedraw = true
       processEvents(ctx.data)
-      # Daemon reconnection watchdog — non-blocking async state sync
-      if ctx.data.player of DaemonClient:
-        let cli = DaemonClient(ctx.data.player)
-        if not cli.connected:
-          ctx.data.reconnectAttempts.inc
-          if not ctx.data.reconnecting:
-            ctx.data.reconnecting = true
+      # Daemon reconnection watchdog
+      if not session.connected:
+        ctx.data.reconnectAttempts.inc
+        if not ctx.data.reconnecting:
+          ctx.data.reconnecting = true
+          ctx.data.reattachSyncPending = 0
+          ctx.data.markDirty(ceReconnecting)
+        if ctx.data.reattachSyncPending == 0 and ctx.data.reconnectAttempts mod 30 == 0:
+          session.ensureRunning()
+          if session.connected:
+            ctx.data.reattachSyncPending = 3
+            try:
+              let resp = session.request(%*{"cmd": "get_full_state"})
+              fullStateSync(ctx.data, resp)
+              if resp.hasKey("queue"):
+                try:
+                  let qArr = resp["queue"]
+                  var queue: seq[int] = @[]
+                  var queuePaths: seq[string] = @[]
+                  for qItem in qArr.items:
+                    let qPath = qItem.getStr("")
+                    var found = false
+                    for i, t in ctx.data.libraryTracks:
+                      if t.path == qPath:
+                        queue.add(i)
+                        queuePaths.add("")
+                        found = true
+                        break
+                    if not found:
+                      queue.add(-1)
+                      queuePaths.add(qPath)
+                  ctx.data.playbackQueue = queue
+                  ctx.data.queuePaths = queuePaths
+                  ctx.data.markDirtyBatch(ceQueue, cePlayState)
+                except: discard
+              if ctx.data.currentPlayingPath.len > 0:
+                for i, t in ctx.data.libraryTracks:
+                  if t.path == ctx.data.currentPlayingPath:
+                    ctx.data.selectIndex = i
+                    ctx.data.currentPlayingId = t.id
+                    break
+            except: discard
+            try:
+              let libResp = session.request(%*{"cmd": "get_library"})
+              if libResp.hasKey("tracks") and libResp["tracks"].len > 0:
+                ctx.data.loadLibraryFromDaemon(libResp)
+                ctx.data.ytDownloaded.clear()
+                let dlDir = ctx.data.ytDownloadDir
+                for t in ctx.data.libraryTracks:
+                  if t.path.startsWith(dlDir):
+                    ctx.data.ytDownloaded[t.path] = t.path
+                ctx.data.downloadCount = ctx.data.ytDownloaded.len
+            except: discard
+            try:
+              let favResp = session.request(%*{"cmd": "get_favourites"})
+              if favResp.hasKey("favourites"):
+                ctx.data.favouriteIds = initHashSet[int64]()
+                for fid in favResp["favourites"]:
+                  ctx.data.favouriteIds.incl(fid.getInt(0).int64)
+            except: discard
             ctx.data.reattachSyncPending = 0
-            ctx.data.markDirty(ceReconnecting)
-          if ctx.data.reattachSyncPending == 0 and ctx.data.reconnectAttempts mod 30 == 0:
-            cli.ensureDaemon()
-            if cli.connected:
-              ctx.data.reattachSyncPending = 3
-              cli.sendAsync(%*{"cmd": "get_full_state"}) do (resp: JsonNode):
-                fullStateSync(ctx.data, resp)
-                if resp.hasKey("queue"):
-                  try:
-                    let qArr = resp["queue"]
-                    var queue: seq[int] = @[]
-                    var queuePaths: seq[string] = @[]
-                    for qItem in qArr.items:
-                      let qPath = qItem.getStr("")
-                      var found = false
-                      for i, t in ctx.data.libraryTracks:
-                        if t.path == qPath:
-                          queue.add(i)
-                          queuePaths.add("")
-                          found = true
-                          break
-                      if not found:
-                        queue.add(-1)
-                        queuePaths.add(qPath)
-                    ctx.data.playbackQueue = queue
-                    ctx.data.queuePaths = queuePaths
-                    ctx.data.markDirtyBatch(ceQueue, cePlayState)
-                  except: discard
-                if ctx.data.currentPlayingPath.len > 0:
-                  for i, t in ctx.data.libraryTracks:
-                    if t.path == ctx.data.currentPlayingPath:
-                      ctx.data.selectIndex = i
-                      ctx.data.currentPlayingId = t.id
-                      break
-                ctx.data.reattachSyncPending.dec
-                if ctx.data.reattachSyncPending == 0:
-                  ctx.data.reconnecting = false
-                  ctx.data.reconnectAttempts = 0
-                  ctx.data.markDirtyBatch(cePlayState, ceTrack, ceVolume, cePosition)
-              cli.sendAsync(%*{"cmd": "get_library"}) do (resp: JsonNode):
-                if resp.hasKey("tracks") and resp["tracks"].len > 0:
-                  ctx.data.loadLibraryFromDaemon(cli, resp)
-                  ctx.data.ytDownloaded.clear()
-                  let dlDir = ctx.data.ytDownloadDir
-                  for t in ctx.data.libraryTracks:
-                    if t.path.startsWith(dlDir):
-                      ctx.data.ytDownloaded[t.path] = t.path
-                  ctx.data.downloadCount = ctx.data.ytDownloaded.len
-                ctx.data.reattachSyncPending.dec
-                if ctx.data.reattachSyncPending == 0:
-                  ctx.data.reconnecting = false
-                  ctx.data.reconnectAttempts = 0
-                  ctx.data.markDirtyBatch(cePlayState, ceTrack, ceVolume, cePosition)
-              cli.sendAsync(%*{"cmd": "get_favourites"}) do (resp: JsonNode):
-                if resp.hasKey("favourites"):
-                  ctx.data.favouriteIds = initHashSet[int64]()
-                  for fid in resp["favourites"]:
-                    ctx.data.favouriteIds.incl(fid.getInt(0).int64)
-                ctx.data.reattachSyncPending.dec
-                if ctx.data.reattachSyncPending == 0:
-                  ctx.data.reconnecting = false
-                  ctx.data.reconnectAttempts = 0
-                  ctx.data.markDirtyBatch(cePlayState, ceTrack, ceVolume, cePosition)
-        elif ctx.data.reconnecting and ctx.data.reattachSyncPending == 0:
-          ctx.data.reconnecting = false
-          ctx.data.reconnectAttempts = 0
-          ctx.data.markDirtyBatch(cePlayState, ceTrack, ceVolume, cePosition)
+            ctx.data.reconnecting = false
+            ctx.data.reconnectAttempts = 0
+            ctx.data.markDirtyBatch(cePlayState, ceTrack, ceVolume, cePosition)
+      elif ctx.data.reconnecting and ctx.data.reattachSyncPending == 0:
+        ctx.data.reconnecting = false
+        ctx.data.reconnectAttempts = 0
+        ctx.data.markDirtyBatch(cePlayState, ceTrack, ceVolume, cePosition)
 
-      if ctx.data.overlay.kind == okYtSearch and ctx.data.player of DaemonClient:
-        let cli = DaemonClient(ctx.data.player)
+      if ctx.data.overlay.kind == okYtSearch and session.connected:
         if ctx.data.ytDebounceAt > 0 and epochTime() >= ctx.data.ytDebounceAt:
           ctx.data.ytDebounceAt = 0
           if ctx.data.overlay.query.len > 0:
             if ctx.data.ytSearchQuery != ctx.data.overlay.query:
               if ctx.data.ytSearchActive:
-                cli.ytSearchCancel()
+                session.send(%*{"cmd": "yt_search_cancel"})
                 ctx.data.ytSearchActive = false
               ctx.data.overlay.ytResults = @[]
               ctx.data.overlay.cursor = 0
@@ -3205,12 +3152,11 @@ proc runTui(args: seq[string]) =
                 ctx.data.ytSearchActive = false
                 ctx.data.markDirty(ceSearchResults)
               else:
-                cli.ytSearch(ctx.data.overlay.query, ctx.data.ytSearchPageSize * max(1, ctx.data.ytSearchPage + 1))
+                session.send(%*{"cmd": "yt_search", "query": ctx.data.overlay.query, "limit": ctx.data.ytSearchPageSize * max(1, ctx.data.ytSearchPage + 1)})
                 ctx.data.ytSearchActive = true
                 ctx.data.ytSearchLoading = true
                 ctx.data.markDirty(ceSearchLoading)
-      if ctx.data.ytStreamResolving and ctx.data.player of DaemonClient:
-        # Stream resolution handled via yt_stream_resolved event in processEvents
+      if ctx.data.ytStreamResolving and session.connected:
         discard
       if ctx.data.feedbackTimer > 0:
         ctx.data.feedbackTimer.dec
@@ -3233,13 +3179,12 @@ proc runTui(args: seq[string]) =
           ctx.data.showNotification("High volume for 30 min — lower to protect hearing", nkWarning)
       elif ctx.data.highVolAccumFrames > 0:
         ctx.data.highVolAccumFrames = 0
-      if ctx.data.sleepTimerRemaining > 0 and ctx.data.player of DaemonClient:
-        ctx.data.sleepTimerRemaining = DaemonClient(ctx.data.player).sleepTimerRemaining
-      # Reconnection cooldown (frame-based, no os.sleep)
-      if ctx.data.player of DaemonClient:
-        let cli = DaemonClient(ctx.data.player)
-        if cli.reconnectCooldown > 0:
-          cli.reconnectCooldown.dec
+      if ctx.data.sleepTimerRemaining > 0 and session.connected:
+        try:
+          let stResp = session.request(%*{"cmd": "get_sleep_timer"})
+          if stResp.hasKey("remaining"):
+            ctx.data.sleepTimerRemaining = stResp["remaining"].getInt(0)
+        except: discard
       let curW = terminal.terminalWidth()
       let curH = terminal.terminalHeight()
       resized = false

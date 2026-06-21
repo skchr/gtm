@@ -36,7 +36,7 @@ when not defined(macosx):
   proc prctl(option: cint, arg2: cstring): cint {.importc, header: "<sys/prctl.h>".}
 else:
   proc pthread_setname_np(name: cstring): cint {.importc, header: "<pthread.h>".}
-import audio, state, library, ytdlp, lyrics
+import audio, state, library, ytdlp, lyrics, session
 
 proc parseFilenameForMetadata(path: string): tuple[title, artist: string] =
   let (_, stem, _) = path.splitFile()
@@ -64,7 +64,7 @@ type
     dckPrepareNext, dckCrossfade,
     dckSetEqBand, dckSetEqPreset,
     dckGetLibrary, dckAddTrack, dckUpdateTrackPath,
-    dckQueueAdd, dckQueueRemove, dckQueueRemovePath, dckQueueClear, dckQueueValidate, dckQueueList, dckQueueSetCursor,
+    dckQueueAdd, dckQueueSet, dckQueueRemove, dckQueueRemovePath, dckQueueClear, dckQueueValidate, dckQueueList, dckQueueSetCursor,
     dckAddFavourite, dckRemoveFavourite, dckGetFavourites, dckGetFullState,
     dckYtSearch, dckYtSearchPoll, dckYtSearchCancel,
     dckYtResolveStream, dckYtResolveStreamPoll,
@@ -276,6 +276,8 @@ proc parseDaemonCommand(line: string): DaemonCmd =
       result.kind = dckUpdateTrackPath; result.strArg = $j["data"]
     of "queue_add":
       result.kind = dckQueueAdd; result.strArg = $j["data"]
+    of "queue_set":
+      result.kind = dckQueueSet; result.strArg = $j["data"]
     of "queue_remove":
       result.kind = dckQueueRemove; result.intArg = j{"index"}.getInt(0)
     of "queue_remove_path":
@@ -1054,6 +1056,27 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
             d.sendQueueEvent()
             d.pushFullState()
       except: stderr.writeLine("[gtm] queueAdd error: " & getCurrentExceptionMsg())
+  of dckQueueSet:
+    d.playbackQueue = @[]
+    if cmd.strArg.len > 0:
+      try:
+        let items = parseJson(cmd.strArg)
+        for item in items:
+          var path = ""
+          if item.kind == JString:
+            path = item.getStr("")
+          elif item.kind == JObject:
+            path = item{"path"}.getStr("")
+          if path.len > 0:
+            d.playbackQueue.add(path)
+        result["queue_length"] = %d.playbackQueue.len
+        d.regenShuffleIfNeeded()
+        d.sendQueueEvent()
+        if d.player != nil and d.player.state == 0 and d.playbackQueue.len > 0:
+          if d.advanceToNextTrack(true):
+            d.sendQueueEvent()
+            d.pushFullState()
+      except: stderr.writeLine("[gtm] queueSet error: " & getCurrentExceptionMsg())
   of dckQueueRemove:
     if cmd.intArg >= 0 and cmd.intArg < d.playbackQueue.len:
       d.playbackQueue.delete(cmd.intArg)

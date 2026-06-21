@@ -2,7 +2,7 @@ import illwave as iw
 import ../vendor/nimwave/nimwave as nw
 from unicode import runeLen, toRunes, Rune
 import colors, sequtils, math, strutils, tables, sets, os, times, posix, osproc, options
-import state, theme, audio, library, icons, commands, client, graphics, hashes
+import state, session, theme, audio, library, icons, commands, graphics, hashes
 
 type State* = AppState
 include ../vendor/nimwave/nimwave/prelude
@@ -1601,12 +1601,7 @@ method render*(node: AboutOverlay, ctx: var nw.Context[AppState]) =
   sep()
 
   # Audio & playback
-  let audioBackendName = case ctx.data.player.backendType
-    of abtMixer: "ALSA (Mixer)"
-    of abtFFmpeg: "ALSA (FFmpeg)"
-    of abtDaemon: "ALSA (Daemon)"
-    else: "none"
-  line("Audio", audioBackendName)
+  line("Audio", "Daemon")
   let playbackState = case ctx.data.status
     of psPlaying: "Playing"
     of psPaused: "Paused"
@@ -1615,15 +1610,13 @@ method render*(node: AboutOverlay, ctx: var nw.Context[AppState]) =
     if ctx.data.status == psPlaying: theme.green
     elif ctx.data.status == psPaused: theme.peach
     else: theme.subtext0)
-  if ctx.data.player of DaemonClient:
-    let dcli = DaemonClient(ctx.data.player)
-    let daemonStatus = if ctx.data.reconnecting: "Reconnecting"
-                       elif dcli.connected: "Connected"
-                       else: "Disconnected"
-    let daemonColor = if ctx.data.reconnecting: theme.peach
-                      elif dcli.connected: theme.green
-                      else: theme.red
-    line("Daemon", daemonStatus, daemonColor)
+  let daemonStatus = if ctx.data.reconnecting: "Reconnecting"
+                     elif ctx.data.session.connected: "Connected"
+                     else: "Disconnected"
+  let daemonColor = if ctx.data.reconnecting: theme.peach
+                    elif ctx.data.session.connected: theme.green
+                    else: theme.red
+  line("Daemon", daemonStatus, daemonColor)
 
   if y < boxY + boxH - 2:
     y = boxY + boxH - 2

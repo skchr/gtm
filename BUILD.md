@@ -17,7 +17,7 @@
 | FFmpeg (libavformat, libavcodec, libavutil, libswresample) | `libavformat-dev libavcodec-dev libavutil-dev libswresample-dev` | `ffmpeg` via Homebrew |
 | [ALSA](https://www.alsa-project.org) | `libasound2-dev` | Not needed |
 | [SQLite](https://www.sqlite.org) | Vendored (no system dep) | Vendored |
-| [dbus-1](https://www.freedesktop.org/wiki/Software/dbus/) (optional, MPRIS) | `libdbus-1-dev` | Not needed |
+| [dbus-1](https://www.freedesktop.org/wiki/Software/dbus/) (optional, MPRIS) | `libdbus-1-dev` (runtime only) | Not needed |
 
 FFmpeg: https://github.com/FFmpeg/FFmpeg
 ALSA: https://github.com/alsa-project/alsa-lib
@@ -32,7 +32,7 @@ dbus: https://github.com/freedesktop/dbus
 | ansiutils | https://github.com/juancarlospaco/ansiutils |
 | nim-dbus | https://github.com/zielmicha/nim-dbus |
 
-These are checked out at `vendor/` (via `git submodule` or manual clone). See `.gitsubmodules`.
+All vendor dependencies are bundled directly under `vendor/`. No submodules or external clones needed.
 
 ### Runtime dependencies
 
@@ -40,7 +40,7 @@ These are checked out at `vendor/` (via `git submodule` or manual clone). See `.
 |------|---------|-----------|
 | [yt-dlp](https://github.com/yt-dlp/yt-dlp) | YouTube streaming, search, download | https://github.com/yt-dlp/yt-dlp |
 | [spotDL](https://github.com/spotDL/spotify-downloader) (optional) | Spotify playlist import | https://github.com/spotDL/spotify-downloader |
-| [viu](https://github.com/atanunq/viu) (optional) | Album art preview in terminal | https://github.com/atanunq/viu |
+
 
 ### Optional build tools
 

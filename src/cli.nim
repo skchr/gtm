@@ -20,7 +20,7 @@
 ## └────────────────────────────────────────────────┘
 
 import os, json, strutils, osproc
-import client, state, library, audio
+import session, state, library, audio
 
 type
   Subcommand* = enum
@@ -90,9 +90,9 @@ proc parseArgs*(args: seq[string] = os.commandLineParams()): CliArgs =
   else: discard
 
 proc simpleDaemonCmd(cmd: string): JsonNode =
-  var cli = newDaemonClient()
-  cli.ensureDaemon()
-  result = daemonSimpleCmd(cli, cmd)
+  var session = newDaemonSession()
+  session.ensureRunning()
+  result = session.request(%*{"cmd": cmd})
 
 proc printVersion*() =
   echo "gtm " & GTM_VERSION
@@ -110,55 +110,55 @@ proc execSubcommand*(args: CliArgs): bool =
   of scVersion:
     printVersion()
   of scPlay:
-    var cli = newDaemonClient()
-    cli.ensureDaemon()
+    var session = newDaemonSession()
+    session.ensureRunning()
     if args.targets.len > 0:
-      discard cli.loadFile(args.targets[0])
-      cli.play()
+      session.send(%*{"cmd": "load_file", "path": args.targets[0]})
+      session.send(%*{"cmd": "play"})
     echo "Playing: ", if args.targets.len > 0: args.targets[0] else: ""
   of scPause, scToggle:
-    var cli = newDaemonClient()
-    cli.ensureDaemon()
-    cli.togglePause()
+    var session = newDaemonSession()
+    session.ensureRunning()
+    session.send(%*{"cmd": "toggle_pause"})
     echo "Toggled pause"
   of scStop:
-    var cli = newDaemonClient()
-    cli.ensureDaemon()
-    cli.stop()
+    var session = newDaemonSession()
+    session.ensureRunning()
+    session.send(%*{"cmd": "stop"})
     echo "Stopped"
   of scNext:
-    var cli = newDaemonClient()
-    cli.ensureDaemon()
-    discard daemonSimpleCmd(cli, "next")
+    var session = newDaemonSession()
+    session.ensureRunning()
+    session.send(%*{"cmd": "next"})
     echo "Next track"
   of scPrev:
-    var cli = newDaemonClient()
-    cli.ensureDaemon()
-    discard daemonSimpleCmd(cli, "prev")
+    var session = newDaemonSession()
+    session.ensureRunning()
+    session.send(%*{"cmd": "prev"})
     echo "Previous track"
   of scVolume:
-    var cli = newDaemonClient()
-    cli.ensureDaemon()
+    var session = newDaemonSession()
+    session.ensureRunning()
     if args.volumeLevel >= 0:
-      cli.setVolume(args.volumeLevel)
+      session.send(%*{"cmd": "set_volume", "volume": args.volumeLevel})
       echo "Volume set to ", args.volumeLevel
     else:
       let resp = simpleDaemonCmd("get_volume")
       echo "Volume: ", resp{"volume"}.getInt(80)
   of scShuffle:
-    var cli = newDaemonClient()
-    cli.ensureDaemon()
-    discard cli.setShuffle(args.shuffleEnabled)
+    var session = newDaemonSession()
+    session.ensureRunning()
+    session.send(%*{"cmd": "set_shuffle", "enabled": args.shuffleEnabled.int})
     echo "Shuffle: ", (if args.shuffleEnabled: "on" else: "off")
   of scRepeat:
-    var cli = newDaemonClient()
-    cli.ensureDaemon()
-    discard cli.setRepeat(args.repeatMode)
+    var session = newDaemonSession()
+    session.ensureRunning()
+    session.send(%*{"cmd": "set_repeat", "mode": args.repeatMode})
     echo "Repeat: mode ", args.repeatMode
   of scSleep:
-    var cli = newDaemonClient()
-    cli.ensureDaemon()
-    discard cli.setSleepTimer(args.sleepMinutes)
+    var session = newDaemonSession()
+    session.ensureRunning()
+    session.send(%*{"cmd": "set_sleep_timer", "minutes": args.sleepMinutes})
     echo "Sleep timer: ", args.sleepMinutes, " minutes"
   of scStatus:
     let resp = simpleDaemonCmd("status")

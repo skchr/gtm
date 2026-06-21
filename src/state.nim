@@ -4,34 +4,32 @@
 ## library view, theme cache, cover art cache, and the daemon IPC
 ## connection. It is passed by `var` through the entire TUI codebase.
 ##
-## ┌───────────────────────────────────────────────────────┐
-## │  AppState                                              │
-## │                                                       │
-## │  ┌─────────────────┐  ┌──────────────────────────┐    │
-## │  │  Config fields   │  │  DaemonClient (Audio     │    │
-## │  │  (theme, volume,│  │  Backend subclass)       │    │
-## │  │   keybindings…)  │  │  - sock, buf, pending    │    │
-## │  └─────────────────┘  │  - drainedEvents[]        │    │
-## │                        └──────────────────────────┘    │
-## │  ┌─────────────────┐  ┌──────────────────────────┐    │
-## │  │  Playback        │  │  Library view            │    │
-## │  │  - queue[]       │  │  - tracks[], playlists[] │    │
-## │  │  - cursor, status │  │  - filter, search          │    │
-## │  │  - volume, repeat,│  │  - selection            │    │
-## │  │    shuffle, mute  │  └──────────────────────────┘    │
-## │  └─────────────────┘                                    │
-## │  ┌─────────────────┐  ┌──────────────────────────┐    │
-## │  │  UI state        │  │  Cover cache + lyrics    │    │
-## │  │  - tab, editor   │  │  (LrcData, LrcLine[])   │    │
-## │  │  - notifications │  └──────────────────────────┘    │
-## │  └─────────────────┘                                    │
-## │  daemonStateVersion — monotonic counter for state sync  │
-## └───────────────────────────────────────────────────────┘
+## ┌────────────────────────────────────────────────────┐
+## │  AppState                                           │
+## │                                                     │
+## │  ┌────────────────┐  ┌────────────────────────┐    │
+## │  │  Config fields  │  │  DaemonSession (IPC    │    │
+## │  │  (theme, volume,│  │  transport)            │    │
+## │  │   keybindings…) │  │  - sock, buf           │    │
+## │  └────────────────┘  │  - send/request/        │    │
+## │                        │    drainEvents         │    │
+## │  ┌────────────────┐  └────────────────────────┘    │
+## │  │  Queue (from    │                                │
+## │  │  daemon events) │  ┌────────────────────────┐    │
+## │  │  - items[]      │  │  Library view           │    │
+## │  │  (path+title+  │  │  - tracks[], playlists[]│    │
+## │  │   channel)      │  │  - filter, search       │    │
+## │  └────────────────┘  │  - selection             │    │
+## │  ┌────────────────┐  └────────────────────────┘    │
+## │  │  UI state       │                                │
+## │  │  - tab, editor  │  ┌────────────────────────┐    │
+## │  │  - notifications│  │  Cover cache + lyrics   │    │
+## │  └────────────────┘  └────────────────────────┘    │
+## └────────────────────────────────────────────────────┘
 
 import illwave as iw
-import os, tables, sets, osproc, audio, theme, math, json, options, colors, strutils
-
-var debugMode*: bool
+import osproc, tables, sets, audio, theme, math, json, options, colors, strutils
+import session
 
 type
   PlaybackStatus* = enum
@@ -283,7 +281,7 @@ type
     highlightGroups*: HighlightGroups
     userHighlightOverrides*: JsonNode
     footerPreset*: FooterPresetName
-    player*: AudioBackend
+    session*: DaemonSession
     status*: PlaybackStatus
     timePos*: float
     duration*: float
@@ -340,8 +338,6 @@ type
     lastCommandName*: string
     prevVolume*: int
     shuffleEnabled*: bool
-    shuffleOrder*: seq[int]
-    shuffleIndex*: int
     repeatMode*: int
     sleepTimerRemaining*: int
     playlistContentsIdx*: int
@@ -358,6 +354,8 @@ type
     feedbackTimer*: int
     playbackQueue*: seq[int]
     queuePaths*: seq[string]
+    shuffleOrder*: seq[int]
+    shuffleIndex*: int
     ytDebounceAt*: float
     ytStreamPendingItem*: YtSearchResult
     ytStreamTitle*: string
@@ -510,29 +508,7 @@ const
     "Asymmetric": "Asymmetric curve. Fast fade-out, slow fade-in."
   }.toTable()
 
-proc stateDir*(): string =
-  let xdg = getEnv("XDG_RUNTIME_DIR", "")
-  if xdg.len > 0:
-    result = xdg & "/gtm"
-  else:
-    result = "/tmp/gtm-" & getEnv("USER", "unknown")
 
-proc configDir*(): string =
-  let xdg = getEnv("XDG_CONFIG_HOME", "")
-  if xdg.len > 0:
-    result = xdg & "/gtm"
-  else:
-    result = getEnv("HOME", "") & "/.config/gtm"
-
-proc dataDir*(): string =
-  let xdg = getEnv("XDG_DATA_HOME", "")
-  if xdg.len > 0:
-    result = xdg & "/gtm"
-  else:
-    result = getEnv("HOME", "") & "/.local/share/gtm"
-
-proc pidPath*(): string = stateDir() & "/gtmd.pid"
-proc sockPath*(): string = stateDir() & "/gtmd.sock"
 
 proc clear*(o: var OverlayState) =
   o = OverlayState(kind: okNone)
