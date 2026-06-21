@@ -1,8 +1,8 @@
 ## DaemonSession — IPC transport for TUI ↔ daemon communication
 ##
-## Owns the Unix socket connection, JSON framing, event polling,
-## and reconnection logic. No AudioBackend inheritance — this is a
-## pure IPC transport. State is updated from daemon events only.
+## Extends AudioBackend so the TUI can use the same pollEvents() interface
+## the daemon uses for the real backends. Communication is JSON-over-Unix-socket
+## with newline framing.
 ##
 ## ┌──────────────────────────────────────────────────┐
 ## │  DaemonSession (TUI side)                        │
@@ -19,36 +19,13 @@
 
 import os, json, strutils, net, osproc, posix, tables
 from nativesockets import setBlocking
-import audio
+import audio, state
+{.push warning[GcUnsafe2]:off.}
 
 var debugMode*: bool
 
-proc stateDir*(): string =
-  let xdg = getEnv("XDG_RUNTIME_DIR", "")
-  if xdg.len > 0:
-    result = xdg & "/gtm"
-  else:
-    result = "/tmp/gtm-" & getEnv("USER", "unknown")
-
-proc configDir*(): string =
-  let xdg = getEnv("XDG_CONFIG_HOME", "")
-  if xdg.len > 0:
-    result = xdg & "/gtm"
-  else:
-    result = getEnv("HOME", "") & "/.config/gtm"
-
-proc dataDir*(): string =
-  let xdg = getEnv("XDG_DATA_HOME", "")
-  if xdg.len > 0:
-    result = xdg & "/gtm"
-  else:
-    result = getEnv("HOME", "") & "/.local/share/gtm"
-
-proc pidPath*(): string = stateDir() & "/gtmd.pid"
-proc sockPath*(): string = stateDir() & "/gtmd.sock"
-
 type
-  DaemonSession* = ref object
+  DaemonSession* = ref object of AudioBackend
     sock: Socket
     connected*: bool
     buf: string
@@ -58,11 +35,6 @@ type
     pingMissed*: int
     reconnectCooldown*: int
     nextSeq: int
-    timePos*: float
-    duration*: float
-    volume*: int
-    state*: int
-    working*: bool
 
 proc daemonIsRunning*(): bool =
   let p = pidPath()
@@ -283,9 +255,101 @@ proc daemonSimpleCmd*(s: DaemonSession, cmd: string): JsonNode =
   s.ensureRunning()
   s.request(%*{"cmd": cmd})
 
+# ── AudioBackend method implementations ──────────────────────
+
+method loadFile*(s: DaemonSession, path: string, title: string = "", channel: string = ""): bool =
+  s.ensureRunning()
+  s.send(%*{"cmd": "load_file", "path": path, "title": title, "channel": channel})
+  s.send(%*{"cmd": "play"})
+  s.lastState = 1
+  return true
+
+method play*(s: DaemonSession) =
+  s.ensureRunning()
+  s.send(%*{"cmd": "play"})
+  s.state = 1
+
+method pause*(s: DaemonSession) =
+  s.ensureRunning()
+  s.send(%*{"cmd": "pause"})
+  s.state = 2
+
+method stop*(s: DaemonSession) =
+  s.send(%*{"cmd": "stop"})
+  s.state = 0
+  s.timePos = 0.0
+
+method seek*(s: DaemonSession, seconds: float) =
+  s.send(%*{"cmd": "seek", "seconds": seconds})
+
+method setVolume*(s: DaemonSession, vol: int) =
+  s.volume = max(0, min(100, vol))
+  s.send(%*{"cmd": "set_volume", "volume": s.volume})
+
+method getVolume*(s: DaemonSession): int =
+  s.volume
+
+method togglePause*(s: DaemonSession) =
+  s.ensureRunning()
+  s.send(%*{"cmd": "toggle_pause"})
+
+method pollEvents*(s: DaemonSession): seq[AudioEvent] =
+  s.ensureRunning()
+  result = s.drainEvents()
+  s.lastState = s.state
+
+method shutdown*(s: DaemonSession) =
+  s.send(%*{"cmd": "quit"})
+  s.connected = false
+
+method getMetadata*(b: DaemonSession, path: string): TrackMetadata =
+  let (_, stem, _) = path.splitFile()
+  result = TrackMetadata(title: stem)
+  let resp = b.daemonSimpleCmd("get_metadata")
+  if resp.hasKey("title") and resp["title"].getStr("") != "":
+    result.title = resp["title"].getStr("")
+  if resp.hasKey("artist"): result.artist = resp["artist"].getStr("")
+  if resp.hasKey("album"): result.album = resp["album"].getStr("")
+  if resp.hasKey("duration"): result.duration = resp["duration"].getFloat(0.0)
+  if result.artist.len == 0 and result.album.len == 0:
+    let dashPos = stem.find(" - ")
+    if dashPos > 0:
+      let left = stem[0..<dashPos].strip()
+      var isTrackNum = left.len in {2, 3}
+      if isTrackNum:
+        for c in left:
+          if c notin {'0'..'9'}: isTrackNum = false; break
+      if not isTrackNum:
+        result.artist = left
+        result.title = stem[dashPos+3..^1].strip()
+
+method readPcmFrames*(s: DaemonSession, output: var seq[float32], maxCount: int) = discard
+
+method prepareNext*(s: DaemonSession, path: string) =
+  s.send(%*{"cmd": "prepare_next", "path": path})
+
+method startCrossfade*(s: DaemonSession, durationSeconds: float, reverse: bool = false) =
+  s.send(%*{"cmd": "start_crossfade", "duration": durationSeconds, "reverse": reverse})
+
+method getStatusFlags*(s: DaemonSession): tuple[crossfading, masterEnded: bool] =
+  let resp = s.daemonSimpleCmd("get_status_flags")
+  (crossfading: resp{"crossfading"}.getBool(false), masterEnded: resp{"master_ended"}.getBool(false))
+
+method setEqBand*(s: DaemonSession, band: int, gainDb: float) =
+  s.send(%*{"cmd": "set_eq_band", "band": band, "value": gainDb})
+
+method setEqPreset*(s: DaemonSession, name: string) =
+  s.send(%*{"cmd": "set_eq_preset", "preset": name})
+
+method setCrossfadeCurve*(s: DaemonSession, curveType: int) =
+  s.send(%*{"cmd": "set_crossfade_curve", "curve_type": curveType})
+
+method setSpatialWidth*(s: DaemonSession, width: float) =
+  s.send(%*{"cmd": "set_spatial_width", "width": width})
+
 proc newDaemonSession*(): DaemonSession =
   DaemonSession(
-    volume: 80, state: 0,
+    volume: 80, state: 0, backendType: abtDaemon,
     connected: false, buf: "",
     working: true, sleepTimerRemaining: 0,
     ipcTimeoutSec: 3.0, pingMissed: 0, reconnectCooldown: 0

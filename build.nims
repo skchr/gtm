@@ -1,4 +1,4 @@
-import strutils
+import strutils, os
 
 const
   GTM_SRC = "src/gtm.nim"
@@ -20,7 +20,12 @@ proc checkCmd(name, test: string): bool =
   echo "    " & name & ": " & r
   true
 
+var forcedTag: string
+
 proc detectVersion: string =
+  if forcedTag.len > 0:
+    let clean = if forcedTag.startsWith("v"): forcedTag[1..^1] else: forcedTag
+    return clean
   let tag = staticExec("git describe --tags --abbrev=0 2>/dev/null").strip
   if tag.len > 0:
     let clean = if tag.startsWith("v"): tag[1..^1] else: tag
@@ -29,6 +34,22 @@ proc detectVersion: string =
   else:
     result = staticExec("git rev-parse --short=7 HEAD 2>/dev/null").strip
   if result.len == 0: result = "0.0.0-dev"
+
+proc selectTagInteractive: string =
+  let tags = staticExec("git tag --sort=-version:refname 2>/dev/null").strip
+  if tags.len == 0:
+    echo "  ! No tags found"
+    return ""
+  let lines = tags.splitLines
+  echo "\nAvailable tags:"
+  for i, t in lines:
+    echo "  " & $(i+1) & ". " & t
+  while true:
+    let input = staticExec("read -p 'Enter number (1-" & $lines.len & "): ' input && echo $input").strip
+    let idx = input.parseInt - 1
+    if idx >= 0 and idx < lines.len:
+      return lines[idx]
+    echo "  Invalid selection"
 
 proc buildManpage(version: string) =
   if not dirExists("bin"):
@@ -73,6 +94,8 @@ when isMainModule:
     if p == "-d": buildDmd = true
     if p == "-m" or p == "--musl": buildMusl = true
     if p == "--termux": buildTermux = true
+    if p == "--tag": forcedTag = selectTagInteractive()
+    if p.startsWith("--tag:"): forcedTag = p[6..^1]
   if not buildTui and not buildDmd:
     buildTui = true
     buildDmd = true

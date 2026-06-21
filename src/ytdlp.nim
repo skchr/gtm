@@ -186,6 +186,21 @@ proc pollStreamUrlFetch*(p: var Process, buf: var string): string =
       return trimmed
   result = ""
 
+proc resolveStreamUrlSync*(url, jsRuntime, cookieSource, cookieFilePath: string): string =
+  var p: Process
+  if not startStreamUrlFetch(url, p, cookieSource, jsRuntime, cookieFilePath):
+    return ""
+  try:
+    if p.running():
+      if p.waitForExit(15000) < 0:
+        p.terminate()
+        return ""
+  except:
+    p.terminate()
+    return ""
+  var buf = ""
+  result = pollStreamUrlFetch(p, buf)
+
 proc startDownload*(item: YtSearchResult; outputDir: string; p: var Process; cookieSource: string = ""; jsRuntime: string = "node"; cookieFilePath: string = ""): bool =
   let yt = findYtdlp()
   if yt.len == 0: return false

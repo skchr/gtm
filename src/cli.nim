@@ -20,7 +20,7 @@
 ## └────────────────────────────────────────────────┘
 
 import os, json, strutils, osproc, terminal
-import client, state, library, audio
+import session, state, library, audio
 
 type
   Subcommand* = enum
@@ -90,13 +90,14 @@ proc parseArgs*(args: seq[string] = os.commandLineParams()): CliArgs =
   else: discard
 
 template withDaemon(body: untyped): untyped =
-  var cli {.inject.} = newDaemonClient()
-  cli.ensureDaemon()
+  var cli {.inject.} = newDaemonSession()
+  cli.ensureRunning()
   body
 
 proc simpleDaemonCmd(cmd: string): JsonNode =
-  var cli = newDaemonClient()
-  daemonSimpleCmd(cli, cmd)
+  var cli = newDaemonSession()
+  cli.ensureRunning()
+  cli.daemonSimpleCmd(cmd)
 
 proc printVersion*() =
   echo "gtm " & GTM_VERSION
@@ -153,14 +154,14 @@ proc execSubcommand*(args: CliArgs): bool =
         echo "Stopped"
   of scNext:
     withDaemon:
-      discard daemonSimpleCmd(cli, "next")
+      discard cli.daemonSimpleCmd("next")
       if useColor():
         echo "\e[34m\u23ED\e[0m Next track"
       else:
         echo "Next track"
   of scPrev:
     withDaemon:
-      discard daemonSimpleCmd(cli, "prev")
+      discard cli.daemonSimpleCmd("prev")
       if useColor():
         echo "\e[34m\u23EE\e[0m Previous track"
       else:
@@ -182,7 +183,7 @@ proc execSubcommand*(args: CliArgs): bool =
         echo "Volume: ", vol
   of scShuffle:
     withDaemon:
-      discard cli.setShuffle(args.shuffleEnabled)
+      discard cli.request(%*{"cmd": "set_shuffle", "enabled": args.shuffleEnabled})
       if useColor():
         let on = if args.shuffleEnabled: "\e[32mON\e[0m" else: "\e[31mOFF\e[0m"
         echo "\e[33m\u1F500\e[0m Shuffle: ", on
@@ -190,14 +191,14 @@ proc execSubcommand*(args: CliArgs): bool =
         echo "Shuffle: ", (if args.shuffleEnabled: "on" else: "off")
   of scRepeat:
     withDaemon:
-      discard cli.setRepeat(args.repeatMode)
+      discard cli.request(%*{"cmd": "set_repeat", "mode": args.repeatMode})
       if useColor():
         echo "\e[34m\u1F501\e[0m Repeat: mode \e[1m" & $args.repeatMode & "\e[0m"
       else:
         echo "Repeat: mode ", args.repeatMode
   of scSleep:
     withDaemon:
-      discard cli.setSleepTimer(args.sleepMinutes)
+      discard cli.request(%*{"cmd": "set_sleep_timer", "minutes": args.sleepMinutes})
       if useColor():
         echo "\e[33m\u23F0\e[0m Sleep timer: \e[1m" & $args.sleepMinutes & "m\e[0m"
       else:

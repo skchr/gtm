@@ -2874,7 +2874,8 @@ proc runTui(args: seq[string]) =
             cli.ensureConnected()
             if cli.isConnected:
               ctx.state.reattachSyncPending = 3
-              cli.sendAsync(%*{"cmd": "get_full_state"}) do (resp: JsonNode):
+              try:
+                let resp = cli.sendDaemonCmd(%*{"cmd": "get_full_state"})
                 fullStateSync(ctx.state, resp)
                 if resp.hasKey("queue"):
                   try:
@@ -2904,13 +2905,9 @@ proc runTui(args: seq[string]) =
                       ctx.state.currentPlayingId = t.id
                       break
                 ctx.state.reattachSyncPending.dec
-                if ctx.state.reattachSyncPending == 0:
-                  ctx.state.reconnecting = false
-                  ctx.state.reconnectAttempts = 0
-                  ctx.state.markDirtyBatch(cePlayState, ceTrack, ceVolume, cePosition)
-              cli.sendAsync(%*{"cmd": "get_library"}) do (resp: JsonNode):
-                if resp.hasKey("tracks") and resp["tracks"].len > 0:
-                  ctx.state.loadLibraryFromDaemon(resp)
+                let respLib = cli.sendDaemonCmd(%*{"cmd": "get_library"})
+                if respLib.hasKey("tracks") and respLib["tracks"].len > 0:
+                  ctx.state.loadLibraryFromDaemon(respLib)
                   ctx.state.ytDownloaded.clear()
                   let dlDir = ctx.state.ytDownloadDir
                   for t in ctx.state.libraryTracks:
@@ -2918,20 +2915,19 @@ proc runTui(args: seq[string]) =
                       ctx.state.ytDownloaded[t.path] = t.path
                   ctx.state.downloadCount = ctx.state.ytDownloaded.len
                 ctx.state.reattachSyncPending.dec
-                if ctx.state.reattachSyncPending == 0:
-                  ctx.state.reconnecting = false
-                  ctx.state.reconnectAttempts = 0
-                  ctx.state.markDirtyBatch(cePlayState, ceTrack, ceVolume, cePosition)
-              cli.sendAsync(%*{"cmd": "get_favourites"}) do (resp: JsonNode):
-                if resp.hasKey("favourites"):
+                let respFav = cli.sendDaemonCmd(%*{"cmd": "get_favourites"})
+                if respFav.hasKey("favourites"):
                   ctx.state.favouriteIds = initHashSet[int64]()
-                  for fid in resp["favourites"]:
+                  for fid in respFav["favourites"]:
                     ctx.state.favouriteIds.incl(fid.getInt(0).int64)
                 ctx.state.reattachSyncPending.dec
                 if ctx.state.reattachSyncPending == 0:
                   ctx.state.reconnecting = false
                   ctx.state.reconnectAttempts = 0
                   ctx.state.markDirtyBatch(cePlayState, ceTrack, ceVolume, cePosition)
+              except:
+                ctx.state.reconnecting = false
+                ctx.state.reconnectAttempts = 0
         elif ctx.state.reconnecting and ctx.state.reattachSyncPending == 0:
           ctx.state.reconnecting = false
           ctx.state.reconnectAttempts = 0

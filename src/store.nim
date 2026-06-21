@@ -41,8 +41,8 @@ proc newStore*(): Store =
     subs: @[],
     nextWidgetId: 0
   )
-  # service.client and app.player point to the same DaemonClient
-  result.app.player = svc.client
+  # service.session and app.player point to the same DaemonSession
+  result.app.player = svc.session
   result.app.svc = svc
 
 # ── Subscription API ────────────────────────────────────────

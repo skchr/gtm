@@ -1321,23 +1321,35 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     result = %*{"ok": true}
   of dckLoadFile:
     if d.player == nil: return %*{"ok": false, "error": "no audio backend"}
+    var loadPath = cmd.strArg
+    # Resolve YouTube URLs to direct stream URLs synchronously
+    if isYtWatchUrl(cmd.strArg):
+      let (cSrc, cPath) = cookiesForUrl(d, cmd.strArg)
+      let resolved = resolveStreamUrlSync(cmd.strArg, d.ytJsRuntime, cSrc, cPath)
+      if resolved.len > 0:
+        loadPath = resolved
+    result = %*{"ok": true}
     if cmd.strArg.len > 0:
       d.upNextSent = false
       d.autoAdvancing = false
-      if d.currentTrackPath.len > 0 and d.currentTrackPath != cmd.strArg:
+      if d.currentTrackPath.len > 0 and d.currentTrackPath != loadPath:
         d.trackHistory.add(d.currentTrackPath)
         if d.trackHistory.len > 50: d.trackHistory.delete(0)
+      d.currentTrackPath = loadPath
+      # Clear restored queue when explicitly loading a file (avoid stale auto-advance)
+      d.playbackQueue.setLen(0)
+      d.shuffleIndex = 0
+      d.shuffleOrder.setLen(0)
       acquire(d.lock)
-      d.pendingActions.add(PulseAction(kind: pakLoadFile, strVal: cmd.strArg, strVal2: cmd.strArg2, strVal3: cmd.strArg3))
+      d.pendingActions.add(PulseAction(kind: pakLoadFile, strVal: loadPath, strVal2: cmd.strArg2, strVal3: cmd.strArg3))
       release(d.lock)
       if d.lib != nil:
-        var trackId = d.lib.findTrackByPath(cmd.strArg)
+        var trackId = d.lib.findTrackByPath(loadPath)
         if trackId == 0 and cmd.strArg2.len > 0:
-          trackId = d.lib.addTrack(cmd.strArg, cmd.strArg2, cmd.strArg3, "YouTube", 0.0, 0, 0, "")
+          trackId = d.lib.addTrack(loadPath, cmd.strArg2, cmd.strArg3, "YouTube", 0.0, 0, 0, "")
         if trackId > 0:
           d.lib.updatePlayCount(trackId)
           result["track_id"] = %trackId
-      result = %*{"ok": true}
     else:
       result = %*{"ok": false, "error": "no path"}
   of dckNext:

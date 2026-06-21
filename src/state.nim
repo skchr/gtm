@@ -567,7 +567,7 @@ proc stateDir*(): string =
   if xdg.len > 0:
     result = xdg & "/gtm"
   else:
-    result = "/tmp/gtm-" & getEnv("USER", "unknown")
+    result = getTempDir() / "gtm-" & getEnv("USER", "unknown")
 
 proc configDir*(): string =
   let xdg = getEnv("XDG_CONFIG_HOME", "")
