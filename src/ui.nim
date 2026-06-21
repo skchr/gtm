@@ -514,12 +514,11 @@ method render*(node: LibrarySidebar, ctx: var nw.Context[State]) =
     let isSelected = state.librarySidebarSelect == i and isFocused
     let rowBg = if isSelected: theme.surface2 elif isActive: theme.surface0 else: theme.mantle
     fillBg(ctx.tb, 0, line, w - 1, line, rowBg)
-    let bullet = if isActive: "\u25C9 " else: "\u25CB "
     let countStr = $actualCount
     let prefix = treePrefix(i)
-    let maxLabelW = max(1, w - countStr.runeLen - prefix.runeLen - 5)
+    let maxLabelW = max(1, w - countStr.runeLen - prefix.runeLen - 3)
     let label = entry.label
-    let display = prefix & bullet & (if label.runeLen > maxLabelW: label[0..<max(1, maxLabelW - 2)] & "\u2026" else: label)
+    let display = prefix & (if label.runeLen > maxLabelW: label[0..<max(1, maxLabelW - 2)] & "\u2026" else: label)
     let fg = if isActive: theme.blue elif isSelected: theme.text else: theme.subtext0
     writeStr(ctx.tb, 1, line, display, fg)
     writeStr(ctx.tb, w - countStr.runeLen - 1, line, countStr, theme.overlay0)

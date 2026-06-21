@@ -402,23 +402,7 @@ proc playSelected(state: var AppState) =
     else:
       discard state.player.loadFile(track.path, track.title, track.artist)
       state.player.play()
-    # Build queue from current view and send to daemon — daemon owns queue from here
-    if state.tab == tabLibrary and state.player.backendType == abtDaemon:
-      let cli = DaemonService(state.svc)
-      if cli.isConnected:
-        cli.sendOnly(%*{"cmd": "queue_clear"})
-        var arr = newJArray()
-        var started = false
-        for item in state.displayItems:
-          if item.kind == likTrack:
-            if not started and item.id == track.id:
-              started = true
-              continue
-            if started and item.trackIdx >= 0 and item.trackIdx < state.libraryTracks.len:
-              let t = state.libraryTracks[item.trackIdx]
-              arr.add(%*{"path": t.path, "title": t.title, "channel": t.artist})
-        if arr.len > 0:
-          cli.sendOnly(%*{"cmd": "queue_add", "data": arr})
+    # Clear queue — daemon owns queue from here, users add items explicitly
     state.markDirtyBatch(cePlayState, ceTrack)
 
 proc nextTrack(state: var AppState) =
@@ -438,6 +422,7 @@ proc prevTrack(state: var AppState) =
 proc adjustVolume(state: var AppState, delta: int) =
   let newVol = max(0, min(100, state.volume + delta))
   state.player.setVolume(newVol)
+  state.volume = newVol
   state.showVolumeCue()
   if state.tab == tabSettings: state.rebuildItems()
 
@@ -454,9 +439,11 @@ proc toggleMute(state: var AppState) =
   if state.volume > 0:
     state.prevVolume = state.volume
     state.player.setVolume(0)
+    state.volume = 0
   else:
     let restore = if state.prevVolume > 0: state.prevVolume else: 80
     state.player.setVolume(restore)
+    state.volume = restore
     state.prevVolume = 0
   state.showVolumeCue()
 
@@ -2124,7 +2111,7 @@ proc handleMainKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
   of iw.Key.Minus, iw.Key.Underscore: state.adjustVolume(-5)
   of iw.Key.M:
     if guardDebounce(state): return
-    state.player.setVolume(0); state.volume = 0
+    state.toggleMute()
   of iw.Key.G:
     if state.pendingSeq.len == 0 or state.pendingSeq[state.pendingSeq.len - 1] != iw.Key.G:
       state.pendingSeq = @[iw.Key.G]

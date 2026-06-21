@@ -121,6 +121,7 @@ type
     clients*: seq[ClientState]
     persistFrames: int
     trashPurgeFrames: int
+    stateSyncFrames: int
 
     # Thread 1 (PlaybackPulse) exclusive — no locking needed, only T1 touches AudioBackend
     player: AudioBackend
@@ -2261,6 +2262,10 @@ proc runDaemon*() =
     if daemon.persistFrames >= 1800:
       daemon.persistFrames = 0
       daemon.savePlaybackState()
+    daemon.stateSyncFrames.inc
+    if daemon.stateSyncFrames >= 60:
+      daemon.stateSyncFrames = 0
+      daemon.pushFullState()
     daemon.trashPurgeFrames.inc
     if daemon.trashPurgeFrames >= 18000:
       daemon.trashPurgeFrames = 0
