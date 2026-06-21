@@ -78,7 +78,13 @@ jobs:
       - name: Download Android NDK
         if: matrix.os-label == 'android'
         run: |
-          curl -sL https://dl.google.com/android/repository/android-ndk-r27c-linux.zip -o /tmp/ndk.zip
+          HOST_ARCH=$(uname -m)
+          case "$HOST_ARCH" in
+            x86_64) NDK_ARCH=linux ;;
+            aarch64|arm64) NDK_ARCH=linux-aarch64 ;;
+            *) echo "unsupported host arch: $HOST_ARCH"; exit 1 ;;
+          esac
+          curl -sL "https://dl.google.com/android/repository/android-ndk-r27c-${NDK_ARCH}.zip" -o /tmp/ndk.zip
           unzip -q /tmp/ndk.zip -d /tmp
           echo "ANDROID_NDK=/tmp/android-ndk-r27c" >> $GITHUB_ENV
 
@@ -105,7 +111,7 @@ jobs:
             --ar=llvm-ar \
             --ranlib=llvm-ranlib \
             --strip=llvm-strip \
-            --ld=aarch64-linux-android21-ld \
+            --ld=aarch64-linux-android21-clang \
             --disable-programs --disable-doc \
             --disable-encoders --disable-muxers --disable-devices --disable-filters \
             --disable-bsfs --disable-postproc --disable-network \
