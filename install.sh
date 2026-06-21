@@ -11,16 +11,22 @@ PREFIX="${PREFIX:-$HOME/.local}"
 
 # --- Platform detection ---
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+
+# Android / Termux detection
+if [ "$(uname -o 2>/dev/null)" = "Android" ] || [ -n "${TERMUX_VERSION:-}" ]; then
+  OS="android"
+fi
+
 ARCH=$(uname -m)
 
 case "$OS" in
 linux) ;;
 darwin) ;;
+android) ;;
 *)
-  echo "gtm does not support '$OS' yet. Expected Linux or Darwin"
+  echo "gtm does not support '$OS' yet. Expected Linux, Darwin, or Android"
   exit 1
   ;;
-
 esac
 
 case "$ARCH" in
@@ -55,6 +61,11 @@ mkdir -p "$PREFIX/bin"
 cp "$TMPDIR/gtm" "$PREFIX/bin/gtm"
 cp "$TMPDIR/gtmd" "$PREFIX/bin/gtmd"
 chmod +x "$PREFIX/bin/gtm" "$PREFIX/bin/gtmd"
+
+# Copy bundled shared libraries (for dynamic-linked builds like macOS)
+for f in "$TMPDIR"/*.so* "$TMPDIR"/*.dylib; do
+  [ -f "$f" ] && cp -L "$f" "$PREFIX/bin/"
+done
 
 echo "gtm: done — installed successfully"
 echo "  gtm  -> $PREFIX/bin/gtm"

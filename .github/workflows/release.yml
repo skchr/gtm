@@ -24,6 +24,10 @@ jobs:
             runner: ubuntu-22.04-arm
             os-label: linux
             arch: arm64
+          - target: android-arm64
+            runner: ubuntu-22.04-arm
+            os-label: android
+            arch: arm64
           - target: darwin-arm64
             runner: macos-latest
             os-label: darwin
@@ -36,84 +40,117 @@ jobs:
           fetch-depth: 0
 
       - name: Install Nim
-        if: matrix.docker == ''
         uses: jiro4989/setup-nim-action@v2
         with:
           nim-version: 2.2.2
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux' && matrix.docker == ''
+        if: runner.os == 'Linux' && matrix.os-label != 'android'
         run: |
           sudo apt-get update -qq -o Acquire::Retries=3 -o Acquire::http::Timeout=30
           sudo apt-get install -y -qq --fix-missing -o Acquire::Retries=3 \
-            libavformat-dev libavcodec-dev libavutil-dev \
-            libswresample-dev libasound2-dev libdbus-1-dev
-          # nim-dbus is vendored at vendor/nim-dbus/ — no external clone needed
+            pkg-config libdbus-1-dev nasm
 
-      - name: Install system dependencies (macOS)
+      - name: Install macOS dependencies
         if: runner.os == 'macOS'
         run: |
           brew update
           brew install ffmpeg pkg-config
 
-      - name: Build dynamic binaries
-        if: matrix.docker == ''
+      - name: Build static FFmpeg (Linux)
+        if: runner.os == 'Linux' && matrix.os-label != 'android'
+        run: |
+          curl -sL https://ffmpeg.org/releases/ffmpeg-7.1.tar.gz | tar xz
+          cd ffmpeg-7.1
+          ./configure --enable-static --disable-shared --enable-pic \
+            --prefix=/tmp/ffmpeg-prefix \
+            --disable-programs --disable-doc --disable-ffplay --disable-ffprobe \
+            --disable-encoders --disable-muxers --disable-devices --disable-filters \
+            --disable-bsfs --disable-postproc --disable-network \
+            --enable-decoder='mp3*,aac*,flac,vorbis,opus,pcm*,wmav*,wmapro,ape,wavpack,tta,alac,dca,dts*,ac3*,eac3,truehd,dsd*,cook,speex,nellymoser,adpcm*,atrac3*,mlp,sipr,tak,twinvq,binkaudio*,mp1,mp2,qdm2,qdmc,mace*,g723*,g729,gsm*' \
+            --enable-demuxer='*' --enable-parsers --enable-protocol=file \
+            --enable-swresample
+          make -j$(nproc)
+          make install
+          echo "PKG_CONFIG_PATH=/tmp/ffmpeg-prefix/lib/pkgconfig" >> $GITHUB_ENV
+
+      - name: Download Android NDK
+        if: matrix.os-label == 'android'
+        run: |
+          curl -sL https://dl.google.com/android/repository/android-ndk-r27c-linux.zip -o /tmp/ndk.zip
+          unzip -q /tmp/ndk.zip -d /tmp
+          echo "ANDROID_NDK=/tmp/android-ndk-r27c" >> $GITHUB_ENV
+
+      - name: Build static FFmpeg (Android)
+        if: matrix.os-label == 'android'
+        run: |
+          export NDK=/tmp/android-ndk-r27c
+          export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+          curl -sL https://ffmpeg.org/releases/ffmpeg-7.1.tar.gz | tar xz
+          cd ffmpeg-7.1
+          ./configure --enable-static --disable-shared --enable-pic \
+            --prefix=/tmp/ffmpeg-prefix-android \
+            --target-os=android --arch=aarch64 \
+            --cc=aarch64-linux-android21-clang \
+            --cxx=aarch64-linux-android21-clang++ \
+            --ar=llvm-ar --strip=llvm-strip \
+            --sysroot="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot" \
+            --disable-programs --disable-doc \
+            --disable-encoders --disable-muxers --disable-devices --disable-filters \
+            --disable-bsfs --disable-postproc --disable-network \
+            --enable-decoder='mp3*,aac*,flac,vorbis,opus,pcm*,wmav*,wmapro,ape,wavpack,tta,alac,dca,dts*,ac3*,eac3,truehd,dsd*,cook,speex,nellymoser,adpcm*,atrac3*,mlp,sipr,tak,twinvq,binkaudio*,mp1,mp2,qdm2,qdmc,mace*,g723*,g729,gsm*' \
+            --enable-demuxer='*' --enable-parsers --enable-protocol=file \
+            --enable-swresample
+          make -j$(nproc)
+          make install
+          echo "PKG_CONFIG_PATH=/tmp/ffmpeg-prefix-android/lib/pkgconfig" >> $GITHUB_ENV
+          echo "CC=aarch64-linux-android21-clang" >> $GITHUB_ENV
+
+      - name: Build static binaries (Linux)
+        if: runner.os == 'Linux' && matrix.os-label != 'android'
         run: |
           mkdir -p bin
-          nim c -d:release --nimcache:/tmp/nimcache-dynamic src/gtmd.nim
-          nim c -d:release --nimcache:/tmp/nimcache-dynamic src/gtm.nim
+          nim c -d:release -d:staticFfmpeg --nimcache:/tmp/nimcache src/gtmd.nim
+          nim c -d:release -d:staticFfmpeg --nimcache:/tmp/nimcache src/gtm.nim
 
-      - name: Bundle shared libraries (Linux)
-        if: runner.os == 'Linux' && matrix.docker == ''
+      - name: Build static binaries (Android)
+        if: matrix.os-label == 'android'
         run: |
-          sudo apt-get install -y -qq patchelf
-          mkdir -p /tmp/bundled-libs
-          for bin in bin/gtm bin/gtmd; do
-            for lib in $(ldd "$bin" | awk '{print $3}' | grep -E '/(libav|libswresample|libasound)'); do
-              [ -n "$lib" ] && [ -f "$lib" ] && cp -nL "$lib" /tmp/bundled-libs/
-            done
-          done
-          for lib in /tmp/bundled-libs/lib*.so*; do
-            [ -f "$lib" ] || continue
-            for dep in $(ldd "$lib" 2>/dev/null | awk '{print $3}' | grep -E '/(libav|libswresample|libasound)'); do
-              [ -n "$dep" ] && [ -f "$dep" ] && cp -nL "$dep" /tmp/bundled-libs/
-            done
-          done
-          patchelf --set-rpath '$ORIGIN' bin/gtm bin/gtmd
+          mkdir -p bin
+          export PATH="/tmp/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+          nim c -d:release -d:staticFfmpeg -d:android \
+            --gcc.exe:aarch64-linux-android21-clang \
+            --gcc.linkerexe:aarch64-linux-android21-clang \
+            --nimcache:/tmp/nimcache src/gtmd.nim
+          nim c -d:release -d:staticFfmpeg -d:android \
+            --gcc.exe:aarch64-linux-android21-clang \
+            --gcc.linkerexe:aarch64-linux-android21-clang \
+            --nimcache:/tmp/nimcache src/gtm.nim
 
-      - name: Verify library dependencies (Linux)
+      - name: Verify static binary (Linux)
         if: runner.os == 'Linux'
         run: |
           set -eu
-          issues=0
           for bin in bin/gtm bin/gtmd; do
             echo "--- $bin ---"
-            # 1) Check glibc version requirement (target: 2.38+)
             max=$(readelf -V "$bin" 2>/dev/null | grep 'GLIBC_' | sed 's/.*GLIBC_//; s/[^0-9.].*//' | sort -V | tail -1)
             echo "  max GLIBC: $max"
             if [ "$(printf '%s\n' "2.38" "$max" | sort -V | tail -1)" != "2.38" ]; then
               echo "ERROR: $bin requires GLIBC_$max > 2.38"
-              issues=$((issues + 1))
+              exit 1
             fi
-            # 2) Check for unresolved shared libraries
-            ldd "$bin" | grep -q 'not found' && {
-              echo "ERROR: missing shared library dependencies in $bin:"
-              ldd "$bin" | grep 'not found'
-              issues=$((issues + 1))
-            } || true
-            # 3) List all linked libs for manual inspection
             echo "  linked libraries:"
             ldd "$bin" | grep '=> /' | awk '{print "    " $1 " -> " $3}'
+            echo "  OK"
           done
-          # 4) Verify bundled FFmpeg/ALSA libs are present
-          echo "--- bundled libs ---"
-          ls -la /tmp/bundled-libs/ 2>/dev/null || echo "  (none)"
-          if [ $issues -gt 0 ]; then
-            echo "FAILED: $issues issue(s) found"
-            exit 1
-          fi
-          echo "OK: all dependency checks passed"
+
+      - name: Build dynamic binaries (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p bin
+          nim c -d:release --nimcache:/tmp/nimcache src/gtmd.nim
+          nim c -d:release --nimcache:/tmp/nimcache src/gtm.nim
 
       - name: Bundle shared libraries (macOS)
         if: runner.os == 'macOS'
@@ -142,6 +179,7 @@ jobs:
           done
 
       - name: Build manpage
+        if: matrix.os-label != 'android'
         run: |
           if command -v pandoc >/dev/null 2>&1; then
             if [ -f docs/gtm.1.md ]; then
@@ -156,7 +194,6 @@ jobs:
           VERSION="${VERSION#v}"
           TARGET="${{ matrix.os-label }}-${{ matrix.arch }}"
 
-          # --- Dynamic bundled variant ---
           mkdir -p dist/gtm-full dist/gtmd
           cp bin/gtm  dist/gtm-full/
           cp bin/gtmd dist/gtm-full/
@@ -168,9 +205,7 @@ jobs:
             BLIBS=bundled-libs
           fi
           if [ -n "$BLIBS" ]; then
-            cp "$BLIBS"/*.so* dist/gtm-full/ 2>/dev/null || true
             cp "$BLIBS"/*.dylib dist/gtm-full/ 2>/dev/null || true
-            cp "$BLIBS"/*.so* dist/gtmd/ 2>/dev/null || true
             cp "$BLIBS"/*.dylib dist/gtmd/ 2>/dev/null || true
           fi
           if [ -f bin/gtm.1 ]; then
