@@ -48,7 +48,7 @@ jobs:
           sudo apt-get install -y -qq --fix-missing -o Acquire::Retries=3 \
             libavformat-dev libavcodec-dev libavutil-dev \
             libswresample-dev libasound2-dev libdbus-1-dev
-          git clone --depth 1 https://github.com/zielmicha/nim-dbus /tmp/nim-dbus
+          # nim-dbus is vendored at vendor/nim-dbus/ — no external clone needed
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
