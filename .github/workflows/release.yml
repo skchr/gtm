@@ -86,16 +86,26 @@ jobs:
         if: matrix.os-label == 'android'
         run: |
           export NDK=/tmp/android-ndk-r27c
-          export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+          HOST_ARCH=$(uname -m)
+          case "$HOST_ARCH" in
+            x86_64) NDK_HOST=linux-x86_64 ;;
+            aarch64|arm64) NDK_HOST=linux-aarch64 ;;
+            *) echo "unsupported host arch: $HOST_ARCH"; exit 1 ;;
+          esac
+          NDK_TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/$NDK_HOST"
+          export PATH="$NDK_TOOLCHAIN/bin:$PATH"
           curl -sL https://ffmpeg.org/releases/ffmpeg-7.1.tar.gz | tar xz
           cd ffmpeg-7.1
           ./configure --enable-static --disable-shared --enable-pic \
-            --enable-cross-compile --cross-prefix=aarch64-linux-android21- \
+            --enable-cross-compile \
             --prefix=/tmp/ffmpeg-prefix-android \
             --target-os=android --arch=aarch64 \
             --cc=aarch64-linux-android21-clang \
             --cxx=aarch64-linux-android21-clang++ \
-            --ar=llvm-ar --strip=llvm-strip \
+            --ar=llvm-ar \
+            --ranlib=llvm-ranlib \
+            --strip=llvm-strip \
+            --ld=aarch64-linux-android21-ld \
             --disable-programs --disable-doc \
             --disable-encoders --disable-muxers --disable-devices --disable-filters \
             --disable-bsfs --disable-postproc --disable-network \
@@ -118,7 +128,14 @@ jobs:
         if: matrix.os-label == 'android'
         run: |
           mkdir -p bin
-          export PATH="/tmp/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+          HOST_ARCH=$(uname -m)
+          case "$HOST_ARCH" in
+            x86_64) NDK_HOST=linux-x86_64 ;;
+            aarch64|arm64) NDK_HOST=linux-aarch64 ;;
+            *) echo "unsupported host arch: $HOST_ARCH"; exit 1 ;;
+          esac
+          NDK_TOOLCHAIN="/tmp/android-ndk-r27c/toolchains/llvm/prebuilt/$NDK_HOST"
+          export PATH="$NDK_TOOLCHAIN/bin:$PATH"
           nim c -d:release -d:staticFfmpeg -d:android \
             --gcc.exe:aarch64-linux-android21-clang \
             --gcc.linkerexe:aarch64-linux-android21-clang \
