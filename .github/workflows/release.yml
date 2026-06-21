@@ -90,12 +90,12 @@ jobs:
           curl -sL https://ffmpeg.org/releases/ffmpeg-7.1.tar.gz | tar xz
           cd ffmpeg-7.1
           ./configure --enable-static --disable-shared --enable-pic \
+            --enable-cross-compile --cross-prefix=aarch64-linux-android21- \
             --prefix=/tmp/ffmpeg-prefix-android \
             --target-os=android --arch=aarch64 \
             --cc=aarch64-linux-android21-clang \
             --cxx=aarch64-linux-android21-clang++ \
             --ar=llvm-ar --strip=llvm-strip \
-            --sysroot="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot" \
             --disable-programs --disable-doc \
             --disable-encoders --disable-muxers --disable-devices --disable-filters \
             --disable-bsfs --disable-postproc --disable-network \
