@@ -89,7 +89,7 @@ jobs:
           for bin in bin/gtm bin/gtmd; do
             echo "--- $bin ---"
             # 1) Check glibc version requirement (target: 2.38+)
-            max=$(readelf -V "$bin" 2>/dev/null | grep 'GLIBC_' | sed 's/.*GLIBC_//' | sort -V | tail -1)
+            max=$(readelf -V "$bin" 2>/dev/null | grep 'GLIBC_' | sed 's/.*GLIBC_//; s/[^0-9.].*//' | sort -V | tail -1)
             echo "  max GLIBC: $max"
             if [ "$(printf '%s\n' "2.38" "$max" | sort -V | head -1)" != "2.38" ]; then
               echo "ERROR: $bin requires GLIBC_$max > 2.38"
