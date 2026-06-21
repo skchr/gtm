@@ -111,11 +111,11 @@ jobs:
             --disable-bsfs --disable-postproc --disable-network \
             --enable-decoder='mp3*,aac*,flac,vorbis,opus,pcm*,wmav*,wmapro,ape,wavpack,tta,alac,dca,dts*,ac3*,eac3,truehd,dsd*,cook,speex,nellymoser,adpcm*,atrac3*,mlp,sipr,tak,twinvq,binkaudio*,mp1,mp2,qdm2,qdmc,mace*,g723*,g729,gsm*' \
             --enable-demuxer='*' --enable-parsers --enable-protocol=file \
-            --enable-swresample
+            --enable-swresample || { echo "=== config.log ==="; cat ffbuild/config.log; exit 1; }
           make -j$(nproc)
           make install
           echo "PKG_CONFIG_PATH=/tmp/ffmpeg-prefix-android/lib/pkgconfig" >> $GITHUB_ENV
-          echo "CC=aarch64-linux-android21-clang" >> $GITHUB_ENV
+          echo "CC=$NDK_TOOLCHAIN/bin/clang --target=aarch64-linux-android21" >> $GITHUB_ENV
 
       - name: Build static binaries (Linux)
         if: runner.os == 'Linux' && matrix.os-label != 'android'
