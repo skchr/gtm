@@ -22,6 +22,14 @@
 #define HAS_ALSA 1
 #endif
 
+/* FFmpeg 5.0+ uses the new AVChannelLayout API (ch_layout, AVChannelLayout
+   type, AV_CHANNEL_LAYOUT_STEREO, av_opt_set_chlayout).
+   FFmpeg 4.x uses the old uint64_t channel_layout + av_opt_set_int.
+   LIBAVCODEC_VERSION_MAJOR >= 59 indicates FFmpeg >= 5.0. */
+#if LIBAVCODEC_VERSION_MAJOR >= 59
+#define HAVE_NEW_CHANNEL_API 1
+#endif
+
 #define PCM_RING_SIZE (16384)
 
 typedef struct {
@@ -248,11 +256,12 @@ int ffmpeg_audio_load(FfmpegAudioCtx* ctx, const char* path) {
   if (avcodec_open2(ctx->codec_ctx, codec, NULL) < 0) return 0;
 
   ctx->sample_rate = par->sample_rate;
-  ctx->channels = par->ch_layout.nb_channels;
-  if (ctx->channels <= 0) ctx->channels = 2;
-
   ctx->swr_ctx = swr_alloc();
   if (!ctx->swr_ctx) return 0;
+
+#ifdef HAVE_NEW_CHANNEL_API
+  ctx->channels = par->ch_layout.nb_channels;
+  if (ctx->channels <= 0) ctx->channels = 2;
 
   AVChannelLayout out_ch_layout = AV_CHANNEL_LAYOUT_STEREO;
   if (ctx->channels == 1)
@@ -268,6 +277,22 @@ int ffmpeg_audio_load(FfmpegAudioCtx* ctx, const char* path) {
   if (swr_init(ctx->swr_ctx) < 0) return 0;
 
   ctx->channels = out_ch_layout.nb_channels;
+#else
+  ctx->channels = par->channels;
+  if (ctx->channels <= 0) ctx->channels = 2;
+
+  av_opt_set_int(ctx->swr_ctx, "in_channel_layout",
+    par->channel_layout ? par->channel_layout
+    : (ctx->channels == 1 ? AV_CH_LAYOUT_MONO : AV_CH_LAYOUT_STEREO), 0);
+  av_opt_set_int(ctx->swr_ctx, "in_sample_rate", par->sample_rate, 0);
+  av_opt_set_sample_fmt(ctx->swr_ctx, "in_sample_fmt", ctx->codec_ctx->sample_fmt, 0);
+  av_opt_set_int(ctx->swr_ctx, "out_channel_layout",
+    ctx->channels == 1 ? AV_CH_LAYOUT_MONO : AV_CH_LAYOUT_STEREO, 0);
+  av_opt_set_int(ctx->swr_ctx, "out_sample_rate", par->sample_rate, 0);
+  av_opt_set_sample_fmt(ctx->swr_ctx, "out_sample_fmt", AV_SAMPLE_FMT_FLT, 0);
+
+  if (swr_init(ctx->swr_ctx) < 0) return 0;
+#endif
   extract_metadata(ctx);
   return 1;
 }
