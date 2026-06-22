@@ -471,6 +471,10 @@ proc sendQueueEvent(d: Daemon) =
 proc pushFullState(d: Daemon) =
   if d.clients.len == 0: return
   d.stateVersion.inc
+  var qArr = newJArray()
+  for p in d.playbackQueue: qArr.add(%p)
+  var soArr = newJArray()
+  for i in d.shuffleOrder: soArr.add(%i)
   var ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "full_state_sync",
     "state": $(d.playerState),
     "track_path": d.currentTrackPath,
@@ -482,6 +486,11 @@ proc pushFullState(d: Daemon) =
     "shuffle": %d.shuffleEnabled,
     "repeat": %d.repeatMode,
     "sleep_timer": %d.sleepTimerRemaining,
+    "queue": qArr,
+    "shuffleOrder": soArr,
+    "shuffleIndex": %d.shuffleIndex,
+    "crossfadeDuration": %d.crossfadeDuration,
+    "crossfadeCurve": %d.crossfadeCurve,
     "version": %d.stateVersion}]}
   d.broadcastJson(ev)
 
@@ -1436,6 +1445,8 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
   of dckSetCrossfadeDuration:
     d.crossfadeDuration = cmd.intArg
     if d.lib != nil: d.lib.setPlaybackState("crossfade_duration", $(d.crossfadeDuration))
+    let cfDurEv = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "crossfade_duration_changed", "duration": cmd.intArg}]}
+    d.broadcastJson(cfDurEv)
     result = %*{"ok": true}
   of dckSetCrossfadeCurve:
     d.crossfadeCurve = cmd.intArg
@@ -1443,6 +1454,8 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
       acquire(d.lock)
       d.pendingActions.add(PulseAction(kind: pakSetCrossfadeCurve, intVal: cmd.intArg))
       release(d.lock)
+    let cfCurveEv = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "crossfade_curve_changed", "curve": cmd.intArg}]}
+    d.broadcastJson(cfCurveEv)
     result = %*{"ok": true}
   of dckListEqPresets:
     result = %*{"ok": true, "presets": %["Flat", "Rock", "Pop", "Classical", "Jazz", "HipHop", "Vocal", "BassBoost", "Headphones", "Laptop", "Electronic", "Acoustic", "Podcast", "Dance", "Soul", "Metal", "Reggae", "Blues", "Country", "Folk", "ClassicalAlt", "Speech", "Loudness", "TrebleBoost", "FullBass", "Soft", "Custom"]}
@@ -1706,8 +1719,6 @@ proc handleAutoAdvance(d: Daemon) =
   ## Called when a track ends. Pops next from queue and queues a pakLoadFile action.
   acquire(d.lock)
   var nextPath = ""
-  var nextTitle = d.currentTrackTitle
-  var nextChannel = d.currentTrackChannel
 
   if d.crossfadeNextPath.len > 0:
     nextPath = d.crossfadeNextPath
@@ -1738,6 +1749,7 @@ proc handleAutoAdvance(d: Daemon) =
 
   let copyCtp = d.currentTrackPath
   release(d.lock)
+  let (nextTitle, nextChannel) = resolveTrackMetadata(d, nextPath)
 
   if nextPath.len > 0:
     var loadPath = nextPath
@@ -1746,11 +1758,6 @@ proc handleAutoAdvance(d: Daemon) =
       if d.ytStreamResolvedFor == nextPath and d.ytStreamResolvedUrl.len > 0:
         loadPath = d.ytStreamResolvedUrl
       release(d.lock)
-    if d.lib != nil and isYtWatchUrl(nextPath):
-      let meta = d.lib.getDownloadMetaByUrl(nextPath)
-      if meta.title.len > 0:
-        nextTitle = meta.title
-        nextChannel = meta.channel
     acquire(d.lock)
     d.pendingActions.add(PulseAction(kind: pakLoadFile, strVal: loadPath, strVal2: nextTitle, strVal3: nextChannel))
     d.currentTrackPath = loadPath

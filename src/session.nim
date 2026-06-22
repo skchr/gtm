@@ -122,7 +122,7 @@ proc drainEventLinesFromJson(j: JsonNode, s: DaemonSession): seq[AudioEvent] =
       if evJson.hasKey("shuffleIndex"): ev.intVal = evJson["shuffleIndex"].getInt(0)
       for key in ["url", "path", "title", "channel", "next_path", "next_title", "next_channel", "cover_data", "cover_mime"]:
         if evJson.hasKey(key): ev.metadata[key] = evJson[key].getStr("")
-      for key in ["queue", "results", "tracks", "lines"]:
+      for key in ["queue", "results", "tracks", "lines", "duration", "curve"]:
         if evJson.hasKey(key): ev.metadata[key] = $evJson[key]
       if evJson.hasKey("shuffle"): ev.metadata["shuffle"] = $(evJson["shuffle"].getBool(false))
       if evJson.hasKey("repeat"): ev.metadata["repeat"] = $(evJson["repeat"].getInt(0))
@@ -136,6 +136,9 @@ proc drainEventLinesFromJson(j: JsonNode, s: DaemonSession): seq[AudioEvent] =
           if evJson.hasKey(f): ev.metadata[f] = $evJson[f].getInt(0)
         if evJson.hasKey("shuffle"): ev.metadata["full_shuffle"] = $(evJson["shuffle"].getBool(false))
         if evJson.hasKey("repeat"): ev.metadata["full_repeat"] = $(evJson["repeat"].getInt(0))
+        if evJson.hasKey("shuffleIndex"): ev.metadata["full_shuffle_index"] = $evJson["shuffleIndex"].getInt(0)
+        if evJson.hasKey("crossfadeDuration"): ev.metadata["full_crossfade_duration"] = $evJson["crossfadeDuration"].getInt(0)
+        if evJson.hasKey("crossfadeCurve"): ev.metadata["full_crossfade_curve"] = $evJson["crossfadeCurve"].getInt(0)
     else: discard
     result.add(ev)
 

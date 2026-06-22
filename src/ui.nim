@@ -489,9 +489,9 @@ method render*(node: LibrarySidebar, ctx: var nw.Context[State]) =
     SidebarEntry(scope: fsPlaylists, label: ic.playlist & " Playlists", count: state.libraryPlaylists.len),
     SidebarEntry(scope: fsRecent, label: ic.time & " Recent", count: state.libraryTracks.len),
     SidebarEntry(scope: fsFavourites, label: ic.heart & " Favourites", count: 0),
-    SidebarEntry(scope: fsLastPlayed, label: ic.time & " Last Played", count: state.libraryTracks.len),
-    SidebarEntry(scope: fsMostPlayed, label: ic.heart & " Most Played", count: state.libraryTracks.len),
-    SidebarEntry(scope: fsLeastPlayed, label: ic.heart & " Least Played", count: state.libraryTracks.len),
+    SidebarEntry(scope: fsLastPlayed, label: ic.musicNote & " Last Played", count: state.libraryTracks.len),
+    SidebarEntry(scope: fsMostPlayed, label: ic.arrowUp & " Most Played", count: state.libraryTracks.len),
+    SidebarEntry(scope: fsLeastPlayed, label: ic.arrowDown & " Least Played", count: state.libraryTracks.len),
     SidebarEntry(scope: fsDownloads, label: ic.disk & " Downloads", count: state.downloadCount),
     SidebarEntry(scope: fsSpotify, label: ic.headphone & " Spotify", count: state.spDownloadCount),
   ]

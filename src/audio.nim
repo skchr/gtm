@@ -86,14 +86,14 @@ method setSpatialWidth*(b: AudioBackend, width: float) {.base, gcsafe.} = discar
 
 when defined(useFFmpeg):
   {.compile: "vendor/ffmpeg/ffmpeg_impl.c".}
-  when defined(staticFfmpeg):
+  when defined(staticFfmpeg) or defined(android):
     when defined(android):
       {.passL: staticExec("pkg-config --static --libs libavformat libavcodec libavutil libswresample").}
       {.passC: staticExec("pkg-config --cflags libavformat libavcodec libavutil libswresample").}
     else:
       {.passL: staticExec("pkg-config --static --libs libavformat libavcodec libavutil libswresample") & " " & staticExec("pkg-config --libs alsa").}
       {.passC: staticExec("pkg-config --cflags libavformat libavcodec libavutil libswresample") & " " & staticExec("pkg-config --cflags alsa").}
-  elif defined(macosx) or defined(android):
+  elif defined(macosx):
     {.passL: staticExec("pkg-config --libs libavformat libavcodec libavutil libswresample").}
     {.passC: staticExec("pkg-config --cflags libavformat libavcodec libavutil libswresample").}
   else:

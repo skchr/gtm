@@ -2003,20 +2003,13 @@ proc handleMainKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     if state.isPlaylistView() and state.playlistContentsIdx < 0:
       execCmd(state, "rename_playlist")
   of iw.Key.Down:
-    if state.tab == tabNowPlaying and state.playbackQueue.len > 0:
-      if state.queueCursor < state.playbackQueue.len - 1: state.queueCursor.inc
-      let maxVisible = 8
-      if state.queueCursor >= state.upNextScrollOffset + maxVisible:
-        state.upNextScrollOffset = state.queueCursor - maxVisible + 1
-      state.markDirty(ceQueueCursor)
+    if state.tab == tabNowPlaying:
+      discard
     else:
       state.moveSelection(1)
   of iw.Key.Up:
-    if state.tab == tabNowPlaying and state.playbackQueue.len > 0:
-      if state.queueCursor > 0: state.queueCursor.dec
-      if state.queueCursor < state.upNextScrollOffset:
-        state.upNextScrollOffset = state.queueCursor
-      state.markDirty(ceQueueCursor)
+    if state.tab == tabNowPlaying:
+      discard
     else:
       state.moveSelection(-1)
   of iw.Key.Enter:
@@ -2489,9 +2482,51 @@ proc processEvents(state: var AppState) =
             try: fs["repeat"] = %parseInt(ev.metadata["full_repeat"]) except: discard
           if ev.metadata.hasKey("sleep_timer"):
             try: fs["sleep_timer"] = %parseInt(ev.metadata["sleep_timer"]) except: discard
+          if ev.metadata.hasKey("full_shuffle_index"):
+            try: fs["shuffleIndex"] = %parseInt(ev.metadata["full_shuffle_index"]) except: discard
+          if ev.metadata.hasKey("full_crossfade_duration"):
+            try: fs["crossfadeDuration"] = %parseInt(ev.metadata["full_crossfade_duration"]) except: discard
+          if ev.metadata.hasKey("full_crossfade_curve"):
+            try: fs["crossfadeCurve"] = %parseInt(ev.metadata["full_crossfade_curve"]) except: discard
           if fs.len > 0:
             fullStateSync(state, fs)
             state.markDirtyBatch(cePlayState, ceTrack, cePosition, ceVolume)
+          # Rebuild queue from full_state_sync
+          if ev.metadata.hasKey("queue"):
+            try:
+              let daemonQueue = parseJson(ev.metadata["queue"])
+              var newQueue: seq[int] = @[]
+              var newPaths: seq[string] = @[]
+              for qItem in daemonQueue.items:
+                let qPath = qItem.getStr("")
+                var found = false
+                for i, t in state.libraryTracks:
+                  if t.path == qPath:
+                    newQueue.add(i)
+                    newPaths.add("")
+                    found = true
+                    break
+                if not found:
+                  newQueue.add(-1)
+                  newPaths.add(qPath)
+              state.playbackQueue = newQueue
+              state.queuePaths = newPaths
+              state.queueCursor = 0
+              state.rebuildItems()
+              state.markDirty(ceQueue)
+            except: discard
+      elif ev.strVal == "crossfade_duration_changed":
+        if ev.metadata.hasKey("duration"):
+          try:
+            state.crossfadeDuration = parseInt(ev.metadata["duration"])
+            state.markDirty(ceSettings)
+          except: discard
+      elif ev.strVal == "crossfade_curve_changed":
+        if ev.metadata.hasKey("curve"):
+          try:
+            state.crossfadeCurve = CrossfadeCurveType(parseInt(ev.metadata["curve"]))
+            state.markDirty(ceSettings)
+          except: discard
       elif ev.strVal == "queue_changed" and state.player.backendType == abtDaemon:
         state.shuffleIndex = ev.intVal
         state.markDirty(ceQueue)
@@ -2515,6 +2550,7 @@ proc processEvents(state: var AppState) =
                 newPaths.add(qPath)
             state.playbackQueue = newQueue
             state.queuePaths = newPaths
+            state.queueCursor = 0
             state.rebuildItems()
             state.markDirty(ceQueue)
           except: discard
