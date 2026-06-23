@@ -30,7 +30,7 @@
 ## │  Every poll: write queued events → each client   │
 ## └──────────────────────────────────────────────────┘
 
-import os, json, strutils, net, posix, random, osproc, times, base64, locks, uri
+import os, json, strutils, net, posix, random, osproc, times, base64, locks, uri, tables, httpclient, streams
 from nativesockets import setBlocking, selectRead, SocketHandle
 from std/typedthreads import Thread, createThread, joinThread
 when not defined(macosx):
@@ -60,7 +60,7 @@ type
     pakPrev, pakLoadFile, pakSetVolume, pakPrepareNext,
     pakStartCrossfade, pakSetEqBand, pakSetEqPreset, pakSetSpatialWidth,
     pakSetCrossfadeCurve, pakShutdown, pakResolveYtStream,
-    pakFetchLyrics, pakSearchLyrics
+    pakFetchLyrics, pakSearchLyrics, pakIdentifySong
 
   PulseAction* = object
     kind*: PulseActionKind
@@ -96,7 +96,7 @@ type
     dckSetSpatialWidth,
     dckPing,
     dckDeleteTrack, dckRestoreTrack, dckPermanentDelete, dckListTrash, dckPurgeTrash,
-    dckRequestCoverArt, dckRequestLyrics
+    dckRequestCoverArt, dckRequestLyrics, dckIdentifySong
 
   DaemonCmd* = object
     kind*: DaemonCmdKind
@@ -150,6 +150,7 @@ type
     crossfadeNextPath*: string
     crossfadeConsumed: bool
     autoAdvancing*: bool
+    pendingAdvance*: bool
     lastConsumedFromQueue: seq[string]
     upNextSent: bool
     spatialWidth*: float
@@ -215,12 +216,21 @@ type
     pwLyricsPath: string          # PulseWorker → main: lyrics request path
     pwLyricsResult: string        # PulseWorker → main: serialized JSON lyrics result
     pwLyricsDone: bool            # PulseWorker → main: lyrics ready flag
+    pwResolveProcess: Process     # PulseWorker async yt-dlp resolution
+    pwResolveBuf: string
+    pwResolveActive: bool
+    pwResolveUrl: string
+    pwResolveTitle: string
+    pwResolveChannel: string
     pwSearchLyricsResult: string  # PulseWorker → main: serialized JSON search results
     pwSearchLyricsDone: bool      # PulseWorker → main: search ready flag
+    pwIdentifyResult: string      # PulseWorker → main: song identification result
+    pwIdentifyDone: bool
     ytDownloadTasks: seq[DownloadTask]
     ytActiveDownloads: int
     ytLastCompletedPath: string
     ytLastCompletedUrl: string
+    ytDownloaded*: Table[string, string]
     ytPlaylistProcess: Process
     ytPlaylistBuf: string
     ytPlaylistActive: bool
@@ -430,6 +440,8 @@ proc parseDaemonCommand(line: string): DaemonCmd =
       result.kind = dckRequestLyrics; result.strArg = j{"path"}.getStr("")
       result.strArg2 = j{"title"}.getStr(""); result.strArg3 = j{"artist"}.getStr("")
       result.strArg4 = j{"album"}.getStr(""); result.floatArg = j{"duration"}.getFloat(0.0)
+    of "identify_song":
+      result.kind = dckIdentifySong
     else: result.kind = dckStatus
   except:
     result.kind = dckStatus
@@ -1303,6 +1315,13 @@ proc execCoverLyrics(d: Daemon, cmd: DaemonCmd): JsonNode =
     release(d.lock)
     result["ok"] = %true
     result["pending"] = %true
+  of dckIdentifySong:
+    # Queue to PulseWorker — captures audio samples, runs fpcalc → AcoustID
+    acquire(d.lock)
+    d.pendingActions.add(PulseAction(kind: pakIdentifySong))
+    release(d.lock)
+    result["ok"] = %true
+    result["pending"] = %true
   else: discard
 
 proc execScan(d: Daemon, cmd: DaemonCmd): JsonNode =
@@ -1372,24 +1391,27 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
   of dckLoadFile:
     if d.player == nil: return %*{"ok": false, "error": "no audio backend"}
     var loadPath = cmd.strArg
-    if isYtWatchUrl(cmd.strArg) and not d.pendingLoadYtActive:
-      let (cSrc, cPath) = cookiesForUrl(d, cmd.strArg)
-      d.pendingLoadYtUrl = cmd.strArg
-      d.pendingLoadYtTitle = cmd.strArg2
-      d.pendingLoadYtChannel = cmd.strArg3
-      d.pendingLoadYtBuf = ""
-      d.pendingLoadYtActive = startStreamUrlFetch(cmd.strArg, d.pendingLoadYtProcess, cSrc, d.ytJsRuntime, cPath)
-      if not d.pendingLoadYtActive:
-        d.pendingLoadYtUrl = ""
-        # Queue to PulseWorker — blocks there, not in I/O thread
-        acquire(d.lock)
-        d.pendingActions.add(PulseAction(kind: pakResolveYtStream, strVal: cmd.strArg,
-          strVal2: cmd.strArg2, strVal3: cmd.strArg3, strVal4: cPath,
-          intVal: 0))
-        release(d.lock)
-        return %*{"ok": true, "pending": true}
-      else:
-        return %*{"ok": true, "pending": true}
+    if isYtWatchUrl(cmd.strArg):
+      if d.ytDownloaded.hasKey(cmd.strArg):
+        loadPath = d.ytDownloaded[cmd.strArg]
+      elif not d.pendingLoadYtActive:
+        let (cSrc, cPath) = cookiesForUrl(d, cmd.strArg)
+        d.pendingLoadYtUrl = cmd.strArg
+        d.pendingLoadYtTitle = cmd.strArg2
+        d.pendingLoadYtChannel = cmd.strArg3
+        d.pendingLoadYtBuf = ""
+        d.pendingLoadYtActive = startStreamUrlFetch(cmd.strArg, d.pendingLoadYtProcess, cSrc, d.ytJsRuntime, cPath)
+        if not d.pendingLoadYtActive:
+          d.pendingLoadYtUrl = ""
+          # Queue to PulseWorker — blocks there, not in I/O thread
+          acquire(d.lock)
+          d.pendingActions.add(PulseAction(kind: pakResolveYtStream, strVal: cmd.strArg,
+            strVal2: cmd.strArg2, strVal3: cmd.strArg3, strVal4: cPath,
+            intVal: 0))
+          release(d.lock)
+          return %*{"ok": true, "pending": true}
+        else:
+          return %*{"ok": true, "pending": true}
     else:
       loadPath = cmd.strArg
     result = %*{"ok": true}
@@ -1640,7 +1662,7 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     result = execYoutube(d, cmd)
   of dckSpSetConfig, dckSpListDownloads, dckSpOAuthUrl, dckSpOAuthCallback, dckSpFeed, dckSpDisconnect, dckSpSearch, dckSpLikedSongs:
     result = execSpotify(d, cmd)
-  of dckGetCoverArt, dckGetLyrics, dckRequestCoverArt, dckRequestLyrics, dckSearchLyrics:
+  of dckGetCoverArt, dckGetLyrics, dckRequestCoverArt, dckRequestLyrics, dckSearchLyrics, dckIdentifySong:
     result = execCoverLyrics(d, cmd)
   of dckScan:
     result = execScan(d, cmd)
@@ -1710,6 +1732,18 @@ proc runPulseWorker(d: ptr Daemon) {.thread.} =
           player.stop()
           if player.loadFile(a.strVal):
             player.play()
+          # Sync daemon's current track metadata — covers dckLoadFile,
+          # dckNext, dckPrev, handleAutoAdvance, pakResolveYtStream.
+          let path = a.strVal
+          let (title, channel) = if a.strVal2.len > 0:
+            (a.strVal2, a.strVal3)
+          else:
+            resolveTrackMetadata(d[], path)
+          acquire(d.lock)
+          d[].currentTrackPath = path
+          d[].currentTrackTitle = title
+          d[].currentTrackChannel = channel
+          release(d.lock)
       of pakSetVolume:
         player.setVolume(a.intVal)
       of pakPrepareNext:
@@ -1725,21 +1759,30 @@ proc runPulseWorker(d: ptr Daemon) {.thread.} =
       of pakSetCrossfadeCurve:
         player.setCrossfadeCurve(a.intVal)
       of pakResolveYtStream:
-        let (cSrc, _) = cookiesForUrl(d[], a.strVal)
-        let resolved = resolveStreamUrlSync(a.strVal, d[].ytJsRuntime, cSrc, a.strVal4)
-        let loadPath = if resolved.len > 0: resolved else: a.strVal
-        # Queue immediate load + optional play
-        acquire(d.lock)
-        d.pendingActions.insert(PulseAction(kind: pakLoadFile,
-          strVal: loadPath, strVal2: a.strVal2, strVal3: a.strVal3), 0)
-        if d[].pendingPlayAfterYtLoad:
-          d.pendingActions.insert(PulseAction(kind: pakPlay), 1)
-          d[].pendingPlayAfterYtLoad = false
-        d[].pwResolvedYtUrl = loadPath
-        d[].pwResolvedYtTitle = a.strVal2
-        d[].pwResolvedYtChannel = a.strVal3
-        d[].pwResolveDone = true
-        release(d.lock)
+        let (cSrc, cPath) = cookiesForUrl(d[], a.strVal)
+        let yt = findYtdlp()
+        if yt.len > 0:
+          # Start async yt-dlp instead of blocking — poll on next ticks
+          acquire(d.lock)
+          d[].pwResolveUrl = a.strVal
+          d[].pwResolveTitle = a.strVal2
+          d[].pwResolveChannel = a.strVal3
+          d[].pwResolveBuf = ""
+          d[].pwResolveActive = startStreamUrlFetch(a.strVal, d[].pwResolveProcess, cSrc, d[].ytJsRuntime, cPath)
+          release(d.lock)
+        else:
+          # No yt-dlp — queue the raw URL; FFmpeg may fail gracefully
+          acquire(d.lock)
+          d[].pwResolvedYtUrl = a.strVal
+          d[].pwResolvedYtTitle = a.strVal2
+          d[].pwResolvedYtChannel = a.strVal3
+          d[].pwResolveDone = true
+          d.pendingActions.insert(PulseAction(kind: pakLoadFile,
+            strVal: a.strVal, strVal2: a.strVal2, strVal3: a.strVal3), 0)
+          if d[].pendingPlayAfterYtLoad:
+            d.pendingActions.insert(PulseAction(kind: pakPlay), 1)
+            d[].pendingPlayAfterYtLoad = false
+          release(d.lock)
       of pakFetchLyrics:
         let lrc = resolveLyrics(a.strVal, a.strVal2, a.strVal3, a.strVal4, a.floatVal)
         var lrcArr = newJArray()
@@ -1762,6 +1805,52 @@ proc runPulseWorker(d: ptr Daemon) {.thread.} =
         acquire(d.lock)
         d[].pwSearchLyricsResult = $searchJson
         d[].pwSearchLyricsDone = true
+        release(d.lock)
+      of pakIdentifySong:
+        # fpcalc → AcoustID → MusicBrainz to identify the current track
+        var identifiedTitle = ""; var identifiedArtist = ""; var identifiedAlbum = ""
+        let trackPath = d[].currentTrackPath
+        if trackPath.len > 0 and fileExists(trackPath):
+          let fpcalcBin = findExe("fpcalc")
+          if fpcalcBin.len > 0:
+            var fingerprint = ""; var duration = 0
+            try:
+              let fp = startProcess(fpcalcBin, args = @[trackPath], options = {poUsePath})
+              if fp.waitForExit(30000) == 0:
+                let outStr = fp.outputStream.readAll()
+                for line in outStr.splitLines:
+                  if line.startsWith("FINGERPRINT="):
+                    fingerprint = line.substr("FINGERPRINT=".len).strip()
+                  elif line.startsWith("DURATION="):
+                    duration = parseInt(line.substr("DURATION=".len).strip())
+              try: close(fp) except: discard
+            except: discard
+            if fingerprint.len > 0 and duration > 0:
+              try:
+                let client = newHttpClient()
+                let apiUrl = "https://api.acoustid.org/v2/lookup?client=8XGbH3iBcC" &
+                  "&meta=recordings+releasegroups+compress&duration=" & $duration &
+                  "&fingerprint=" & encodeUrl(fingerprint)
+                let httpResp = client.getContent(apiUrl)
+                client.close()
+                if httpResp.len > 0:
+                  let root = parseJson(httpResp)
+                  if root.hasKey("results") and root["results"].len > 0:
+                    let first = root["results"][0]
+                    if first.hasKey("recordings") and first["recordings"].len > 0:
+                      let rec = first["recordings"][0]
+                      identifiedTitle = rec{"title"}.getStr("")
+                      if rec.hasKey("artists") and rec["artists"].len > 0:
+                        identifiedArtist = rec["artists"][0]{"name"}.getStr("")
+                      if rec.hasKey("releasegroups") and rec["releasegroups"].len > 0:
+                        identifiedAlbum = rec["releasegroups"][0]{"title"}.getStr("")
+              except: discard
+        let identJson = %*{"ok": %(identifiedTitle.len > 0),
+          "path": trackPath, "title": identifiedTitle,
+          "artist": identifiedArtist, "album": identifiedAlbum}
+        acquire(d.lock)
+        d[].pwIdentifyResult = $identJson
+        d[].pwIdentifyDone = true
         release(d.lock)
       of pakShutdown:
         return
@@ -1794,6 +1883,24 @@ proc runPulseWorker(d: ptr Daemon) {.thread.} =
       d.stateVersion.inc
       let evJson = %*{"events": serializeEvents(audioEvents, d[])}
       d.events.add($evJson & "\n")
+
+    # Poll async yt-dlp resolution (non-blocking across ticks)
+    if d[].pwResolveActive and not d[].pwResolveProcess.running():
+      let resolved = pollStreamUrlFetch(d[].pwResolveProcess, d[].pwResolveBuf)
+      d[].pwResolveActive = false
+      if resolved.len > 0:
+        let loadPath = resolved
+        let origUrl = d[].pwResolveUrl
+        d[].pwResolvedYtUrl = loadPath
+        d[].pwResolvedYtTitle = d[].pwResolveTitle
+        d[].pwResolvedYtChannel = d[].pwResolveChannel
+        d[].pwResolveDone = true
+        # Queue immediate load
+        d.pendingActions.insert(PulseAction(kind: pakLoadFile,
+          strVal: loadPath, strVal2: d[].pwResolveTitle, strVal3: d[].pwResolveChannel), 0)
+        if d[].pendingPlayAfterYtLoad:
+          d.pendingActions.insert(PulseAction(kind: pakPlay), 1)
+          d[].pendingPlayAfterYtLoad = false
 
     release(d.lock)
 
@@ -1844,10 +1951,13 @@ proc handleAutoAdvance(d: Daemon) =
     var loadPath = nextPath
     if isYtWatchUrl(nextPath):
       acquire(d.lock)
-      if d.ytStreamResolvedFor == nextPath and d.ytStreamResolvedUrl.len > 0:
+      if d.ytDownloaded.hasKey(nextPath):
+        loadPath = d.ytDownloaded[nextPath]
+      elif d.ytStreamResolvedFor == nextPath and d.ytStreamResolvedUrl.len > 0:
         loadPath = d.ytStreamResolvedUrl
       release(d.lock)
     acquire(d.lock)
+    d.pendingAdvance = true
     d.pendingActions.add(PulseAction(kind: pakLoadFile, strVal: loadPath, strVal2: nextTitle, strVal3: nextChannel))
     d.currentTrackPath = loadPath
     d.currentTrackTitle = nextTitle
@@ -1962,6 +2072,7 @@ proc runDaemon*() =
     pendingPlayAfterYtLoad: false,
     ytSearchResults: @[],
     ytDownloadTasks: @[],
+    ytDownloaded: initTable[string, string](),
     lastConsumedFromQueue: @[],
     lastTrackDuration: 0.0,
     spatialWidth: 1.0,
@@ -2139,6 +2250,7 @@ proc runDaemon*() =
               handleAutoAdvance(daemon)
             elif kind == 1: # evPlaybackStarted
               daemon.autoAdvancing = false
+              daemon.pendingAdvance = false
       except:
         discard
 
@@ -2179,6 +2291,7 @@ proc runDaemon*() =
             let dlUrl = daemon.ytDownloadTasks[i].url
             daemon.ytLastCompletedPath = path
             daemon.ytLastCompletedUrl = dlUrl
+            daemon.ytDownloaded[dlUrl] = path
             if daemon.lib != nil:
               daemon.lib.addDownload(dlUrl, path, daemon.ytDownloadTasks[i].title, daemon.ytDownloadTasks[i].channel)
               daemon.lib.updateTrackPath(dlUrl, path, daemon.ytDownloadTasks[i].title)
@@ -2325,6 +2438,20 @@ proc runDaemon*() =
         discard
       daemon.pwSearchLyricsResult = ""
 
+    # PulseWorker-completed song identification — broadcast event to clients
+    if daemon.pwIdentifyDone:
+      daemon.pwIdentifyDone = false
+      try:
+        let identJson = parseJson(daemon.pwIdentifyResult)
+        let ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "song_identified",
+          "path": %identJson["path"], "title": %identJson["title"],
+          "artist": %identJson["artist"], "album": %identJson["album"],
+          "ok": %identJson["ok"]}]}
+        daemon.broadcastJson(ev)
+      except:
+        discard
+      daemon.pwIdentifyResult = ""
+
     # Background scan: process up to 10 files per iteration
     if daemon.scanningDir.len > 0 and daemon.scanningFiles.len > 0:
       let batchEnd = min(daemon.scanningIdx + 10, daemon.scanningFiles.len)
@@ -2397,7 +2524,7 @@ proc runDaemon*() =
             daemon.crossfadeStarted = true
 
     # --- Retry advance: player stopped but queue has items ---
-    if daemon.currentTrackPath.len > 0 and daemon.playerState == 0 and daemon.playbackQueue.len > 0:
+    if not daemon.pendingAdvance and daemon.currentTrackPath.len > 0 and daemon.playerState == 0 and daemon.playbackQueue.len > 0:
       handleAutoAdvance(daemon)
 
     # --- Sleep timer ---

@@ -233,7 +233,7 @@ method render*(node: TabBar, ctx: var nw.Context[State]) =
 var gCursorX, gCursorY: int = -1
 
 proc showInputCursor*(state: var AppState, w, h: int) =
-  let shouldShow = state.overlay.kind in {okYtSearch, okCommandPalette, okThemePicker, okEqPresetPicker, okQueuePicker, okPlaylistSearch, okQueueOverlay, okFuzzyFinder, okSpotifyUrlInput, okSpotifySearch} or
+  let shouldShow = state.overlay.kind in {okYtSearch, okCommandPalette, okThemePicker, okEqPresetPicker, okQueuePicker, okPlaylistSearch, okQueueOverlay, okFuzzyFinder, okSpotifyUrlInput, okSpotifySearch, okLyricsSearch} or
     (state.overlay.kind == okNone and (state.playlistInputActive or state.mode == imFilter or state.mode == imLeaderMode))
   if shouldShow == state.cursorVisible: return
   state.cursorVisible = shouldShow
@@ -241,7 +241,7 @@ proc showInputCursor*(state: var AppState, w, h: int) =
     var cx = 1
     var cy = 1
     case state.overlay.kind
-    of okYtSearch, okCommandPalette, okThemePicker, okQueuePicker, okPlaylistSearch, okQueueOverlay, okSpotifyUrlInput, okSpotifySearch:
+    of okYtSearch, okCommandPalette, okThemePicker, okQueuePicker, okPlaylistSearch, okQueueOverlay, okSpotifyUrlInput, okSpotifySearch, okLyricsSearch:
       let boxW = min(60, w - 4)
       let boxH = min(h - 4, 20)
       let boxX = (w - boxW) div 2
@@ -412,8 +412,8 @@ method render*(node: NowPlayingView, ctx: var nw.Context[State]) =
       line.inc
     line.inc
     writeStr(ctx.tb, dashX, line, "Press Alt+D or Esc to close", theme.overlay0)
-  # Lyrics — synced
-  if state.currentLyrics.lines.len > 0:
+  # Lyrics — synced (togglable)
+  if state.lyricsVisible and state.currentLyrics.lines.len > 0:
     let maxLyricLines = 6
     let startLine = max(0, state.lyricsLineIdx - 2)
     let endLine = min(state.currentLyrics.lines.len - 1, startLine + maxLyricLines - 1)
@@ -589,7 +589,10 @@ method render*(node: LibraryContentView, ctx: var nw.Context[State]) =
     return
 
   if count == 0:
-    writeStr(ctx.tb, 1, line + 1, "No items found", theme.subtext0)
+    if state.libraryLoading:
+      writeStr(ctx.tb, 1, line + 1, "Loading library...", theme.subtext0)
+    else:
+      writeStr(ctx.tb, 1, line + 1, "No items found", theme.subtext0)
     return
   let headerOffset = line
   let isTrackView = state.filterScope in {fsAll, fsTracks}
@@ -1197,6 +1200,10 @@ method render*(node: GenericOverlay, ctx: var nw.Context[State]) =
     title = ic.cross & " Trash"
     boxW = min(60, w - 8)
     boxH = min(24, h - 4)
+  of okLyricsSearch:
+    title = ic.search & " Search Lyrics (artist title)"
+    boxW = min(60, w - 8)
+    boxH = min(24, h - 4)
   else: return
   let boxX = (w - boxW) div 2
   let boxY = (h - boxH) div 2
@@ -1425,6 +1432,28 @@ method render*(node: GenericOverlay, ctx: var nw.Context[State]) =
     let footer = "Enter: restore  Del: permanent delete  P: purge expired  Esc: cancel"
     let ft = truncateAt(footer, boxW - 2)
     if ft.len > 0: writeStr(ctx.tb, boxX + 1, boxY + boxH - 1, ft, theme.subtext0)
+  #--- Lyrics Search ---
+  elif ov.kind == okLyricsSearch:
+    let availableLines = max(0, (boxY + boxH - 2) - curY)
+    let displayCount = min(ov.lyricsSearchResults.len, availableLines)
+    for i in 0..<displayCount:
+      let lineY = curY + i
+      if lineY >= boxY + boxH - 1: break
+      let r = ov.lyricsSearchResults[i]
+      let isSelected = (i == ov.cursor)
+      let ovRowBg = if isSelected: theme.surface2 else: theme.surface0
+      if isSelected:
+        fillBg(ctx.tb, boxX + 1, lineY, boxX + boxW - 2, lineY, ovRowBg)
+      ctx.tb.setBackgroundColor(ovRowBg)
+      let label = truncateAt(r.title & " \u2014 " & r.artist, boxW - 4)
+      writeStr(ctx.tb, boxX + 2, lineY, label, if isSelected: theme.blue else: theme.text)
+    ctx.tb.setBackgroundColor(theme.surface0)
+    if ov.lyricsSearchResults.len == 0 and ov.query.len > 0:
+      writeStr(ctx.tb, boxX + 2, curY, "Searching...", theme.subtext0)
+    elif ov.lyricsSearchResults.len == 0:
+      writeStr(ctx.tb, boxX + 2, curY, "Type artist and title to search", theme.subtext0)
+    let lsFooter = truncateAt("\u23CE Enter: fetch lyrics  Esc: close", boxW - 2)
+    if lsFooter.len > 0: writeStr(ctx.tb, boxX + 1, boxY + boxH - 1, lsFooter, theme.subtext0)
   #--- Current Queue Overlay ---
   elif ov.kind == okQueueOverlay:
     let queue = ctx.state.playbackQueue
@@ -1979,6 +2008,7 @@ proc initApp*(state: var AppState) =
   state.coverFetching = false
   state.currentLyrics = LrcData(lines: @[])
   state.lyricsLineIdx = -1
+  state.lyricsVisible = true
   state.daemonStateVersion = 0
   state.daemonConnected = false
   state.daemonPid = 0

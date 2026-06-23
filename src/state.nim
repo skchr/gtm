@@ -235,6 +235,7 @@ type
     okFooterModulePicker
     okSpotifyUrlInput
     okSpotifySearch
+    okLyricsSearch
 
   YtSubTab* = enum ystAll, ystPlaylists
 
@@ -252,6 +253,7 @@ type
     batchItems*: seq[YtSearchResult]
     batchShowPls*: bool
     plMode*: int
+    lyricsSearchResults*: seq[tuple[id: int, title, artist, album: string, duration: float]]
     ytSubTab*: YtSubTab
     ytPlaylistDetail*: YtPlaylistDetail
     ytAutocompleteSuggestions*: seq[string]
@@ -486,6 +488,8 @@ type
     configDirty*: bool
     currentLyrics*: LrcData
     lyricsLineIdx*: int
+    lyricsVisible*: bool
+    libraryLoading*: bool
 
 const
   GTM_VERSION* {.strdefine.} = staticExec("git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//'").strip

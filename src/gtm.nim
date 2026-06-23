@@ -254,7 +254,10 @@ proc scanLocalDir(state: var AppState, dir: string) =
     ))
 
 proc loadLibrary(state: var AppState) =
-  if state.libraryTracks.len > 0: return
+  if state.libraryTracks.len > 0:
+    state.libraryLoading = false
+    return
+  state.libraryLoading = true
   let musicDir = getEnv("HOME", "") & "/Music"
   if state.player.backendType == abtDaemon:
     let cli = DaemonService(state.svc)
@@ -262,6 +265,7 @@ proc loadLibrary(state: var AppState) =
       let resp = cli.getLibrary()
       if resp.hasKey("tracks") and resp["tracks"].len > 0:
         state.loadLibraryFromDaemon(resp)
+        state.libraryLoading = false
         return
       # Daemon library empty: trigger server-side scan, then re-query
       if dirExists(musicDir):
@@ -269,10 +273,12 @@ proc loadLibrary(state: var AppState) =
         let resp2 = cli.getLibrary()
         if resp2.hasKey("tracks") and resp2["tracks"].len > 0:
           state.loadLibraryFromDaemon(resp2)
+          state.libraryLoading = false
           return
   # Fallback: scan local files
   state.scanLocalDir(musicDir)
   state.rebuildItems()
+  state.libraryLoading = false
 
 proc buildPlaylistFromArgs(state: var AppState, args: seq[string]) =
   var paths: seq[string] = @[]
@@ -876,7 +882,7 @@ proc initCommands(state: var AppState) =
   state.registerCommand("rescan_library", "Rescan Library",
     "Rescan music directories for new files", "\U0001F504", @[],
     proc(s: var AppState) =
-      s.libraryTracks = @[]; s.loadLibrary(); s.rebuildItems())
+      s.libraryTracks = @[]; s.libraryLoading = true; s.loadLibrary(); s.rebuildItems())
   state.registerCommand("toggle_shuffle", "Toggle Shuffle",
     "Toggle random playback order", "\U0001F500", @["ShiftS"],
     proc(s: var AppState) = s.toggleShuffle())
@@ -913,6 +919,18 @@ proc initCommands(state: var AppState) =
         s.spFeedFetching = true
         DaemonService(s.svc).sendOnly(%*{"cmd": "sp_feed"})
       s.markDirty(ceSettings))
+  state.registerCommand("toggle_lyrics", "Toggle Lyrics",
+    "Show or hide synced lyrics in Now Playing tab", "\U0001F3B5", @["AltL"],
+    proc(s: var AppState) =
+      s.lyricsVisible = not s.lyricsVisible
+      s.markDirty(ceTrack))
+  state.registerCommand("search_lyrics", "Search Lyrics",
+    "Search for song lyrics by artist and title", "\U0001F50D", @["ShiftL"],
+    proc(s: var AppState) =
+      s.overlay = OverlayState(kind: okLyricsSearch, query: "")
+      if s.currentPlayingTitle.len > 0:
+        s.overlay.query = s.currentPlayingTitle & " " & s.currentPlayingChannel
+      s.overlay.lyricsSearchResults = @[])
   state.registerCommand("sp_fetch_feed", "Refresh Spotify Feed",
     "Manually refresh the Spotify feed data", "\U0001F504", @[],
     proc(s: var AppState) =
@@ -1196,6 +1214,45 @@ proc handleSpotifySearchOverlay(state: var AppState, key: iw.Key, chars: seq[Run
                 artist: item{"artist"}.getStr(""), album: item{"album"}.getStr(""),
                 url: item{"url"}.getStr(""), durationMs: item{"duration_ms"}.getInt(0)))
           state.spSearchLoading = false
+
+proc handleLyricsSearchOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
+  case key
+  of iw.Key.Escape:
+    state.overlay.clear()
+  of iw.Key.Down:
+    if state.overlay.cursor < state.overlay.lyricsSearchResults.len - 1:
+      state.overlay.cursor.inc
+  of iw.Key.Up:
+    if state.overlay.cursor > 0:
+      state.overlay.cursor.dec
+  of iw.Key.Enter:
+    if state.overlay.cursor >= 0 and state.overlay.cursor < state.overlay.lyricsSearchResults.len:
+      let r = state.overlay.lyricsSearchResults[state.overlay.cursor]
+      state.overlay.clear()
+      if state.player.backendType == abtDaemon:
+        DaemonService(state.svc).sendOnly(%*{"cmd": "request_lyrics",
+          "path": state.currentPlayingPath, "title": r.title,
+          "artist": r.artist, "duration": r.duration})
+  of iw.Key.Backspace:
+    if state.overlay.query.len > 0:
+      state.overlay.query = state.overlay.query[0..^2]
+      state.overlay.lyricsSearchResults = @[]
+      state.overlay.cursor = 0
+      if state.player.backendType == abtDaemon and state.overlay.query.len > 0:
+        let parts = state.overlay.query.split(' ', 1)
+        let artist = if parts.len > 1: parts[1] else: ""
+        DaemonService(state.svc).sendOnly(%*{"cmd": "search_lyrics", "title": parts[0], "artist": artist})
+  else:
+    for ch in chars:
+      let code = ch.int
+      if code >= 32 and code < 127:
+        state.overlay.query &= $ch
+        state.overlay.lyricsSearchResults = @[]
+        state.overlay.cursor = 0
+        if state.player.backendType == abtDaemon and state.overlay.query.len > 0:
+          let parts = state.overlay.query.split(' ', 1)
+          let artist = if parts.len > 1: parts[1] else: ""
+          DaemonService(state.svc).sendOnly(%*{"cmd": "search_lyrics", "title": parts[0], "artist": artist})
 
 proc handleYtBatchOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
   if state.overlay.batchShowPls:
@@ -2259,6 +2316,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     of okFooterModulePicker: state.handleFooterModulePickerOverlay(key, chars)
     of okSpotifyUrlInput: state.handleSpotifyUrlOverlay(key, chars)
     of okSpotifySearch: state.handleSpotifySearchOverlay(key, chars)
+    of okLyricsSearch: state.handleLyricsSearchOverlay(key, chars)
     of okNone: discard
     return
   let sidebarScopes = if state.sidebarSpExpanded:
@@ -2772,6 +2830,23 @@ proc processEvents(state: var AppState) =
                 lrcData.lines.add(LrcLine(timestamp: ln{"ts"}.getFloat(), text: ln{"text"}.getStr("")))
               state.currentLyrics = lrcData
             except: discard
+      elif ev.strVal == "lyrics_search_sync":
+        if ev.metadata.hasKey("results") and state.overlay.kind == okLyricsSearch:
+          try:
+            let resultsArr = parseJson(ev.metadata["results"])
+            state.overlay.lyricsSearchResults = @[]
+            for jr in resultsArr.items:
+              state.overlay.lyricsSearchResults.add((
+                id: jr{"id"}.getInt(0),
+                title: jr{"title"}.getStr(""),
+                artist: jr{"artist"}.getStr(""),
+                album: jr{"album"}.getStr(""),
+                duration: jr{"duration"}.getFloat(0.0)
+              ))
+            if state.overlay.cursor >= state.overlay.lyricsSearchResults.len:
+              state.overlay.cursor = 0
+            state.markDirty(ceSearchResults)
+          except: discard
       elif ev.strVal == "sp_feed":
         if ev.metadata.hasKey("connected") and ev.metadata["connected"] == "true":
           state.spConnected = true
