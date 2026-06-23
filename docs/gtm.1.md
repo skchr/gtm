@@ -1,6 +1,6 @@
 % GTM(1) User Manuals
 % prjctimg
-% v0.7.10
+% v0.7.12
 
 # NAME
 
