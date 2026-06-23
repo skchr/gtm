@@ -98,8 +98,12 @@ when isMainModule:
     if p == "-m" or p == "--musl": buildMusl = true
     if p == "--android": buildAndroid = true
     if p == "--static-linux": buildStaticLinux = true
-    if p == "--tag": forcedTag = selectTagInteractive()
     if p.startsWith("--tag:"): forcedTag = p[6..^1]
+    elif p == "--tag":
+      if i < paramCount() - 1:
+        forcedTag = paramStr(i+2)  # next arg is tag value
+      else:
+        forcedTag = selectTagInteractive()
   if not buildTui and not buildDmd:
     buildTui = true
     buildDmd = true
@@ -118,7 +122,7 @@ when isMainModule:
   echo "-- Prerequisites --"
   discard checkCmd("nim", "nim --version 2>/dev/null | head -1")
   if buildAndroid:
-    discard checkCmd("musl-gcc", "musl-gcc --version 2>/dev/null | head -1")
+    discard  # Android (Termux/NDK) uses different toolchain
   elif buildStaticLinux:
     discard
   else:

@@ -492,25 +492,11 @@ void ffmpeg_audio_pause(FfmpegAudioCtx* ctx) {
 }
 
 void ffmpeg_audio_stop(FfmpegAudioCtx* ctx) {
+  ffmpeg_audio_unload(ctx);
   if (!ctx) return;
-  ctx->playing = 0;
-#ifdef __ANDROID__
-  if (ctx->android_ctx) android_audio_stop(ctx->android_ctx);
-#endif
-  ctx->paused = 1;
-#ifdef HAS_ALSA
-  if (ctx->alsa_open) {
-    snd_pcm_drop(ctx->alsa_handle);
-    snd_pcm_prepare(ctx->alsa_handle);
-  }
-#endif
   ctx->current_time = 0.0;
   ctx->fade_out_remaining = 0;
   ctx->fade_in_remaining = 0;
-  if (ctx->fmt_ctx && ctx->audio_stream_idx >= 0) {
-    avcodec_flush_buffers(ctx->codec_ctx);
-    av_seek_frame(ctx->fmt_ctx, ctx->audio_stream_idx, 0, AVSEEK_FLAG_BACKWARD);
-  }
   ctx->seek_pending = 0;
 }
 
@@ -1198,9 +1184,8 @@ int ffmpeg_mixer_load_master(MixerCtx* mx, const char* path) {
   mx->crossfade_reverse = 0;
   mx->priming = 0;
   mx->fade_in_remaining = 0;
-  if (mx->master) ffmpeg_audio_uninit(mx->master);
-  mx->master = ffmpeg_audio_init();
-  if (!mx->master) return 0;
+  if (mx->master) ffmpeg_audio_unload(mx->master);
+  else { mx->master = ffmpeg_audio_init(); if (!mx->master) return 0; }
   if (!ffmpeg_audio_load(mx->master, path)) return 0;
   mx->master_duration = mx->master->duration;
   mx->current_time = 0.0;
@@ -1212,9 +1197,8 @@ int ffmpeg_mixer_load_master(MixerCtx* mx, const char* path) {
 int ffmpeg_mixer_load_slave(MixerCtx* mx, const char* path) {
   if (!mx) return 0;
   mx->slave_loaded = 0;
-  if (mx->slave) ffmpeg_audio_uninit(mx->slave);
-  mx->slave = ffmpeg_audio_init();
-  if (!mx->slave) return 0;
+  if (mx->slave) ffmpeg_audio_unload(mx->slave);
+  else { mx->slave = ffmpeg_audio_init(); if (!mx->slave) return 0; }
   if (!ffmpeg_audio_load(mx->slave, path)) { mx->slave_loaded = 0; return 0; }
   mx->slave_loaded = 1;
   return 1;
@@ -1249,15 +1233,8 @@ void ffmpeg_mixer_pause(MixerCtx* mx) {
 }
 
 void ffmpeg_mixer_stop(MixerCtx* mx) {
+  ffmpeg_mixer_unload(mx);
   if (!mx) return;
-      mx->playing = 0;
-  mx->paused = 1;
-#ifdef HAS_ALSA
-  if (mx->alsa_open) { snd_pcm_drop(mx->alsa_handle); snd_pcm_prepare(mx->alsa_handle); }
-#endif
-#ifdef __ANDROID__
-  if (mx->android_ctx) android_audio_stop(mx->android_ctx);
-#endif
   mx->current_time = 0.0;
   mx->master_ended = 0;
   mx->crossfade_active = 0;
@@ -1438,4 +1415,48 @@ int ffmpeg_mixer_set_eq_preset(MixerCtx* mx, const char* name) {
   for (int b = 0; b < EQ_BANDS; b++) mx->eq.gains[b] = 0.0f;
   eq_rebuild(&mx->eq);
   return 0;
+}
+
+/* Unload decoder resources (frees everything except the struct itself).
+ * Call on stop() to release memory; load() re-allocates lazily. */
+void ffmpeg_audio_unload(FfmpegAudioCtx* ctx) {
+  if (!ctx) return;
+  /* Stop decode thread */
+  ctx->thread_stop = 1;
+  ctx->playing = 0;
+  if (ctx->thread_started) {
+    pthread_join(ctx->decode_thread, NULL);
+    ctx->thread_started = 0;
+  }
+  alsa_close_device(ctx);
+#ifdef __ANDROID__
+  aaudio_close_device(ctx);
+#endif
+  if (ctx->swr_ctx) { swr_free(&ctx->swr_ctx); ctx->swr_ctx = NULL; }
+  if (ctx->codec_ctx) { avcodec_free_context(&ctx->codec_ctx); ctx->codec_ctx = NULL; }
+  if (ctx->fmt_ctx) { avformat_close_input(&ctx->fmt_ctx); ctx->fmt_ctx = NULL; }
+  ctx->audio_stream_idx = -1;
+  ctx->duration = 0.0;
+  ctx->current_time = 0.0;
+  ctx->pcm_wp = 0;
+  ctx->pcm_rp = 0;
+}
+
+void ffmpeg_mixer_unload(MixerCtx* mx) {
+  if (!mx) return;
+  mx->thread_stop = 1;
+  mx->playing = 0;
+  if (mx->thread_started) {
+    pthread_join(mx->decode_thread, NULL);
+    mx->thread_started = 0;
+  }
+  mixer_alsa_close(mx);
+#ifdef __ANDROID__
+  mixer_aaudio_close(mx);
+#endif
+  if (mx->master) ffmpeg_audio_unload(mx->master);
+  if (mx->slave) ffmpeg_audio_unload(mx->slave);
+  mx->master_ended = 0;
+  mx->crossfade_active = 0;
+  mx->current_time = 0.0;
 }

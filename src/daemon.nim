@@ -39,8 +39,6 @@ else:
   proc pthread_setname_np(name: cstring): cint {.importc, header: "<pthread.h>".}
 import audio, state, library, ytdlp, lyrics, spotify
 
-var notifyChan: Channel[tuple[title, body: string]]
-var notifyThread: Thread[void]
 
 proc parseFilenameForMetadata(path: string): tuple[title, artist: string] =
   let (_, stem, _) = path.splitFile()
@@ -709,7 +707,7 @@ proc advanceToNextTrack(d: Daemon, forward: bool = true): bool =
         d.lib.updatePlayCount(trackId)
     return true
 
-include mpris, notifications
+include mpris
 
 proc execLibrary(d: Daemon, cmd: DaemonCmd): JsonNode =
   result = %*{"ok": true}
@@ -1805,18 +1803,6 @@ proc runPulseWorker(d: ptr Daemon) {.thread.} =
       sleep(int(remaining * 1000))
 
 
-proc runNotifyWorker() {.thread, gcsafe.} =
-  when not defined(macosx):
-    discard prctl(15.cint, "notify")
-  else:
-    discard pthread_setname_np("notify")
-  initNotifications()
-  while true:
-    let (title, body) = notifyChan.recv()
-    if title.len == 0 and body.len == 0:
-      break
-    sendDesktopNotification(title, body)
-
 
 proc handleAutoAdvance(d: Daemon) =
   ## Called when a track ends. Pops next from queue and queues a pakLoadFile action.
@@ -1982,8 +1968,6 @@ proc runDaemon*() =
     stateVersion: 0
   )
   initMpris(daemon)
-  notifyChan.open()
-  createThread(notifyThread, runNotifyWorker)
   let libPath = dataDir() & "/gtm.db"
   if not dirExists(dataDir()):
     createDir(dataDir())
@@ -2155,8 +2139,6 @@ proc runDaemon*() =
               handleAutoAdvance(daemon)
             elif kind == 1: # evPlaybackStarted
               daemon.autoAdvancing = false
-              if ev{"track_title"}.getStr("").len > 0:
-                notifyChan.send((ev{"track_title"}.getStr(""), ev{"track_channel"}.getStr("")))
       except:
         discard
 
@@ -2452,11 +2434,28 @@ proc runDaemon*() =
           if fileExists(item.trashPath):
             try: removeFile(item.trashPath) except: discard
 
-  # Cleanup: join pulse thread + notify thread, close sockets, remove PID
+    # --- Idle memory reclamation: free decoder resources + trigger GC ---
+    if daemon.playerState == 0:
+      daemon.idleFrames.inc
+      if daemon.idleFrames >= 1800:  # ~30 seconds at 60fps
+        daemon.idleFrames = 0
+        # Trim search/queue buffers when idle
+        if daemon.ytSearchBuf.len > 0: daemon.ytSearchBuf.setLen(0)
+        if daemon.ytStreamBuf.len > 0: daemon.ytStreamBuf.setLen(0)
+        if daemon.ytStreamResolveBuf.len > 0: daemon.ytStreamResolveBuf.setLen(0)
+        if daemon.pendingLoadYtBuf.len > 0: daemon.pendingLoadYtBuf.setLen(0)
+        if daemon.ytPlaylistBuf.len > 0: daemon.ytPlaylistBuf.setLen(0)
+        # Thin out the queue to at most 200 entries when idle
+        if daemon.playbackQueue.len > 200:
+          daemon.playbackQueue.setLen(200)
+        if daemon.shuffleOrder.len > 200:
+          daemon.shuffleOrder.setLen(200)
+        GC_fullCollect()
+    else:
+      daemon.idleFrames = 0
+
+  # Cleanup: join pulse thread, close sockets, remove PID
   pulseThread.joinThread()
-  notifyChan.send(("", ""))  # poison pill
-  notifyThread.joinThread()
-  notifyChan.close()
   for c in daemon.clients:
     try: c.sock.close() except: discard
   daemon.server.close()

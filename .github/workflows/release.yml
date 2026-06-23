@@ -45,7 +45,7 @@ jobs:
           nim-version: 2.2.2
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install system dependencies (Linux)
+      - name: Install system dependencies (Linux native)
         if: runner.os == 'Linux' && matrix.os-label != 'android'
         run: |
           sudo apt-get update -qq -o Acquire::Retries=3 -o Acquire::http::Timeout=30
@@ -75,54 +75,6 @@ jobs:
           make install
           echo "PKG_CONFIG_PATH=/tmp/ffmpeg-prefix/lib/pkgconfig" >> $GITHUB_ENV
 
-      - name: Download Android NDK
-        if: matrix.os-label == 'android'
-        run: |
-          HOST_ARCH=$(uname -m)
-          case "$HOST_ARCH" in
-            x86_64) NDK_ARCH=linux ;;
-            aarch64|arm64) NDK_ARCH=linux-aarch64 ;;
-            *) echo "unsupported host arch: $HOST_ARCH"; exit 1 ;;
-          esac
-          curl -sL "https://dl.google.com/android/repository/android-ndk-r27c-${NDK_ARCH}.zip" -o /tmp/ndk.zip
-          unzip -q /tmp/ndk.zip -d /tmp
-          echo "ANDROID_NDK=/tmp/android-ndk-r27c" >> $GITHUB_ENV
-
-      - name: Build static FFmpeg (Android)
-        if: matrix.os-label == 'android'
-        run: |
-          export NDK=/tmp/android-ndk-r27c
-          HOST_ARCH=$(uname -m)
-          case "$HOST_ARCH" in
-            x86_64) NDK_HOST=linux-x86_64 ;;
-            aarch64|arm64) NDK_HOST=linux-aarch64 ;;
-            *) echo "unsupported host arch: $HOST_ARCH"; exit 1 ;;
-          esac
-          NDK_TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/$NDK_HOST"
-          export PATH="$NDK_TOOLCHAIN/bin:$PATH"
-          curl -sL https://ffmpeg.org/releases/ffmpeg-7.1.tar.gz | tar xz
-          cd ffmpeg-7.1
-          ./configure --enable-static --disable-shared --enable-pic \
-            --enable-cross-compile \
-            --prefix=/tmp/ffmpeg-prefix-android \
-            --target-os=android --arch=aarch64 \
-            --cc=aarch64-linux-android21-clang \
-            --cxx=aarch64-linux-android21-clang++ \
-            --ar=llvm-ar \
-            --ranlib=llvm-ranlib \
-            --strip=llvm-strip \
-            --ld=aarch64-linux-android21-clang \
-            --disable-programs --disable-doc \
-            --disable-encoders --disable-muxers --disable-devices --disable-filters \
-            --disable-bsfs --disable-postproc --disable-network \
-            --enable-decoder='mp3*,aac*,flac,vorbis,opus,pcm*,wmav*,wmapro,ape,wavpack,tta,alac,dca,dts*,ac3*,eac3,truehd,dsd*,cook,speex,nellymoser,adpcm*,atrac3*,mlp,sipr,tak,twinvq,binkaudio*,mp1,mp2,qdm2,qdmc,mace*,g723*,g729,gsm*' \
-            --enable-demuxer='*' --enable-parsers --enable-protocol=file \
-            --enable-swresample || { echo "=== config.log ==="; cat ffbuild/config.log; exit 1; }
-          make -j$(nproc)
-          make install
-          echo "PKG_CONFIG_PATH=/tmp/ffmpeg-prefix-android/lib/pkgconfig" >> $GITHUB_ENV
-          echo "CC=$NDK_TOOLCHAIN/bin/clang --target=aarch64-linux-android21" >> $GITHUB_ENV
-
       - name: Build static binaries (Linux)
         if: runner.os == 'Linux' && matrix.os-label != 'android'
         run: |
@@ -130,29 +82,25 @@ jobs:
           nim c -d:release -d:staticFfmpeg --nimcache:/tmp/nimcache src/gtmd.nim
           nim c -d:release -d:staticFfmpeg --nimcache:/tmp/nimcache src/gtm.nim
 
-      - name: Build static binaries (Android)
+      - name: Build static binaries (Android via Docker)
         if: matrix.os-label == 'android'
         run: |
-          mkdir -p bin
-          HOST_ARCH=$(uname -m)
-          case "$HOST_ARCH" in
-            x86_64) NDK_HOST=linux-x86_64 ;;
-            aarch64|arm64) NDK_HOST=linux-aarch64 ;;
-            *) echo "unsupported host arch: $HOST_ARCH"; exit 1 ;;
-          esac
-          NDK_TOOLCHAIN="/tmp/android-ndk-r27c/toolchains/llvm/prebuilt/$NDK_HOST"
-          export PATH="$NDK_TOOLCHAIN/bin:$PATH"
-          nim c -d:release -d:staticFfmpeg -d:android \
-            --gcc.exe:aarch64-linux-android21-clang \
-            --gcc.linkerexe:aarch64-linux-android21-clang \
-            --nimcache:/tmp/nimcache src/gtmd.nim
-          nim c -d:release -d:staticFfmpeg -d:android \
-            --gcc.exe:aarch64-linux-android21-clang \
-            --gcc.linkerexe:aarch64-linux-android21-clang \
-            --nimcache:/tmp/nimcache src/gtm.nim
+          docker pull ghcr.io/skchr/gtm-android-builder:latest
+          docker run --rm -v $PWD:/src -v /tmp/nimcache:/tmp/nimcache \
+            ghcr.io/skchr/gtm-android-builder:latest \
+            sh -c "mkdir -p /src/bin && \
+              cd /src && \
+              nim c -d:release -d:staticFfmpeg -d:android \
+                --gcc.exe:aarch64-linux-android21-clang \
+                --gcc.linkerexe:aarch64-linux-android21-clang \
+                --nimcache:/tmp/nimcache src/gtmd.nim && \
+              nim c -d:release -d:staticFfmpeg -d:android \
+                --gcc.exe:aarch64-linux-android21-clang \
+                --gcc.linkerexe:aarch64-linux-android21-clang \
+                --nimcache:/tmp/nimcache src/gtm.nim"
 
       - name: Verify static binary (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.os-label != 'android'
         run: |
           set -eu
           for bin in bin/gtm bin/gtmd; do

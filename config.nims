@@ -31,3 +31,10 @@ when defined(useSqlite):
 # MPRIS support via nim-dbus (vendored, uses dynlib at runtime)
 switch("define", "useMpris")
 switch("path", projectDir / "vendor/nim-dbus")
+
+# Suppress vendor-library warnings (nim-dbus uses deprecated types)
+switch("warning", "Deprecated:off")
+switch("warning", "HoleEnumConv:off")
+switch("warning", "CStringConv:off")
+switch("warning", "XDeclaredButNotUsed:off")
+switch("hint", "DuplicateModuleImport:off")
