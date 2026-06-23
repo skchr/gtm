@@ -75,10 +75,10 @@ proc buildBinary(src, label: string, version: string, musl: bool = false, androi
   if musl:
     flags &= " --gcc.exe:musl-gcc --gcc.linkerexe:musl-gcc -d:staticFfmpeg -d:musl"
   if android:
-    flags &= " -d:android --gcc.exe:musl-gcc --gcc.linkerexe:musl-gcc -d:staticFfmpeg"
+    flags &= " -d:android --gcc.exe:cc --gcc.linkerexe:cc"
   if staticLinux:
     flags &= " -d:staticFfmpeg"
-  sh("nim c " & flags & " " & src & " 2>&1")
+  sh("nim c " & flags & " " & src)
 
   echo ""
 

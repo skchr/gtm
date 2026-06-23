@@ -22,6 +22,10 @@
 #define HAS_ALSA 1
 #endif
 
+#ifdef __ANDROID__
+#include "../android/audio_impl.h"
+#endif
+
 /* FFmpeg 5.0+ uses the new AVChannelLayout API (ch_layout, AVChannelLayout
    type, AV_CHANNEL_LAYOUT_STEREO, av_opt_set_chlayout).
    FFmpeg 4.x uses the old uint64_t channel_layout + av_opt_set_int.
@@ -53,6 +57,9 @@ typedef struct {
 
 #if !defined(__APPLE__) && !defined(__ANDROID__)
   snd_pcm_t*        alsa_handle;
+#endif
+#ifdef __ANDROID__
+  AndroidAudioCtx*  android_ctx;
 #endif
   int               alsa_open;
 
@@ -120,6 +127,40 @@ static int probe_alsa_default(void) {
   snd_pcm_close(handle);
   return 1;
 }
+#elif defined(__ANDROID__)
+/* AAudio/SLES pull callback — called from high-priority audio thread */
+static int aaudio_pull_cb(float *buffer, int frames, void *userdata) {
+    FfmpegAudioCtx *ctx = (FfmpegAudioCtx *)userdata;
+    int ch = ctx->channels;
+    int total = frames * ch;
+    int written = 0;
+    while (written < total) {
+        int rp = ctx->pcm_rp;
+        if (rp == ctx->pcm_wp) {
+            memset(buffer + written, 0, (total - written) * sizeof(float));
+            break;
+        }
+        buffer[written] = ctx->pcm_ring[rp];
+        ctx->pcm_rp = (rp + 1) % PCM_RING_SIZE;
+        written++;
+    }
+    return 0;
+}
+
+static int aaudio_open_device(FfmpegAudioCtx *ctx) {
+    if (ctx->android_ctx) return 1;
+    if (ctx->sample_rate <= 0 || ctx->channels <= 0) return 0;
+    ctx->android_ctx = android_audio_init(ctx->sample_rate, ctx->channels,
+                                          aaudio_pull_cb, ctx);
+    return ctx->android_ctx ? 1 : 0;
+}
+
+static void aaudio_close_device(FfmpegAudioCtx *ctx) {
+    if (ctx->android_ctx) {
+        android_audio_destroy(ctx->android_ctx);
+        ctx->android_ctx = NULL;
+    }
+}
 #else
 static int alsa_open_device(FfmpegAudioCtx* ctx) { (void)ctx; return 0; }
 static void alsa_close_device(FfmpegAudioCtx* ctx) { (void)ctx; }
@@ -151,6 +192,9 @@ void ffmpeg_audio_uninit(FfmpegAudioCtx* ctx) {
   if (ctx->thread_started)
     pthread_join(ctx->decode_thread, NULL);
   alsa_close_device(ctx);
+#ifdef __ANDROID__
+  aaudio_close_device(ctx);
+#endif
   if (ctx->swr_ctx) swr_free(&ctx->swr_ctx);
   if (ctx->codec_ctx) avcodec_free_context(&ctx->codec_ctx);
   if (ctx->fmt_ctx) avformat_close_input(&ctx->fmt_ctx);
@@ -429,6 +473,9 @@ void ffmpeg_audio_start(FfmpegAudioCtx* ctx) {
   ctx->fade_in_remaining = 22050;
   ctx->fade_in_total = 22050;
   ctx->fade_out_remaining = 0;
+#ifdef __ANDROID__
+  if (ctx->android_ctx) android_audio_start(ctx->android_ctx);
+#endif
   if (!ctx->thread_started) {
     ctx->thread_stop = 0;
     pthread_create(&ctx->decode_thread, NULL, decode_thread, ctx);
@@ -447,6 +494,9 @@ void ffmpeg_audio_pause(FfmpegAudioCtx* ctx) {
 void ffmpeg_audio_stop(FfmpegAudioCtx* ctx) {
   if (!ctx) return;
   ctx->playing = 0;
+#ifdef __ANDROID__
+  if (ctx->android_ctx) android_audio_stop(ctx->android_ctx);
+#endif
   ctx->paused = 1;
 #ifdef HAS_ALSA
   if (ctx->alsa_open) {
@@ -476,6 +526,9 @@ void ffmpeg_audio_seek(FfmpegAudioCtx* ctx, double seconds) {
 void ffmpeg_audio_set_volume(FfmpegAudioCtx* ctx, float volume) {
   if (!ctx) return;
   ctx->volume = volume;
+#ifdef __ANDROID__
+  if (ctx->android_ctx) android_audio_set_volume(ctx->android_ctx, volume);
+#endif
 }
 
 double ffmpeg_audio_get_time(FfmpegAudioCtx* ctx) {
@@ -663,6 +716,9 @@ typedef struct {
 #ifdef HAS_ALSA
   snd_pcm_t*        alsa_handle;
 #endif
+#ifdef __ANDROID__
+  AndroidAudioCtx*  android_ctx;
+#endif
   int               alsa_open;
 
   volatile int      crossfade_active;
@@ -721,6 +777,41 @@ static void mixer_alsa_reopen(MixerCtx* mx) {
   mixer_alsa_close(mx);
   mixer_alsa_open(mx);
 }
+#elif defined(__ANDROID__)
+static int mixer_aaudio_pull_cb(float *buffer, int frames, void *userdata) {
+    MixerCtx *mx = (MixerCtx *)userdata;
+    int ch = mx->master ? mx->master->channels : 2;
+    int total = frames * ch;
+    int written = 0;
+    while (written < total) {
+        int rp = mx->pcm_rp;
+        if (rp == mx->pcm_wp) {
+            memset(buffer + written, 0, (total - written) * sizeof(float));
+            break;
+        }
+        buffer[written] = mx->pcm_ring[rp];
+        mx->pcm_rp = (rp + 1) % PCM_RING_SIZE;
+        written++;
+    }
+    return 0;
+}
+
+static int mixer_aaudio_open(MixerCtx *mx) {
+    if (mx->android_ctx) return 1;
+    if (!mx->master || mx->master->sample_rate <= 0 || mx->master->channels <= 0)
+        return 0;
+    mx->android_ctx = android_audio_init(mx->master->sample_rate,
+                                         mx->master->channels,
+                                         mixer_aaudio_pull_cb, mx);
+    return mx->android_ctx ? 1 : 0;
+}
+
+static void mixer_aaudio_close(MixerCtx *mx) {
+    if (mx->android_ctx) {
+        android_audio_destroy(mx->android_ctx);
+        mx->android_ctx = NULL;
+    }
+}
 #else
 static int mixer_alsa_open(MixerCtx* mx) { (void)mx; return 0; }
 static void mixer_alsa_close(MixerCtx* mx) { (void)mx; }
@@ -760,8 +851,12 @@ static void* mixer_thread(void* arg) {
   float* mixbuf = NULL; int mixcap = 0;
   float* prime_buf = NULL; int prime_cap = 0; int prime_filled = 0;
 
-  if (!mixer_alsa_open(mx))
-    fprintf(stderr, "[ffmpeg] mixer_thread: ALSA not available, no audio output\n");
+  if (!mixer_alsa_open(mx)) {
+#ifdef __ANDROID__
+    if (!mixer_aaudio_open(mx))
+#endif
+    fprintf(stderr, "[ffmpeg] mixer_thread: ALSA/Android audio not available, no audio output\n");
+  }
 
   while (!mx->thread_stop) {
     if (!mx->playing || mx->paused) { usleep(10000); continue; }
@@ -1089,6 +1184,9 @@ void ffmpeg_mixer_uninit(MixerCtx* mx) {
   mx->playing = 0;
   if (mx->thread_started) pthread_join(mx->decode_thread, NULL);
   mixer_alsa_close(mx);
+#ifdef __ANDROID__
+  mixer_aaudio_close(mx);
+#endif
   if (mx->master) ffmpeg_audio_uninit(mx->master);
   if (mx->slave) ffmpeg_audio_uninit(mx->slave);
   free(mx);
@@ -1131,6 +1229,9 @@ void ffmpeg_mixer_start(MixerCtx* mx) {
   // Fade-in on resume (500ms at 44100Hz)
   mx->fade_in_remaining = 22050;
   mx->fade_in_total = 22050;
+#ifdef __ANDROID__
+  if (mx->android_ctx) android_audio_start(mx->android_ctx);
+#endif
   if (!mx->thread_started) {
     mx->thread_stop = 0;
     pthread_create(&mx->decode_thread, NULL, mixer_thread, mx);
@@ -1153,6 +1254,9 @@ void ffmpeg_mixer_stop(MixerCtx* mx) {
   mx->paused = 1;
 #ifdef HAS_ALSA
   if (mx->alsa_open) { snd_pcm_drop(mx->alsa_handle); snd_pcm_prepare(mx->alsa_handle); }
+#endif
+#ifdef __ANDROID__
+  if (mx->android_ctx) android_audio_stop(mx->android_ctx);
 #endif
   mx->current_time = 0.0;
   mx->master_ended = 0;
@@ -1215,6 +1319,9 @@ int ffmpeg_mixer_master_ended(MixerCtx* mx) {
 void ffmpeg_mixer_set_volume(MixerCtx* mx, float volume) {
   if (!mx) return;
   mx->volume = volume;
+#ifdef __ANDROID__
+  if (mx->android_ctx) android_audio_set_volume(mx->android_ctx, volume);
+#endif
 }
 
 int ffmpeg_mixer_read_pcm(MixerCtx* mx, float* output, int count) {

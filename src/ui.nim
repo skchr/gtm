@@ -233,7 +233,7 @@ method render*(node: TabBar, ctx: var nw.Context[State]) =
 var gCursorX, gCursorY: int = -1
 
 proc showInputCursor*(state: var AppState, w, h: int) =
-  let shouldShow = state.overlay.kind in {okYtSearch, okCommandPalette, okThemePicker, okEqPresetPicker, okQueuePicker, okPlaylistSearch, okQueueOverlay, okFuzzyFinder, okSpotifyUrlInput} or
+  let shouldShow = state.overlay.kind in {okYtSearch, okCommandPalette, okThemePicker, okEqPresetPicker, okQueuePicker, okPlaylistSearch, okQueueOverlay, okFuzzyFinder, okSpotifyUrlInput, okSpotifySearch} or
     (state.overlay.kind == okNone and (state.playlistInputActive or state.mode == imFilter or state.mode == imLeaderMode))
   if shouldShow == state.cursorVisible: return
   state.cursorVisible = shouldShow
@@ -241,7 +241,7 @@ proc showInputCursor*(state: var AppState, w, h: int) =
     var cx = 1
     var cy = 1
     case state.overlay.kind
-    of okYtSearch, okCommandPalette, okThemePicker, okQueuePicker, okPlaylistSearch, okQueueOverlay, okSpotifyUrlInput:
+    of okYtSearch, okCommandPalette, okThemePicker, okQueuePicker, okPlaylistSearch, okQueueOverlay, okSpotifyUrlInput, okSpotifySearch:
       let boxW = min(60, w - 4)
       let boxH = min(h - 4, 20)
       let boxX = (w - boxW) div 2
@@ -466,12 +466,6 @@ method render*(node: NowPlayingView, ctx: var nw.Context[State]) =
         writeStr(ctx.tb, artPad + 2, line, "No tracks queued", theme.subtext0)
         line.inc
 
-type
-  SidebarEntry = object
-    scope: FilterScope
-    label: string
-    count: int
-
 type LibrarySidebar = ref object of nw.Node
 method render*(node: LibrarySidebar, ctx: var nw.Context[State]) =
   let w = iw.width(ctx.tb)
@@ -482,23 +476,38 @@ method render*(node: LibrarySidebar, ctx: var nw.Context[State]) =
   fillBg(ctx.tb, 0, 0, w - 1, h - 1, theme.mantle)
   let isFocused = state.libraryFocusPanel == lpSidebar
   let ic = currentIcons()
-  let entries = @[
-    SidebarEntry(scope: fsAll, label: ic.track & " All Tracks", count: state.libraryTracks.len),
-    SidebarEntry(scope: fsArtists, label: ic.artist & " Artists", count: state.libraryArtists.len),
-    SidebarEntry(scope: fsAlbums, label: ic.album & " Albums", count: state.libraryAlbums.len),
-    SidebarEntry(scope: fsPlaylists, label: ic.playlist & " Playlists", count: state.libraryPlaylists.len),
-    SidebarEntry(scope: fsRecent, label: ic.time & " Recent", count: state.libraryTracks.len),
-    SidebarEntry(scope: fsFavourites, label: ic.heart & " Favourites", count: 0),
-    SidebarEntry(scope: fsLastPlayed, label: ic.musicNote & " Last Played", count: state.libraryTracks.len),
-    SidebarEntry(scope: fsMostPlayed, label: ic.arrowUp & " Most Played", count: state.libraryTracks.len),
-    SidebarEntry(scope: fsLeastPlayed, label: ic.arrowDown & " Least Played", count: state.libraryTracks.len),
-    SidebarEntry(scope: fsDownloads, label: ic.disk & " Downloads", count: state.downloadCount),
-    SidebarEntry(scope: fsSpotify, label: ic.headphone & " Spotify", count: state.spDownloadCount),
-  ]
-  template treePrefix(idx: int): string =
-    if idx < 4: ""
-    elif idx == entries.len - 1: "  \u2514\u2500 "
-    else: "  \u251C\u2500 "
+  let spLabel = ic.headphone & " Spotify"
+  let spExpand = if state.sidebarSpExpanded: "\u25BC " else: "\u25B6 "
+  let entries = if state.sidebarSpExpanded:
+    @[
+      (scope: fsAll,        label: ic.track & " All Tracks",     count: state.libraryTracks.len),
+      (scope: fsArtists,    label: ic.artist & " Artists",       count: state.libraryArtists.len),
+      (scope: fsAlbums,     label: ic.album & " Albums",         count: state.libraryAlbums.len),
+      (scope: fsPlaylists,  label: ic.playlist & " Playlists",   count: state.libraryPlaylists.len),
+      (scope: fsRecent,     label: ic.time & " Recent",          count: state.libraryTracks.len),
+      (scope: fsFavourites, label: ic.heart & " Favourites",     count: 0),
+      (scope: fsLastPlayed, label: ic.musicNote & " Last Played",count: state.libraryTracks.len),
+      (scope: fsMostPlayed, label: ic.arrowUp & " Most Played",  count: state.libraryTracks.len),
+      (scope: fsLeastPlayed,label: ic.arrowDown & " Least Played",count: state.libraryTracks.len),
+      (scope: fsDownloads,  label: ic.disk & " Downloads",       count: state.downloadCount),
+      (scope: fsSpotify,    label: spExpand & spLabel,           count: state.spDownloadCount),
+      (scope: fsSpLiked,    label: "  " & ic.heart & " Liked Songs", count: 0),
+      (scope: fsSpPlaylists,label: "  " & ic.playlist & " Playlists", count: state.spUserPlaylists.len),
+    ]
+  else:
+    @[
+      (scope: fsAll,        label: ic.track & " All Tracks",     count: state.libraryTracks.len),
+      (scope: fsArtists,    label: ic.artist & " Artists",       count: state.libraryArtists.len),
+      (scope: fsAlbums,     label: ic.album & " Albums",         count: state.libraryAlbums.len),
+      (scope: fsPlaylists,  label: ic.playlist & " Playlists",   count: state.libraryPlaylists.len),
+      (scope: fsRecent,     label: ic.time & " Recent",          count: state.libraryTracks.len),
+      (scope: fsFavourites, label: ic.heart & " Favourites",     count: 0),
+      (scope: fsLastPlayed, label: ic.musicNote & " Last Played",count: state.libraryTracks.len),
+      (scope: fsMostPlayed, label: ic.arrowUp & " Most Played",  count: state.libraryTracks.len),
+      (scope: fsLeastPlayed,label: ic.arrowDown & " Least Played",count: state.libraryTracks.len),
+      (scope: fsDownloads,  label: ic.disk & " Downloads",       count: state.downloadCount),
+      (scope: fsSpotify,    label: spExpand & spLabel,           count: state.spDownloadCount),
+    ]
   var favCount = 0
   for t in state.libraryTracks:
     if t.id in state.favouriteIds or t.isFavourite:
@@ -509,22 +518,19 @@ method render*(node: LibrarySidebar, ctx: var nw.Context[State]) =
   line.inc
   for i, entry in entries:
     if line >= h: break
-    let actualCount = if entry.scope == fsFavourites: favCount else: entry.count
+    let actualCount = if entry.scope == fsFavourites: favCount elif entry.scope == fsSpLiked: 0 else: entry.count
     let isActive = state.filterScope == entry.scope
     let isSelected = state.librarySidebarSelect == i and isFocused
     let rowBg = if isSelected: theme.surface2 elif isActive: theme.surface0 else: theme.mantle
     fillBg(ctx.tb, 0, line, w - 1, line, rowBg)
     let countStr = $actualCount
-    let prefix = treePrefix(i)
-    let maxLabelW = max(1, w - countStr.runeLen - prefix.runeLen - 3)
+    let maxLabelW = max(1, w - countStr.runeLen - 2)
     let label = entry.label
-    let display = prefix & (if label.runeLen > maxLabelW: label[0..<max(1, maxLabelW - 2)] & "\u2026" else: label)
+    let display = if label.runeLen > maxLabelW: label[0..<max(1, maxLabelW - 2)] & "\u2026" else: label
     let fg = if isActive: theme.blue elif isSelected: theme.text else: theme.subtext0
     writeStr(ctx.tb, 1, line, display, fg)
     writeStr(ctx.tb, w - countStr.runeLen - 1, line, countStr, theme.overlay0)
     line.inc
-    # Downloads is a single item — no sub-tabs
-  fillBg(ctx.tb, 0, line, w - 1, h - 1, theme.mantle)
 
 type LibraryContentView = ref object of nw.Node
 method render*(node: LibraryContentView, ctx: var nw.Context[State]) =
@@ -967,7 +973,7 @@ method render*(node: StatusBarComp, ctx: var nw.Context[State]) =
 
   # 2. Key pressed / command display (fmKeyPressed module, always after elapsed time)
   let showKeyPressed = fmKeyPressed in activeModules
-  let isOverlayActive = state.overlay.kind != okNone or state.helpVisible or state.aboutVisible or state.eqVisible or state.mode == imLeaderMode
+  let isOverlayActive = state.overlay.kind != okNone or state.helpVisible or state.aboutVisible or state.mode == imLeaderMode
   if showKeyPressed and isOverlayActive:
     if state.lastKeyTimer > 0 and state.lastKeyDisplay.len > 0:
       let keyText = " [" & state.lastKeyDisplay & "] "
@@ -1157,6 +1163,10 @@ method render*(node: GenericOverlay, ctx: var nw.Context[State]) =
     boxH = min(24, h - 4)
     title = ic.search & " YouTube Search"
     if ov.multiMode: title &= " [MULTISELECT]"
+  of okSpotifySearch:
+    boxW = min(60, w - 8)
+    boxH = min(24, h - 4)
+    title = ic.search & " Spotify Search"
   of okYtBatch:
     boxH = min(14, h - 4)
     boxW = min(44, w - 8)
@@ -1269,6 +1279,33 @@ method render*(node: GenericOverlay, ctx: var nw.Context[State]) =
                        else: "Enter:Play  Ctrl+D:Queue  Ctrl+S:Multi" & pageInfo & "  Esc:Cancel"
       let ft = truncateAt(footerText, boxW - 2)
       if ft.len > 0: writeStr(ctx.tb, boxX + 1, boxY + boxH - 1, ft, theme.subtext0)
+  #--- Spotify Search results ---
+  if ov.kind == okSpotifySearch:
+    if ctx.state.spSearchResults.len == 0 and ov.query.len > 0 and ctx.state.spSearchLoading:
+      ctx.tb.setBackgroundColor(theme.surface0)
+      writeStr(ctx.tb, boxX + 2, curY, "Searching...", theme.subtext0)
+    elif ctx.state.spSearchResults.len == 0 and ov.query.len > 0:
+      ctx.tb.setBackgroundColor(theme.surface0)
+      writeStr(ctx.tb, boxX + 2, curY, "No results found", theme.subtext0)
+    let availableLines = max(0, (boxY + boxH - 2) - curY)
+    let displayCount = min(ctx.state.spSearchResults.len, availableLines)
+    for i in 0..<displayCount:
+      let lineY = curY + i
+      if lineY >= boxY + boxH - 1: break
+      let r = ctx.state.spSearchResults[i]
+      let isSelected = (i == ov.cursor)
+      let ovRowBg = if isSelected: theme.surface2 else: theme.surface0
+      if isSelected:
+        fillBg(ctx.tb, boxX + 1, lineY, boxX + boxW - 2, lineY, ovRowBg)
+      ctx.tb.setBackgroundColor(ovRowBg)
+      let ttl = if r.name.runeLen > boxW - 22: r.name[0..<min(r.name.len, boxW - 25)] & "..." else: r.name
+      let meta = r.artist & "  " & r.album
+      writeStr(ctx.tb, boxX + 2, lineY, "  " & ttl, if isSelected: theme.blue else: theme.text)
+      writeStr(ctx.tb, boxX + boxW - 2 - meta.runeLen, lineY, meta, theme.subtext0)
+    ctx.tb.setBackgroundColor(theme.surface0)
+    let footerText = "Enter:Search YouTube  Esc:Cancel"
+    let ft = truncateAt(footerText, boxW - 2)
+    if ft.len > 0: writeStr(ctx.tb, boxX + 1, boxY + boxH - 1, ft, theme.subtext0)
   #--- YT Batch picker ---
   elif ov.kind == okYtBatch:
     let options = [ic.queue & " Queue", ic.playlist & " Playlist", ic.folder & " New Playlist"]
@@ -1426,7 +1463,9 @@ method render*(node: GenericOverlay, ctx: var nw.Context[State]) =
       if isSelected:
         fillBg(ctx.tb, boxX + 1, lineY, boxX + boxW - 2, lineY, ovRowBg)
       ctx.tb.setBackgroundColor(ovRowBg)
-      writeStr(ctx.tb, boxX + 2, lineY, cmd.icon & " " & cmd.name, if isSelected: (theme.blue) else: theme.text)
+      let icCmd = commandIcon(cmd.id, ic)
+      let iconStr = if icCmd.len > 0: icCmd else: cmd.icon
+      writeStr(ctx.tb, boxX + 2, lineY, iconStr & " " & cmd.name, if isSelected: (theme.blue) else: theme.text)
       let keys = cmd.defaultKeys.join(", ")
       writeStr(ctx.tb, boxX + boxW - 2 - keys.runeLen, lineY, keys, theme.subtext0)
     ctx.tb.setBackgroundColor(theme.surface0)
@@ -1802,100 +1841,6 @@ method render*(node: PlaylistInputOverlay, ctx: var nw.Context[State]) =
   if footerText.len > 0:
     writeStr(ctx.tb, boxX + 1, boxY + 4, footerText, theme.subtext0)
 
-proc eqBarColor(gain: float, theme: Theme): colors.Color =
-  if gain >= 6: theme.red
-  elif gain >= 3: theme.peach
-  elif gain >= -3: theme.blue
-  elif gain >= -6: theme.sky
-  else: theme.sapphire
-
-type EqualizerOverlay* = ref object of nw.Node
-method render*(node: EqualizerOverlay, ctx: var nw.Context[State]) =
-  let w = iw.width(ctx.tb)
-  let h = iw.height(ctx.tb)
-  if w < 20 or h < 12: return
-  let st = ctx.state
-  let theme = st.theme
-  let boxW = min(80, w - 4)
-  let boxH = min(26, h - 4)
-  let boxX = (w - boxW) div 2
-  let boxY = (h - boxH) div 2
-  fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.surface0)
-  drawRoundedRect(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.mauve)
-  ctx.tb.setBackgroundColor(theme.surface0)
-  writeStr(ctx.tb, boxX + 2, boxY + 1, " Equalizer ", theme.mauve)
-
-  const bandLabels = ["31Hz", "62Hz", "125Hz", "250Hz", "500Hz", "1kHz", "2kHz", "4kHz", "8kHz", "16kHz"]
-  let sliderW = 16
-  let sliderGap = 1
-  let totalBandW = sliderW + sliderGap
-  let maxVisibleBands = max(1, (boxW - 4) div totalBandW)
-  let totalBands = 10
-
-  # clamp scroll offset
-  var scrollOff = st.eqScrollOffset.clamp(0, max(0, totalBands - maxVisibleBands))
-  ctx.state.eqScrollOffset = scrollOff
-
-  let sliderStartY = boxY + 3
-  let sliderH = max(3, boxH - 8)
-
-  # Draw scroll indicators
-  let eqIc = currentIcons()
-  ctx.tb.setBackgroundColor(theme.surface0)
-  if scrollOff > 0:
-    writeStr(ctx.tb, boxX + 1, boxY + boxH div 2, eqIc.arrowLeft, theme.peach)
-  if scrollOff + maxVisibleBands < totalBands:
-    writeStr(ctx.tb, boxX + boxW - 2, boxY + boxH div 2, eqIc.arrowRight, theme.peach)
-
-  for visIdx in 0..<min(maxVisibleBands, totalBands - scrollOff):
-    let i = scrollOff + visIdx
-    let sx = boxX + 2 + visIdx * totalBandW
-    let gain = st.eqBands[i]
-    let fillCount = ((gain + 12.0) / 24.0 * sliderH.float).int.clamp(0, sliderH)
-    let botFill = if fillCount > sliderH div 2: fillCount - sliderH div 2 else: 0
-    let topFill = if fillCount < sliderH div 2: sliderH div 2 - fillCount else: 0
-
-    for row in 0..<sliderH:
-      ctx.tb.setBackgroundColor(theme.surface0)
-      let rowY = sliderStartY + row
-      if row < topFill:
-        writeStr(ctx.tb, sx + sliderW div 2, rowY, " ", theme.surface2)
-      elif row > sliderH - 1 - botFill:
-        writeStr(ctx.tb, sx + sliderW div 2, rowY, " ", theme.surface2)
-      elif row == sliderH div 2:
-        writeStr(ctx.tb, sx + sliderW div 2, rowY, "\u2502", theme.subtext0)
-      else:
-        let barCol = eqBarColor(gain, theme)
-        writeStr(ctx.tb, sx + sliderW div 2, rowY, "\u2588", barCol)
-
-    # Center dot marker
-    if i == st.eqBandSelect:
-      let dotY = sliderStartY + (sliderH div 2) - ((gain / 24.0 * sliderH.float).int)
-      ctx.tb.setBackgroundColor(theme.surface0)
-      writeStr(ctx.tb, sx + sliderW div 2 - 1, dotY, ">", theme.peach)
-      writeStr(ctx.tb, sx + sliderW div 2 + 1, dotY, "<", theme.peach)
-
-    # Frequency label above band
-    ctx.tb.setBackgroundColor(theme.surface0)
-    writeStr(ctx.tb, sx, sliderStartY - 1, bandLabels[i], theme.subtext0)
-
-  # Gain value indicator
-  let selBand = st.eqBandSelect.clamp(0, 9)
-  let gainStr = (if st.eqBands[selBand] >= 0: "+" else: "") & formatFloat(st.eqBands[selBand], precision = 1) & "dB"
-  ctx.tb.setBackgroundColor(theme.surface0)
-  writeStr(ctx.tb, boxX + 2, boxY + boxH - 4, "Band: " & bandLabels[selBand] & "  Gain: " & gainStr, theme.text)
-
-  # Preset name
-  if st.eqPreset.len > 0:
-    let presetText = "Preset: " & st.eqPreset
-    writeStr(ctx.tb, boxX + boxW - presetText.runeLen - 3, boxY + boxH - 4, presetText, theme.green)
-
-  # Footer instructions
-  ctx.tb.setBackgroundColor(theme.surface0)
-  let eqFooter = truncateAt(" \u2190\u2192 gain  \u2191/\u2193 band  h/l scroll  P preset  Esc close ", boxW - 4)
-  if eqFooter.len > 0:
-    writeStr(ctx.tb, boxX + 2, boxY + boxH - 2, eqFooter, theme.subtext0)
-
 type FooterModulePickerOverlay* = ref object of nw.Node
 method render*(node: FooterModulePickerOverlay, ctx: var nw.Context[State]) =
   let w = iw.width(ctx.tb)
@@ -1986,8 +1931,6 @@ proc renderApp*(ctx: var nw.Context[State]) =
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(HelpOverlay(), sliceCtx)
   if ctx.state.aboutVisible:
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(AboutOverlay(), sliceCtx)
-  if ctx.state.eqVisible:
-    sliceCtx = nw.slice(ctx, 0, 0, w, h); render(EqualizerOverlay(), sliceCtx)
   if ctx.state.mode == imLeaderMode:
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(LeaderMenuOverlay(), sliceCtx)
   if ctx.state.playlistInputActive:
@@ -2110,17 +2053,13 @@ proc initApp*(state: var AppState) =
   state.pendingSeqTimer = 0
   state.configPath = configDir() & "/config.json"
   state.dataDir = dataDir()
-  state.eqVisible = false
-  state.eqBandSelect = 0
   state.eqPreset = "Flat"
   state.eqPresetList = @[]
   state.eqPresetSelect = 0
-  state.eqScrollOffset = 0
   state.favouriteIds = initHashSet[int64]()
   state.ytSearchActive = false
   state.ytStreamResolving = false
   state.ytDownloadActive = false
   state.currentPlayingTitle = ""
   state.currentPlayingChannel = ""
-  for i in 0..9: state.eqBands[i] = 0.0
   state.cursorVisible = false

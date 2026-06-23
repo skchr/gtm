@@ -13,6 +13,15 @@ type
     musicNote*, disk*, headphone*, speaker*: string
     commandPalette*, filter*, selectMode*: string
     track*, time*, folder*, file*: string
+    # Command palette icons (added for terminal fallback support)
+    leaderMenu*, showAbout*, trash*, eqPresets*: string
+    quitBg*, quitDaemon*, changeTheme*, savePlaylist*: string
+    createPlaylist*, deletePlaylist*, renamePlaylist*: string
+    toggleFav*, importM3u*, rescanLib*, sleepTimer*: string
+    ytSearch*, spUrl*, spSearch*, dashboard*, spFeed*: string
+    ytRecommended*, fuzzyFinder*, enqueue*, stopPlayback*: string
+    seekForward*, seekBackward*, navUp*, navDown*: string
+    enterFilter*, selectAll*, removeSelected*, addToPlaylist*: string
 
 proc nerdFontIcons*(): IconPack =
   IconPack(
@@ -25,7 +34,15 @@ proc nerdFontIcons*(): IconPack =
     checkmark: "\uF00C", cross: "\uF00D", arrowUp: "\uF062", arrowDown: "\uF063", arrowLeft: "\uF060", arrowRight: "\uF061",
     musicNote: "\uF3B5", disk: "\uF0A0", headphone: "\uF025", speaker: "\uF028",
     commandPalette: "\uF120", filter: "\uF0B0", selectMode: "\uF204",
-    track: "\uF001", time: "\uF017", folder: "\uF07B", file: "\uF15B"
+    track: "\uF001", time: "\uF017", folder: "\uF07B", file: "\uF15B",
+    leaderMenu: "\uF0C9", showAbout: "\uF059", trash: "\uF1F8", eqPresets: "\uF025",
+    quitBg: "\uF04C", quitDaemon: "\uF04D", changeTheme: "\uF1FC", savePlaylist: "\uF019",
+    createPlaylist: "\uF067", deletePlaylist: "\uF1F8", renamePlaylist: "\uF044",
+    toggleFav: "\uF004", importM3u: "\uF07C", rescanLib: "\uF021", sleepTimer: "\uF017",
+    ytSearch: "\uF002", spUrl: "\uF0C1", spSearch: "\uF002", dashboard: "\uF0E4", spFeed: "\uF021",
+    ytRecommended: "\uF144", fuzzyFinder: "\uF002", enqueue: "\uF0C9", stopPlayback: "\uF04D",
+    seekForward: "\uF051", seekBackward: "\uF048", navUp: "\uF062", navDown: "\uF063",
+    enterFilter: "\uF0B0", selectAll: "\uF00C", removeSelected: "\uF00D", addToPlaylist: "\uF0CA"
   )
 
 proc emojiIcons*(): IconPack =
@@ -39,7 +56,15 @@ proc emojiIcons*(): IconPack =
     checkmark: "\u2714", cross: "\u274C", arrowUp: "\u2B06", arrowDown: "\u2B07", arrowLeft: "\u2B05", arrowRight: "\u27A1",
     musicNote: "\u266B", disk: "\U0001F4BF", headphone: "\U0001F3A7", speaker: "\U0001F509",
     commandPalette: "\u2328", filter: "\U0001F50D", selectMode: "\U0001F7E8",
-    track: "\U0001F3B5", time: "\u23F1", folder: "\U0001F4C1", file: "\U0001F4C4"
+    track: "\U0001F3B5", time: "\u23F1", folder: "\U0001F4C1", file: "\U0001F4C4",
+    leaderMenu: "\u2630", showAbout: "\u2139", trash: "\U0001F5D1", eqPresets: "\U0001F3B5",
+    quitBg: "\u23F8", quitDaemon: "\u23F9", changeTheme: "\U0001F3A8", savePlaylist: "\U0001F4BE",
+    createPlaylist: "\u2795", deletePlaylist: "\u274C", renamePlaylist: "\U0001F4DD",
+    toggleFav: "\u2B50", importM3u: "\U0001F4C2", rescanLib: "\U0001F504", sleepTimer: "\u23F0",
+    ytSearch: "\U0001F50D", spUrl: "\U0001F517", spSearch: "\U0001F50D", dashboard: "\U0001F4CA", spFeed: "\U0001F504",
+    ytRecommended: "\U0001F3B6", fuzzyFinder: "\U0001F50D", enqueue: "\U0001F3B6", stopPlayback: "\u25A0",
+    seekForward: "\u23E9", seekBackward: "\u23EA", navUp: "\u2B06", navDown: "\u2B07",
+    enterFilter: "\U0001F50D", selectAll: "\u2714", removeSelected: "\u274C", addToPlaylist: "\U0001F4CB"
   )
 
 var
@@ -126,6 +151,59 @@ proc applyOverrides(pack: IconPack): IconPack =
   if gIconOverrides.hasKey("time"): result.time = gIconOverrides["time"]
   if gIconOverrides.hasKey("folder"): result.folder = gIconOverrides["folder"]
   if gIconOverrides.hasKey("file"): result.file = gIconOverrides["file"]
+
+proc commandIcon*(cmdId: string, ic: IconPack): string =
+  case cmdId
+  of "leader_menu": ic.leaderMenu
+  of "toggle_play_pause": ic.play
+  of "stop_playback": ic.stopPlayback
+  of "seek_forward": ic.seekForward
+  of "seek_backward": ic.seekBackward
+  of "volume_up": ic.volumeHigh
+  of "volume_down": ic.volumeLow
+  of "toggle_mute": ic.volumeMuted
+  of "next_track": ic.nextTrack
+  of "prev_track": ic.prevTrack
+  of "nav_up": ic.navUp
+  of "nav_down": ic.navDown
+  of "enter_filter": ic.enterFilter
+  of "play_selected": ic.play
+  of "go_to_first": ic.prevTrack
+  of "go_to_last": ic.nextTrack
+  of "toggle_select_mode": ic.selectMode
+  of "select_all": ic.selectAll
+  of "remove_selected": ic.removeSelected
+  of "add_to_playlist": ic.addToPlaylist
+  of "tab_now_playing": ic.headphone
+  of "tab_library": ic.library
+  of "tab_settings": ic.settings
+  of "show_help": ic.help
+  of "show_about": ic.showAbout
+  of "show_trash": ic.trash
+  of "show_equalizer": ic.eqPresets
+  of "quit_background": ic.quitBg
+  of "quit_daemon": ic.quitDaemon
+  of "command_palette": ic.commandPalette
+  of "change_theme": ic.changeTheme
+  of "save_playlist": ic.savePlaylist
+  of "create_playlist": ic.createPlaylist
+  of "delete_playlist": ic.deletePlaylist
+  of "rename_playlist": ic.renamePlaylist
+  of "toggle_favourite": ic.toggleFav
+  of "import_m3u": ic.importM3u
+  of "rescan_library": ic.rescanLib
+  of "toggle_shuffle": ic.shuffle
+  of "toggle_repeat": ic.repeatOne
+  of "sleep_timer": ic.sleepTimer
+  of "yt_search": ic.ytSearch
+  of "spotify_url": ic.spUrl
+  of "spotify_search": ic.spSearch
+  of "dashboard": ic.dashboard
+  of "sp_fetch_feed": ic.spFeed
+  of "yt_recommended": ic.ytRecommended
+  of "fuzzy_finder": ic.fuzzyFinder
+  of "queue_picker": ic.enqueue
+  else: ""
 
 proc currentIcons*(): IconPack =
   result =

@@ -182,7 +182,7 @@ type
   FilterScope* = enum
     fsAll, fsArtists, fsAlbums, fsPlaylists, fsTracks,
     fsRecent, fsFavourites, fsLastPlayed, fsMostPlayed, fsLeastPlayed,
-    fsDownloads, fsSpotify
+    fsDownloads, fsSpotify, fsSpLiked, fsSpPlaylists
 
   DownloadsTab* = enum
     dtDownloading, dtDownloaded
@@ -234,6 +234,7 @@ type
     okTrashView
     okFooterModulePicker
     okSpotifyUrlInput
+    okSpotifySearch
 
   YtSubTab* = enum ystAll, ystPlaylists
 
@@ -408,6 +409,11 @@ type
     spFeedPlaylists*: seq[tuple[id, name: string]]
     spFeedFetchedAt*: float
     spFeedFetching*: bool
+    spSearchResults*: seq[tuple[id, name, artist, album, url: string, durationMs: int]]
+    spSearchLoading*: bool
+    spUserPlaylists*: seq[tuple[id, name: string]]
+    spLikedSongs*: seq[tuple[id, name, artist, album, url: string, durationMs: int]]
+    sidebarSpExpanded*: bool
     dashboardVisible*: bool
     totalPlayTime*: float
     totalTracksPlayed*: int
@@ -450,14 +456,10 @@ type
     queueCursor*: int
     queuePendingConfirm*: int
     deleteConfirmPending*: int
-    eqVisible*: bool
-    eqBands*: array[10, float]
     eqPreset*: string
     spatialWidth*: float
     eqPresetList*: seq[string]
-    eqBandSelect*: int
     eqPresetSelect*: int
-    eqScrollOffset*: int
     ytPlaybackStartTime*: float
     ytPauseDuration*: float
     ytPauseStartTime*: float

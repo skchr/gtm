@@ -167,11 +167,39 @@ proc fetchNewReleases*(sc: SpotifyClient, limit: int = 10): seq[SpotifyTrack] =
       durationMs: 0
     ))
 
-proc fetchUserPlaylists*(sc: SpotifyClient, limit: int = 10): seq[tuple[id, name: string]] =
+proc fetchUserPlaylists*(sc: SpotifyClient, limit: int = 50): seq[tuple[id, name: string]] =
   let j = apiGet(sc, "/me/playlists?limit=" & $limit)
   if j == nil: return
   for pl in j["items"]:
     result.add((id: pl["id"].getStr(""), name: pl["name"].getStr("")))
+
+proc search*(sc: SpotifyClient, query: string, limit: int = 10): seq[SpotifyTrack] =
+  if not ensureToken(sc): return
+  let j = apiGet(sc, "/search?q=" & encodeUrl(query) & "&type=track&limit=" & $limit)
+  if j == nil or j.hasKey("error"): return
+  for item in j["tracks"]["items"]:
+    result.add(SpotifyTrack(
+      id: item["id"].getStr(""),
+      name: item["name"].getStr(""),
+      artist: (if item["artists"].len > 0: item["artists"][0]["name"].getStr("") else: ""),
+      album: item["album"]["name"].getStr(""),
+      url: item["external_urls"]["spotify"].getStr(""),
+      durationMs: item["duration_ms"].getInt(0)
+    ))
+
+proc fetchLikedSongs*(sc: SpotifyClient, limit: int = 20): seq[SpotifyTrack] =
+  let j = apiGet(sc, "/me/tracks?limit=" & $limit)
+  if j == nil: return
+  for item in j["items"]:
+    let track = item["track"]
+    result.add(SpotifyTrack(
+      id: track["id"].getStr(""),
+      name: track["name"].getStr(""),
+      artist: (if track["artists"].len > 0: track["artists"][0]["name"].getStr("") else: ""),
+      album: track["album"]["name"].getStr(""),
+      url: track["external_urls"]["spotify"].getStr(""),
+      durationMs: track["duration_ms"].getInt(0)
+    ))
 
 proc fetchFeed*(sc: SpotifyClient): SpotifyFeed =
   if not ensureToken(sc): return

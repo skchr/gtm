@@ -816,6 +816,14 @@ proc sortedIndices(state: AppState, field: string): seq[int] =
     result.sort(proc(a, b: int): int = cmp(state.libraryTracks[a].playCount, state.libraryTracks[b].playCount))
   else: discard
 
+proc locatePlayingTrack*(state: var AppState) =
+  if state.currentPlayingPath.len == 0 or state.status notin {psPlaying, psPaused}: return
+  for i, item in state.displayItems:
+    if item.kind == likTrack and item.trackIdx >= 0 and item.trackIdx < state.libraryTracks.len:
+      if state.libraryTracks[item.trackIdx].path == state.currentPlayingPath:
+        state.selectIndex = i
+        break
+
 proc rebuildItems*(state: var AppState) =
   state.displayItems = @[]
   case state.tab
@@ -873,6 +881,14 @@ proc rebuildItems*(state: var AppState) =
             spIndices.add(i)
             break
       state.addTrackItems(spIndices)
+    elif state.filterScope == fsSpLiked:
+      for r in state.spLikedSongs:
+        state.displayItems.add(LibraryItem(kind: likTrack, label: r.name,
+          sublabel: r.artist & " - " & r.album, trackIdx: -1))
+    elif state.filterScope == fsSpPlaylists:
+      for p in state.spUserPlaylists:
+        state.displayItems.add(LibraryItem(kind: likPlaylist, label: p.name,
+          sublabel: "Spotify playlist", id: 0))
     else:
       state.addTrackItems(toSeq(0..<state.libraryTracks.len))
   of tabSettings:
@@ -893,3 +909,5 @@ proc rebuildItems*(state: var AppState) =
   state.selectIndex = min(state.selectIndex, state.displayItems.len - 1)
   if state.selectIndex < 0 and state.displayItems.len > 0:
     state.selectIndex = 0
+  if state.tab == tabLibrary:
+    locatePlayingTrack(state)

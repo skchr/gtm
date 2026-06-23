@@ -86,19 +86,25 @@ method setSpatialWidth*(b: AudioBackend, width: float) {.base, gcsafe.} = discar
 
 when defined(useFFmpeg):
   {.compile: "vendor/ffmpeg/ffmpeg_impl.c".}
-  when defined(staticFfmpeg) or defined(android):
+  when defined(staticFfmpeg):
     when defined(android):
       {.passL: staticExec("pkg-config --static --libs libavformat libavcodec libavutil libswresample").}
-      {.passC: staticExec("pkg-config --cflags libavformat libavcodec libavutil libswresample").}
     else:
       {.passL: staticExec("pkg-config --static --libs libavformat libavcodec libavutil libswresample") & " " & staticExec("pkg-config --libs alsa").}
-      {.passC: staticExec("pkg-config --cflags libavformat libavcodec libavutil libswresample") & " " & staticExec("pkg-config --cflags alsa").}
+    {.passC: staticExec("pkg-config --cflags libavformat libavcodec libavutil libswresample").}
   elif defined(macosx):
     {.passL: staticExec("pkg-config --libs libavformat libavcodec libavutil libswresample").}
     {.passC: staticExec("pkg-config --cflags libavformat libavcodec libavutil libswresample").}
   else:
-    {.passL: staticExec("pkg-config --libs libavformat libavcodec libavutil libswresample alsa").}
-    {.passC: staticExec("pkg-config --cflags libavformat libavcodec libavutil libswresample alsa").}
+    when not defined(android):
+      {.passL: staticExec("pkg-config --libs libavformat libavcodec libavutil libswresample alsa 2>/dev/null").}
+      {.passC: staticExec("pkg-config --cflags libavformat libavcodec libavutil libswresample alsa 2>/dev/null").}
+    else:
+      {.passL: staticExec("pkg-config --libs libavformat libavcodec libavutil libswresample 2>/dev/null").}
+      {.passC: staticExec("pkg-config --cflags libavformat libavcodec libavutil libswresample 2>/dev/null").}
+  when defined(android):
+    {.compile: "vendor/android/audio_impl.c".}
+    {.passL: " -lOpenSLES".}
 
   type
     FfmpegCtx = ptr object

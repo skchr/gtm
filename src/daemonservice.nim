@@ -221,6 +221,12 @@ proc spFeed*(svc: DaemonService): JsonNode =
 proc spDisconnect*(svc: DaemonService): JsonNode =
   svc.session.request(%*{"cmd": "sp_disconnect"})
 
+proc spSearch*(svc: DaemonService, query: string, limit: int = 10): JsonNode =
+  svc.session.request(%*{"cmd": "sp_search", "query": query, "limit": limit})
+
+proc spLikedSongs*(svc: DaemonService, limit: int = 20): JsonNode =
+  svc.session.request(%*{"cmd": "sp_liked_songs", "limit": limit})
+
 # ── Trash ────────────────────────────────────────────────────
 
 proc listTrash*(svc: DaemonService): JsonNode =
