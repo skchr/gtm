@@ -491,6 +491,7 @@ void ffmpeg_audio_pause(FfmpegAudioCtx* ctx) {
   }
 }
 
+void ffmpeg_audio_unload(FfmpegAudioCtx* ctx);
 void ffmpeg_audio_stop(FfmpegAudioCtx* ctx) {
   ffmpeg_audio_unload(ctx);
   if (!ctx) return;

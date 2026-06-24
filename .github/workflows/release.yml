@@ -85,6 +85,7 @@ jobs:
       - name: Build static binaries (Android via Docker)
         if: matrix.os-label == 'android'
         run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
           docker pull ghcr.io/skchr/gtm-android-builder:latest
           docker run --rm -v $PWD:/src -v /tmp/nimcache:/tmp/nimcache \
             ghcr.io/skchr/gtm-android-builder:latest \
