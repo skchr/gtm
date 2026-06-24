@@ -277,7 +277,7 @@ method render*(node: NowPlayingView, ctx: var nw.Context[State]) =
   var state = ctx.state
   let theme = state.theme
   fillBg(ctx.tb, 0, 0, w - 1, h - 1, theme.base)
-  let track = if state.ytStreamTitle.len > 0:
+  var track = if state.ytStreamTitle.len > 0:
     Track(title: state.ytStreamTitle, artist: state.ytStreamChannel, duration: 0.0, path: state.currentPlayingPath)
   elif state.currentPlayingPath.len > 0:
     state.getPlayingTrack()
@@ -288,6 +288,9 @@ method render*(node: NowPlayingView, ctx: var nw.Context[State]) =
     state.libraryTracks[state.selectIndex]
   else:
     Track()
+  if track.path.len == 0 and state.currentPlayingPath.len > 0:
+    track = Track(path: state.currentPlayingPath,
+      title: state.currentPlayingTitle, artist: state.currentPlayingChannel)
   if track.path.len == 0 and state.currentPlayingPath.len == 0:
     writeStr(ctx.tb, 1, 1, "No track selected", theme.subtext0)
     if not state.audioAvailable:
@@ -438,11 +441,12 @@ method render*(node: NowPlayingView, ctx: var nw.Context[State]) =
         let qIdx = scrollOff + visIdx
         if qIdx >= state.playbackQueue.len: break
         let tIdx = state.playbackQueue[qIdx]
-        let isNowPlaying = qIdx == 0
+        let isNowPlaying = qIdx == 0 and state.status == psPlaying
+        let isNowPlayingPaused = qIdx == 0 and state.status == psPaused
         let isCursor = qIdx == state.queueCursor
         let upBg = if isCursor: theme.surface2 else: theme.base
         fillBg(ctx.tb, 0, line, w - 1, line, upBg)
-        let prefix = if isNowPlaying: "\u25B6 " else: "  "
+        let prefix = if isNowPlaying: "\u25B6 " elif isNowPlayingPaused: "\u23F8 " else: "  "
         let dispName =
           if tIdx >= 0 and tIdx < state.libraryTracks.len:
             state.libraryTracks[tIdx].displayName()
@@ -450,7 +454,7 @@ method render*(node: NowPlayingView, ctx: var nw.Context[State]) =
             state.queuePaths[qIdx].splitFile().name.replace(".", " ")
           else:
             "Unknown track"
-        writeStr(ctx.tb, artPad + 2, line, prefix & truncateAt(dispName, w - artPad - 6), if isCursor: theme.yellow elif isNowPlaying: theme.blue else: theme.text)
+        writeStr(ctx.tb, artPad + 2, line, prefix & truncateAt(dispName, w - artPad - 6), if isCursor: theme.yellow elif isNowPlaying: theme.blue elif isNowPlayingPaused: theme.yellow else: theme.text)
         line.inc
       # Scrollbar
       if state.playbackQueue.len > maxLines:

@@ -18,8 +18,8 @@
 ## └──────────────────────────────────────────────────┘
 
 import os, json, strutils, net, osproc, posix, tables
-from nativesockets import setBlocking
-import audio, state
+from times import epochTime
+import audio, state, wire
 {.push warning[GcUnsafe2]:off.}
 
 var debugMode*: bool
@@ -35,6 +35,14 @@ type
     pingMissed*: int
     reconnectCooldown*: int
     nextSeq: int
+    # Local time extrapolation state
+    extrapolatedPos*: float
+    posBaseTime: float
+    posBaseValue: float
+    clockSkew: float
+    extrapolating: bool
+    # Wire protocol negotiation
+    wireNegotiated: bool
 
 proc daemonIsRunning*(): bool =
   let p = pidPath()
@@ -72,7 +80,8 @@ proc connect*(s: DaemonSession): bool =
     let fd = posix.socket(posix.AF_UNIX, posix.SOCK_STREAM, 0)
     s.sock = newSocket(fd, Domain.AF_UNIX, SockType.SOCK_STREAM)
     s.sock.connectUnix(sockPath())
-    setBlocking(s.sock.getFd, false)
+    var flags = posix.fcntl(s.sock.getFd, posix.F_GETFL, 0)
+    discard posix.fcntl(s.sock.getFd, posix.F_SETFL, flags or posix.O_NONBLOCK)
     s.connected = true
     return true
   except:
@@ -115,6 +124,10 @@ proc drainEventLinesFromJson(j: JsonNode, s: DaemonSession): seq[AudioEvent] =
         ev.metadata["track_title"] = evJson{"track_title"}.getStr("")
         ev.metadata["track_channel"] = evJson{"track_channel"}.getStr("")
       ev.metadata["auto_advanced"] = $(evJson{"auto_advanced"}.getBool(false))
+      if evJson.hasKey("time_pos"):
+        ev.metadata["time_pos"] = $evJson["time_pos"].getFloat(0.0)
+      if evJson.hasKey("duration"):
+        ev.metadata["duration"] = $evJson["duration"].getFloat(0.0)
     of evMetadataChanged:
       ev.strVal = evJson{"event"}.getStr("")
     of evCustomEvent:
@@ -160,45 +173,118 @@ proc drainEvents*(s: DaemonSession): seq[AudioEvent] =
         let old = s.buf.len; s.buf.setLen(old + n); copyMem(addr s.buf[old], addr tmp[0], n)
     while true:
       let nli = s.buf.find('\n')
-      if nli < 0: break
-      let line = s.buf[0..<nli]
-      s.buf = s.buf[nli+1..^1]
-      if line.len == 0: continue
-      let json = parseJson(line)
-      if json.hasKey("events"):
-        let events = drainEventLinesFromJson(json, s)
-        for ev in events:
-          if ev.kind == evPositionChanged:
-            s.timePos = ev.floatVal
-          elif ev.kind == evPlaybackStarted:
-            if ev.metadata.hasKey("time_pos"):
-              try: s.timePos = parseFloat(ev.metadata["time_pos"]) except: discard
-            if ev.metadata.hasKey("duration"):
-              try: s.duration = parseFloat(ev.metadata["duration"]) except: discard
-        result.add(events)
-      elif json.hasKey("state"):
-        let st = json["state"].getStr()
-        s.state = (if st == "playing": 1 elif st == "paused": 2 else: 0)
-        if json.hasKey("time_pos"):
-          s.timePos = json["time_pos"].getFloat(0.0)
-        if json.hasKey("duration"):
-          s.duration = json["duration"].getFloat(0.0)
-        if json.hasKey("volume"):
-          s.volume = json["volume"].getInt(80)
-        if json.hasKey("audio_working"):
-          s.working = json["audio_working"].getBool(true)
-        if json.hasKey("sleep_timer"):
-          s.sleepTimerRemaining = json["sleep_timer"].getInt(0)
-      elif json.hasKey("seq"):
-        discard
+      if nli >= 0:
+        let line = s.buf[0..<nli]
+        s.buf = s.buf[nli+1..^1]
+        if line.len == 0: continue
+        let json = parseJson(line)
+        if json.hasKey("events"):
+          let events = drainEventLinesFromJson(json, s)
+          for ev in events:
+            if ev.kind == evPositionChanged:
+              let now = epochTime()
+              if s.extrapolating and s.state == 1:
+                let expected = s.posBaseValue + (now - s.posBaseTime) * s.clockSkew
+                let err = ev.floatVal - expected
+                if abs(err) > 0.05 and (now - s.posBaseTime) > 0.01:
+                  s.clockSkew += err * 0.1 / (now - s.posBaseTime)
+                  s.clockSkew = s.clockSkew.clamp(0.8, 1.2)
+              s.posBaseTime = now
+              s.posBaseValue = ev.floatVal
+              s.extrapolatedPos = ev.floatVal
+              s.timePos = ev.floatVal
+            elif ev.kind == evPlaybackStarted:
+              s.extrapolating = true
+              s.clockSkew = 1.0
+              let now = epochTime()
+              if ev.metadata.hasKey("time_pos"):
+                try:
+                  let tp = parseFloat(ev.metadata["time_pos"])
+                  s.timePos = tp
+                  s.extrapolatedPos = tp
+                  s.posBaseValue = tp
+                except: discard
+              else:
+                s.timePos = 0.0
+                s.extrapolatedPos = 0.0
+                s.posBaseValue = 0.0
+              s.posBaseTime = now
+              if ev.metadata.hasKey("duration"):
+                try: s.duration = parseFloat(ev.metadata["duration"]) except: discard
+            elif ev.kind == evPlaybackPaused or ev.kind == evPlaybackStopped:
+              s.extrapolating = false
+          result.add(events)
+        elif json.hasKey("state"):
+          let st = json["state"].getStr()
+          s.state = (if st == "playing": 1 elif st == "paused": 2 else: 0)
+          if json.hasKey("time_pos"):
+            s.timePos = json["time_pos"].getFloat(0.0)
+          if json.hasKey("duration"):
+            s.duration = json["duration"].getFloat(0.0)
+          if json.hasKey("volume"):
+            s.volume = json["volume"].getInt(80)
+          if json.hasKey("audio_working"):
+            s.working = json["audio_working"].getBool(true)
+          if json.hasKey("sleep_timer"):
+            s.sleepTimerRemaining = json["sleep_timer"].getInt(0)
+        elif json.hasKey("seq"):
+          discard
+        else:
+          discard
+      elif s.buf.len >= 6 and s.buf[0].byte == WireMagic:
+        let totalLen = (int(s.buf[1]) shl 24) or (int(s.buf[2]) shl 16) or
+                       (int(s.buf[3]) shl 8) or int(s.buf[4])
+        if s.buf.len >= totalLen:
+          let binData = s.buf[0..<totalLen]
+          s.buf = s.buf[totalLen..^1]
+          let events = deserializeEvents(cast[seq[byte]](binData))
+          for ev in events:
+            if ev.kind == evPositionChanged:
+              let now = epochTime()
+              if s.extrapolating and s.state == 1:
+                let expected = s.posBaseValue + (now - s.posBaseTime) * s.clockSkew
+                let err = ev.floatVal - expected
+                if abs(err) > 0.05 and (now - s.posBaseTime) > 0.01:
+                  s.clockSkew += err * 0.1 / (now - s.posBaseTime)
+                  s.clockSkew = s.clockSkew.clamp(0.8, 1.2)
+              s.posBaseTime = now
+              s.posBaseValue = ev.floatVal
+              s.extrapolatedPos = ev.floatVal
+              s.timePos = ev.floatVal
+            elif ev.kind == evPlaybackStarted:
+              s.extrapolating = true
+              s.clockSkew = 1.0
+              let now = epochTime()
+              if ev.metadata.hasKey("time_pos"):
+                try:
+                  let tp = parseFloat(ev.metadata["time_pos"])
+                  s.timePos = tp
+                  s.extrapolatedPos = tp
+                  s.posBaseValue = tp
+                except: discard
+              else:
+                s.timePos = 0.0
+                s.extrapolatedPos = 0.0
+                s.posBaseValue = 0.0
+              s.posBaseTime = now
+              if ev.metadata.hasKey("duration"):
+                try: s.duration = parseFloat(ev.metadata["duration"]) except: discard
+            elif ev.kind == evPlaybackPaused or ev.kind == evPlaybackStopped:
+              s.extrapolating = false
+          result.add(events)
+        else:
+          break
       else:
-        discard
+        break
   except:
     s.connected = false
 
 proc send*(s: DaemonSession, cmd: JsonNode) =
   if s == nil or s.sock == nil or not s.connected: return
   try:
+    if not s.wireNegotiated:
+      cmd["wire"] = %2
+      s.wireNegotiated = true
     cmd["seq"] = %s.nextSeq
     s.nextSeq.inc
     let data = $cmd & "\n"
@@ -299,6 +385,15 @@ method togglePause*(s: DaemonSession) =
 method pollEvents*(s: DaemonSession): seq[AudioEvent] =
   s.ensureRunning()
   result = s.drainEvents()
+  if s.extrapolating and s.state == 1:
+    let now = epochTime()
+    let elapsed = now - s.posBaseTime
+    if elapsed > 0.01:
+      let newPos = s.posBaseValue + elapsed * s.clockSkew
+      if abs(newPos - s.extrapolatedPos) > 0.01:
+        s.extrapolatedPos = newPos
+        s.timePos = newPos
+        result.add(AudioEvent(kind: evPositionChanged, floatVal: newPos))
   s.lastState = s.state
 
 method shutdown*(s: DaemonSession) =
@@ -355,5 +450,6 @@ proc newDaemonSession*(): DaemonSession =
     volume: 80, state: 0, backendType: abtDaemon,
     connected: false, buf: "",
     working: true, sleepTimerRemaining: 0,
-    ipcTimeoutSec: 3.0, pingMissed: 0, reconnectCooldown: 0
+    ipcTimeoutSec: 3.0, pingMissed: 0, reconnectCooldown: 0,
+    extrapolating: false, clockSkew: 1.0, wireNegotiated: false
   )

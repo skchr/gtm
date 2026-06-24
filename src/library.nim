@@ -909,5 +909,3 @@ proc rebuildItems*(state: var AppState) =
   state.selectIndex = min(state.selectIndex, state.displayItems.len - 1)
   if state.selectIndex < 0 and state.displayItems.len > 0:
     state.selectIndex = 0
-  if state.tab == tabLibrary:
-    locatePlayingTrack(state)

@@ -131,6 +131,11 @@ when isMainModule:
     discard checkCmd("viu", "viu --version 2>/dev/null")
   echo ""
 
+  echo "-- Shell Completions --"
+  if not buildAndroid:
+    sh("nim r tools/gencompletions.nim completions")
+  echo ""
+
   echo "-- Manpage --"
   if not buildAndroid:
     buildManpage(version)

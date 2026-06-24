@@ -316,13 +316,11 @@ proc buildPlaylistFromArgs(state: var AppState, args: seq[string]) =
           discard cli.queueAdd(items)
 
 proc getCurrentTrack(state: AppState): Track =
-  let items = state.displayItems
-  if items.len > 0 and state.selectIndex >= 0 and state.selectIndex < items.len:
-    let item = items[state.selectIndex]
-    if item.kind == likTrack and item.trackIdx >= 0 and item.trackIdx < state.libraryTracks.len:
-      return state.libraryTracks[item.trackIdx]
-  if state.libraryTracks.len > 0:
-    return state.libraryTracks[min(state.selectIndex, state.libraryTracks.len - 1)]
+  let item = state.selectedItem()
+  if item.kind == likTrack and item.trackIdx >= 0 and item.trackIdx < state.libraryTracks.len:
+    return state.libraryTracks[item.trackIdx]
+  if state.libraryTracks.len > 0 and state.selectIndex >= 0 and state.selectIndex < state.libraryTracks.len:
+    return state.libraryTracks[state.selectIndex]
   Track()
 
 proc applyFilter(state: var AppState) =
@@ -395,7 +393,9 @@ proc playSelected(state: var AppState) =
     for i in state.selectIndex + 1 ..< state.displayItems.len:
       let item = state.displayItems[i]
       if item.kind == likTrack and item.trackIdx >= 0 and item.trackIdx < state.libraryTracks.len:
-        queuedPaths.add(state.libraryTracks[item.trackIdx].path)
+        let tp = state.libraryTracks[item.trackIdx].path
+        if tp.len > 0 and (isUrl(tp) or fileExists(tp)):
+          queuedPaths.add(tp)
     # Async sendOnly for daemon mode (non-blocking), blocking loadFile for local backends
     if state.player.backendType == abtDaemon:
       let cli = DaemonService(state.svc)
@@ -2090,13 +2090,21 @@ proc handleMainKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     if state.isPlaylistView() and state.playlistContentsIdx < 0:
       execCmd(state, "rename_playlist")
   of iw.Key.Down:
-    if state.tab == tabNowPlaying:
-      discard
+    if state.tab == tabNowPlaying and state.playbackQueue.len > 0:
+      if state.queueCursor < state.playbackQueue.len - 1:
+        state.queueCursor.inc
+        if state.queueCursor >= state.upNextScrollOffset + 5:
+          state.upNextScrollOffset.inc
+      state.markDirty(ceQueue)
     else:
       state.moveSelection(1)
   of iw.Key.Up:
-    if state.tab == tabNowPlaying:
-      discard
+    if state.tab == tabNowPlaying and state.playbackQueue.len > 0:
+      if state.queueCursor > 0:
+        state.queueCursor.dec
+        if state.queueCursor < state.upNextScrollOffset:
+          state.upNextScrollOffset = max(0, state.upNextScrollOffset - 1)
+      state.markDirty(ceQueue)
     else:
       state.moveSelection(-1)
   of iw.Key.Enter:
@@ -2521,6 +2529,7 @@ proc processEvents(state: var AppState) =
         state.ytStreamChannel = state.currentPlayingChannel
         if state.tab == tabLibrary:
           state.rebuildItems()
+          state.locatePlayingTrack()
           state.markDirty(ceSearchResults)
       # Fallback: derive from player state if metadata not available
       elif state.player.timePos >= 0 and state.player.duration > 0:
@@ -2810,14 +2819,15 @@ proc processEvents(state: var AppState) =
             state.markDirty(ceSearchResults)
           except: discard
       elif ev.strVal == "cover_art_sync":
-        if state.coverFetching and ev.metadata.hasKey("cover_data") and ev.metadata["cover_data"].len > 0:
-          let cacheKey = hash(state.currentPlayingPath).toHex
-          let mime = ev.metadata.getOrDefault("cover_mime", "image/jpeg")
-          try:
-            state.coverCache[cacheKey] = (cast[seq[byte]](decode(ev.metadata["cover_data"])), mime)
-          except: discard
+        if state.coverFetching:
+          if ev.metadata.hasKey("cover_data") and ev.metadata["cover_data"].len > 0:
+            let cacheKey = hash(state.currentPlayingPath).toHex
+            let mime = ev.metadata.getOrDefault("cover_mime", "image/jpeg")
+            try:
+              state.coverCache[cacheKey] = (cast[seq[byte]](decode(ev.metadata["cover_data"])), mime)
+            except: discard
+            state.markDirty(ceTrack)
           state.coverFetching = false
-          state.markDirty(ceTrack)
       elif ev.strVal == "lyrics_sync":
         if ev.metadata.hasKey("ok") and ev.metadata["ok"] == "true":
           var lrcData = LrcData(title: ev.metadata.getOrDefault("title", ""),
@@ -2887,10 +2897,12 @@ proc fullStateSync(state: var AppState, daemonState: JsonNode) =
       state.currentPlayingTitle = daemonState["track_title"].getStr("")
     if daemonState.hasKey("track_channel"):
       state.currentPlayingChannel = daemonState["track_channel"].getStr("")
-  else:
-    state.currentPlayingPath = ""
-    state.currentPlayingTitle = ""
-    state.currentPlayingChannel = ""
+  elif daemonState.hasKey("track_path") and daemonState["track_path"].getStr("").len > 0:
+    state.currentPlayingPath = daemonState["track_path"].getStr("")
+    if daemonState.hasKey("track_title"):
+      state.currentPlayingTitle = daemonState["track_title"].getStr("")
+    if daemonState.hasKey("track_channel"):
+      state.currentPlayingChannel = daemonState["track_channel"].getStr("")
   if daemonState.hasKey("time_pos"):
     state.timePos = max(0.0, daemonState["time_pos"].getFloat(0.0))
   if daemonState.hasKey("duration"):

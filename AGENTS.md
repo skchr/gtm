@@ -46,6 +46,24 @@
 - `docs/gtm.1.md`: examples section (shell usage, programmatic piping via jq)
 - `docs/gtmd.1.md`: examples section (socat interaction, event streaming, scripted shell, Nim sock API example)
 
+### Bug Fixes (9 bugs) — COMPLETE
+- `src/daemon.nim`: EINTR handling (`EAGAIN` → `EINTR`) prevents hang on pipe EOF when client disconnects mid-write; `trySend` no longer crashes on broken pipes (sends partial). Fixes daemon hang on EOF.
+- `src/gtm.nim`: `getCurrentTrack` uses `selectedItem` (library index) instead of `playIndex` (queue index), fixing off-by-one in library-focused operations.
+- `src/gtm.nim`: `fullStateSync` does not clear `currentPlayingPath` when `track_path` is provided in `psStopped` state, fixing "No track selected" appearing on track change.
+- `src/daemon.nim`: `handleAutoAdvance` correctly checks `repeatOne` before setting `restorePlayhead=0`; crossfade scheduling prevented when `repeatOne` is active. Fixes track repeating & crossfade breakage.
+- `src/gtm.nim`: `locatePlayingTrack` removed from `rebuildItems` (library view), fixing highlight persistence on edit/import.
+- `src/ui.nim`: `NowPlaying` tab responds to Up/Down arrow keys by moving `queueCursor` with terminal bell on overflow.
+- `src/gtm.nim`: `fetchCoverArt` always broadcasts event even on network failure; TUI always resets `coverFetching` to false in error branch.
+- `src/gtm.nim`: `playSelected` skips tracks whose file does not exist on disk (`fileExists` check, skip URLs), preventing "failed to probe" errors for broken symlinks/deleted files.
+- `src/ui.nim`: Up Next no longer shows `▶` on paused tracks; uses `⏸` with yellow color instead.
+
+### Phase 7 — Shell Completions — COMPLETE
+- `tools/gencompletions.nim`: generates completion scripts for fish, zsh, bash, elvish, nushell, xonsh
+- `completions/`: output directory for generated scripts (`.fish`, `_gtm` for zsh, `.bash`, `.elv`, `.nu`, `_xonsh.py`)
+- Each subcommand has a description string in completions
+- `gtm play` subcommand completes audio files from `$XDG_DATA_HOME/gtm/audio/` (fallback `~/.local/share/gtm/audio/`) by extension: `mp3,flac,ogg,m4a,wav,opus,aac,wma,alac,aiff,ape`
+- `build.nims`: invokes `nim r tools/gencompletions.nim completions` during build
+
 ### Session — CI/CD Release Pipeline Fixes — COMPLETE
 - `.github/workflows/release.yml`: `ubuntu-latest` → `ubuntu-22.04` for linux-amd64 (glibc 2.35)
 - `release.yml`: linux-arm64 builds inside `arm64v8/ubuntu:22.04` Docker container on `ubuntu-24.04-arm` runner (glibc 2.35)

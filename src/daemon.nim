@@ -33,10 +33,12 @@
 import os, json, strutils, net, posix, random, osproc, times, base64, locks, uri, tables, httpclient, streams
 from nativesockets import setBlocking, selectRead, SocketHandle
 from std/typedthreads import Thread, createThread, joinThread
+import audio, state, library, ytdlp, lyrics, spotify, wire
 when not defined(macosx):
   proc prctl(option: cint, arg2: cstring): cint {.importc, header: "<sys/prctl.h>".}
 else:
   proc pthread_setname_np(name: cstring): cint {.importc, header: "<pthread.h>".}
+proc rename*(oldpath, newpath: cstring): cint {.importc, header: "<stdio.h>".}
 import audio, state, library, ytdlp, lyrics, spotify
 
 
@@ -111,6 +113,7 @@ type
   ClientState* = object
     sock*: Socket
     buf*: string
+    wireVersion*: int
 
   Daemon* = ref object
     # Thread 2 (IPCHandler) exclusive — no locking needed
@@ -129,6 +132,7 @@ type
     lock: Lock
     pendingActions: seq[PulseAction]
     events: seq[string]              # serialized JSON events for T2 to broadcast
+    binaryEvents: seq[seq[byte]]     # serialized binary events for v2+ clients
 
     currentTrackPath: string
     currentTrackTitle: string
@@ -552,6 +556,116 @@ proc savePlaybackState(d: Daemon) =
     d.lib.setPlaybackState("queue_json", $qArr)
     d.lib.setPlaybackState("shuffle_index", $(d.shuffleIndex))
 
+proc stateFilePath(): string =
+  result = dataDir() / "gtm.state.json"
+
+proc validateNoCrlf(s: string): bool =
+  for c in s:
+    if c == '\r' or c == '\n':
+      return false
+  true
+
+proc saveStateFile(d: Daemon) =
+  let path = stateFilePath()
+  let tmpPath = path & ".tmp"
+  var state = %*{
+    "version": 1,
+    "queue": newJArray(),
+    "shuffleOrder": newJArray(),
+    "shuffleIndex": d.shuffleIndex,
+    "volume": d.playerVolume,
+    "repeatMode": d.repeatMode,
+    "shuffleEnabled": d.shuffleEnabled,
+    "sleepTimerRemaining": d.sleepTimerRemaining,
+    "crossfadeDuration": d.crossfadeDuration,
+    "crossfadeCurve": d.crossfadeCurve,
+    "spatialWidth": d.spatialWidth,
+    "playerTimePos": d.playerTimePos,
+    "playerState": d.playerState,
+    "ytCookieSource": d.ytCookieSource,
+    "ytCookieFilePath": d.ytCookieFilePath,
+    "ytJsRuntime": d.ytJsRuntime,
+    "ytDownloadDir": d.ytDownloadDir,
+    "ytMaxConcurrentDownloads": d.ytMaxConcurrentDownloads,
+    "spCookieSource": d.spCookieSource,
+    "spCookieFilePath": d.spCookieFilePath,
+    "spAudioFormat": d.spAudioFormat,
+    "watchDirMtimes": newJObject()
+  }
+  for p in d.playbackQueue:
+    if validateNoCrlf(p):
+      state["queue"].add(%p)
+  for i in d.shuffleOrder:
+    state["shuffleOrder"].add(%i)
+  if validateNoCrlf(d.currentTrackPath):
+    state["track_path"] = %d.currentTrackPath
+  if validateNoCrlf(d.currentTrackTitle):
+    state["track_title"] = %d.currentTrackTitle
+  if validateNoCrlf(d.currentTrackChannel):
+    state["track_channel"] = %d.currentTrackChannel
+  let audioDir = dataDir() / "audio"
+  if dirExists(audioDir):
+    try:
+      state["watchDirMtimes"][audioDir] = %getLastModificationTime(audioDir).toUnix
+    except: discard
+  let jsonStr = $state
+  let tmpFd = posix.open(tmpPath, posix.O_WRONLY or posix.O_CREAT or posix.O_TRUNC, 0o644)
+  if tmpFd < 0: return
+  discard posix.write(tmpFd, jsonStr.cstring, jsonStr.len)
+  discard posix.fsync(tmpFd)
+  discard posix.close(tmpFd)
+  # Atomic rename via C library
+  var cres = rename(tmpPath, path)
+  if cres != 0:
+    try: removeFile(path) except: discard
+    discard rename(tmpPath, path)
+
+proc loadStateFile(d: Daemon) =
+  let path = stateFilePath()
+  if not fileExists(path): return
+  try:
+    let jsonStr = readFile(path)
+    let state = parseJson(jsonStr)
+    if state{"version"}.getInt(0) < 1: return
+    if state.hasKey("queue"):
+      d.playbackQueue = @[]
+      for p in state["queue"].items:
+        let s = p.getStr("")
+        if s.len > 0 and validateNoCrlf(s):
+          d.playbackQueue.add(s)
+    if state.hasKey("shuffleOrder"):
+      d.shuffleOrder = @[]
+      for i in state["shuffleOrder"].items:
+        d.shuffleOrder.add(i.getInt(0))
+    d.shuffleIndex = state{"shuffleIndex"}.getInt(0)
+    d.playerVolume = state{"volume"}.getInt(50)
+    d.repeatMode = state{"repeatMode"}.getInt(0)
+    d.shuffleEnabled = state{"shuffleEnabled"}.getBool(false)
+    d.sleepTimerRemaining = state{"sleepTimerRemaining"}.getInt(0)
+    d.crossfadeDuration = state{"crossfadeDuration"}.getInt(8)
+    d.crossfadeCurve = state{"crossfadeCurve"}.getInt(1)
+    d.spatialWidth = state{"spatialWidth"}.getFloat(2.0)
+    d.playerTimePos = state{"playerTimePos"}.getFloat(0.0)
+    d.playerState = state{"playerState"}.getInt(0)
+    if state.hasKey("track_path") and validateNoCrlf(state["track_path"].getStr("")):
+      d.currentTrackPath = state["track_path"].getStr("")
+    if state.hasKey("track_title") and validateNoCrlf(state["track_title"].getStr("")):
+      d.currentTrackTitle = state["track_title"].getStr("")
+    if state.hasKey("track_channel") and validateNoCrlf(state["track_channel"].getStr("")):
+      d.currentTrackChannel = state["track_channel"].getStr("")
+    d.ytCookieSource = state{"ytCookieSource"}.getStr("")
+    d.ytCookieFilePath = state{"ytCookieFilePath"}.getStr("")
+    d.ytJsRuntime = state{"ytJsRuntime"}.getStr("")
+    d.ytDownloadDir = state{"ytDownloadDir"}.getStr("")
+    d.ytMaxConcurrentDownloads = state{"ytMaxConcurrentDownloads"}.getInt(3)
+    d.spCookieSource = state{"spCookieSource"}.getStr("")
+    d.spCookieFilePath = state{"spCookieFilePath"}.getStr("")
+    d.spAudioFormat = state{"spAudioFormat"}.getStr("")
+    # Restore volume
+    if d.player != nil and d.playerVolume > 0:
+      d.player.setVolume(d.playerVolume)
+  except:
+    discard
 
 proc shuffleOrder(count: int): seq[int] =
   result = newSeq[int](count)
@@ -1294,12 +1408,14 @@ proc execCoverLyrics(d: Daemon, cmd: DaemonCmd): JsonNode =
     result["ok"] = %false
     result["pending"] = %true
   of dckRequestCoverArt:
+    let ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "cover_art_sync",
+      "path": %cmd.strArg}]}
     if cmd.strArg.len > 0 and fileExists(cmd.strArg):
       let (coverData, coverMime) = extractCoverArt(cmd.strArg)
       if coverData.len > 0:
-        let ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "cover_art_sync",
-          "path": %cmd.strArg, "cover_data": %encode(coverData), "cover_mime": %coverMime}]}
-        d.broadcastJson(ev)
+        ev["events"][0]["cover_data"] = %encode(coverData)
+        ev["events"][0]["cover_mime"] = %coverMime
+    d.broadcastJson(ev)
   of dckRequestLyrics:
     # Queue to PulseWorker — async, broadcasts lyrics_sync when done
     acquire(d.lock)
@@ -1545,6 +1661,7 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
   of dckQuit:
     when defined(useMpris): shutdownMpris()
     d.savePlaybackState()
+    d.saveStateFile()
     if d.lib != nil: d.lib.closeDb()
     if d.player != nil:
       acquire(d.lock)
@@ -1692,6 +1809,29 @@ proc trySend(client: Socket, data: string): bool =
         if debugMode: stderr.writeLine("[gtm] trySend error " & $err)
         return false
   return remaining.len == 0
+
+proc trySendBinary(client: Socket, data: seq[byte]): bool =
+  if data.len == 0: return true
+  var remaining = data
+  var offset = 0
+  while offset < remaining.len:
+    let n = posix.send(client.getFd, addr remaining[offset], (remaining.len - offset).cint, MSG_NOSIGNAL)
+    if n > 0:
+      offset += n
+    elif n == 0:
+      return false
+    else:
+      let err = osLastError()
+      if err.int32 == 11 or err.int32 == 10035: # EAGAIN / EWOULDBLOCK
+        return true
+      elif err.int32 == 4: # EINTR
+        continue
+      elif err.int32 == 104: # ECONNRESET
+        return false
+      else:
+        if debugMode: stderr.writeLine("[gtm] trySendBinary error " & $err)
+        return false
+  true
 
 proc runPulseWorker(d: ptr Daemon) {.thread.} =
   when not defined(macosx):
@@ -1883,6 +2023,8 @@ proc runPulseWorker(d: ptr Daemon) {.thread.} =
       d.stateVersion.inc
       let evJson = %*{"events": serializeEvents(audioEvents, d[])}
       d.events.add($evJson & "\n")
+      let binData = wire.serializeEvents(audioEvents)
+      d.binaryEvents.add(binData)
 
     # Poll async yt-dlp resolution (non-blocking across ticks)
     if d[].pwResolveActive and not d[].pwResolveProcess.running():
@@ -1916,27 +2058,31 @@ proc handleAutoAdvance(d: Daemon) =
   acquire(d.lock)
   var nextPath = ""
 
-  if d.crossfadeNextPath.len > 0:
+  if d.repeatMode == 2 and d.currentTrackPath.len > 0:
+    nextPath = d.currentTrackPath
+    d.crossfadeNextPath = ""
+    d.crossfadePrepared = false
+    d.crossfadeStarted = false
+    d.crossfadeConsumed = false
+    d.upNextSent = false
+  elif d.crossfadeNextPath.len > 0:
     nextPath = d.crossfadeNextPath
     d.crossfadeNextPath = ""
     d.crossfadePrepared = false
     d.crossfadeStarted = false
     d.crossfadeConsumed = false
     d.upNextSent = false
-    if d.repeatMode != 2:
-      if not d.shuffleEnabled and d.playbackQueue.len > 0:
-        d.playbackQueue.delete(0)
-        if d.repeatMode == 1:
-          d.playbackQueue.add(nextPath)
+    if not d.shuffleEnabled and d.playbackQueue.len > 0:
+      d.playbackQueue.delete(0)
+      if d.repeatMode == 1:
+        d.playbackQueue.add(nextPath)
   elif d.playbackQueue.len > 0:
     if d.shuffleEnabled and d.shuffleOrder.len > 0 and d.shuffleIndex < d.shuffleOrder.len:
       nextPath = d.playbackQueue[d.shuffleOrder[d.shuffleIndex]]
     elif not d.shuffleEnabled:
       nextPath = d.playbackQueue[0]
     if nextPath.len > 0:
-      if d.repeatMode == 2:
-        discard
-      elif d.shuffleEnabled:
+      if d.shuffleEnabled:
         d.shuffleIndex.inc
       else:
         d.playbackQueue.delete(0)
@@ -2030,6 +2176,7 @@ proc runDaemon*() =
     lock: daemonLock,
     pendingActions: @[],
     events: @[],
+    binaryEvents: @[],
     shuffleEnabled: false,
     repeatMode: 0,
     sleepTimerRemaining: 0,
@@ -2157,6 +2304,7 @@ proc runDaemon*() =
             let (ftitle, fartist) = parseFilenameForMetadata(p)
             discard daemon.lib.addTrack(p, ftitle, fartist, "", 0.0, 0, 0, "")
   discard daemon.spClient.loadTokens()
+  daemon.loadStateFile()
   removeFile(sockPath())
   let srvFd = posix.socket(posix.AF_UNIX, posix.SOCK_STREAM, 0)
   daemon.server = newSocket(srvFd, Domain.AF_UNIX, SockType.SOCK_STREAM)
@@ -2180,7 +2328,7 @@ proc runDaemon*() =
         if cliFd.int >= 0:
           var newClient = ClientState(
             sock: newSocket(cliFd, Domain.AF_UNIX, SockType.SOCK_STREAM),
-            buf: ""
+            buf: "", wireVersion: 1
           )
           setBlocking(newClient.sock.getFd, false)
           daemon.clients.add(newClient)
@@ -2194,7 +2342,10 @@ proc runDaemon*() =
         let n = posix.recv(daemon.clients[ci].sock.getFd, addr tmp[0], tmp.len.cint, 0)
         if n < 0:
           let err = osLastError()
-          if err.int32 == 11 or err.int32 == 10035:
+          if err.int32 == 11 or err.int32 == 10035: # EAGAIN / EWOULDBLOCK
+            ci.inc
+            continue
+          elif err.int32 == 4: # EINTR — interrupted by signal, retry
             ci.inc
             continue
           daemon.removeClient(ci)
@@ -2205,6 +2356,7 @@ proc runDaemon*() =
         let old = daemon.clients[ci].buf.len
         daemon.clients[ci].buf.setLen(old + n)
         copyMem(addr daemon.clients[ci].buf[old], addr tmp[0], n)
+        var clientRemoved = false
         while true:
           let nli = daemon.clients[ci].buf.find('\n')
           if nli < 0: break
@@ -2213,6 +2365,8 @@ proc runDaemon*() =
           if line.len == 0: continue
           if debugMode: stderr.writeLine("[gtm] daemon recv: " & line)
           let cmdJson = parseJson(line)
+          if cmdJson.hasKey("wire") and cmdJson["wire"].getInt(1) >= 2:
+            daemon.clients[ci].wireVersion = 2
           let cmd = parseDaemonCommand(line)
           let resp = try:
             executeCommand(daemon, cmd)
@@ -2225,19 +2379,42 @@ proc runDaemon*() =
           if debugMode: stderr.writeLine("[gtm] daemon resp: " & respStr.strip())
           if not trySend(daemon.clients[ci].sock, respStr):
             daemon.removeClient(ci)
+            clientRemoved = true
             break
           if not daemon.running: break
-        ci.inc
+        if not clientRemoved:
+          ci.inc
 
     # Drain events from PulseWorker and broadcast to all clients
     acquire(daemon.lock)
     var pendingEvents = daemon.events
     daemon.events.setLen(0)
+    var pendingBinary = daemon.binaryEvents
+    daemon.binaryEvents.setLen(0)
     release(daemon.lock)
 
-    for evJson in pendingEvents:
-      if daemon.clients.len > 0:
-        daemon.broadcastAll(evJson)
+    # Broadcast events per client wire version
+    if daemon.clients.len > 0:
+      var binIdx = 0
+      for evJson in pendingEvents:
+        if binIdx < pendingBinary.len:
+          let binData = pendingBinary[binIdx]
+          var alive: seq[ClientState]
+          for c in daemon.clients:
+            if c.wireVersion >= 2:
+              if trySendBinary(c.sock, binData):
+                alive.add(c)
+              else:
+                try: c.sock.close() except: discard
+            else:
+              if trySend(c.sock, evJson):
+                alive.add(c)
+              else:
+                try: c.sock.close() except: discard
+          daemon.clients = alive
+        else:
+          daemon.broadcastAll(evJson)
+        binIdx.inc
 
     # Desktop notification + auto-advance on track ended (from event drain)
     for evJson in pendingEvents:
@@ -2499,8 +2676,8 @@ proc runDaemon*() =
             "next_path": %nextQueuedPath, "next_title": %nextTitle, "next_channel": %nextChannel}]}
           daemon.broadcastJson(ev)
 
-    # Crossfade scheduling
-    if daemon.playerState == 1 and daemon.crossfadeDuration > 0 and nextQueuedPath.len > 0 and not isYtWatchUrl(nextQueuedPath):
+    # Crossfade scheduling — skip when repeat-one is active
+    if daemon.repeatMode != 2 and daemon.playerState == 1 and daemon.crossfadeDuration > 0 and nextQueuedPath.len > 0 and not isYtWatchUrl(nextQueuedPath):
       let dur = daemon.playerDuration
       let tpos = daemon.playerTimePos
       if dur > 0.0 and tpos >= 0.0:
@@ -2535,6 +2712,7 @@ proc runDaemon*() =
         daemon.sleepTimerRemaining.dec
         if daemon.sleepTimerRemaining <= 0:
           daemon.savePlaybackState()
+          daemon.saveStateFile()
           when defined(useMpris):
             shutdownMpris()
           if daemon.lib != nil:
@@ -2549,6 +2727,7 @@ proc runDaemon*() =
     if daemon.persistFrames >= 1800:
       daemon.persistFrames = 0
       daemon.savePlaybackState()
+      daemon.saveStateFile()
     daemon.stateSyncFrames.inc
     if daemon.stateSyncFrames >= 60:
       daemon.stateSyncFrames = 0
