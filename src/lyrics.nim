@@ -1,6 +1,10 @@
-import os, strutils, httpclient, json, uri, algorithm
+import os, strutils, httpclient, json, uri, algorithm, tables, times
 
 import state
+
+var
+  searchCache: Table[string, tuple[results: seq[tuple[id: int, artist, title, album: string, duration: float]], fetchedAt: float]]
+  searchCacheTtl: float = 300.0  # 5 min
 
 proc findLrcSidecar*(trackPath: string): string =
   let dir = trackPath.parentDir()
@@ -61,6 +65,11 @@ proc currentLrcLine*(lyrics: LrcData, timePos: float): int =
 proc searchLrclib*(artist, title: string): seq[tuple[id: int, artist, title, album: string, duration: float]] =
   result = @[]
   if artist.len == 0 and title.len == 0: return
+  let cacheKey = artist & " :: " & title
+  if searchCache.hasKey(cacheKey):
+    let (cached, fetchedAt) = searchCache[cacheKey]
+    if epochTime() - fetchedAt < searchCacheTtl:
+      return cached
   try:
     let query = encodeQuery({"q": title, "artist_name": artist, "q_artist": artist})
     let client = newHttpClient(timeout = 5000)
@@ -76,6 +85,7 @@ proc searchLrclib*(artist, title: string): seq[tuple[id: int, artist, title, alb
           duration: item{"duration"}.getFloat(0.0)
         ))
     client.close()
+    searchCache[cacheKey] = (result, epochTime())
   except:
     discard
 

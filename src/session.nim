@@ -18,11 +18,16 @@
 ## └──────────────────────────────────────────────────┘
 
 import os, json, strutils, net, osproc, posix, tables
-from times import epochTime
 import audio, state, wire
 {.push warning[GcUnsafe2]:off.}
 
 var debugMode*: bool
+
+proc monotonicTime*(): float =
+  ## Wall-clock-independent monotonic time (std::chrono::steady_clock).
+  var ts: posix.Timespec
+  discard clock_gettime(CLOCK_MONOTONIC, ts)
+  result = ts.tv_sec.float + ts.tv_nsec.float * 1e-9
 
 type
   DaemonSession* = ref object of AudioBackend
@@ -43,6 +48,10 @@ type
     extrapolating: bool
     # Wire protocol negotiation
     wireNegotiated: bool
+    # RTT tracking
+    rttEstimate*: float
+    lastSendTime: float
+    recoveryWindow: float
 
 proc daemonIsRunning*(): bool =
   let p = pidPath()
@@ -155,6 +164,30 @@ proc drainEventLinesFromJson(j: JsonNode, s: DaemonSession): seq[AudioEvent] =
     else: discard
     result.add(ev)
 
+proc applyPositionCorrection(s: DaemonSession, authPos: float) =
+  ## Three-tier position correction: snap (>1s), smooth (10ms–1s), ignore (<10ms).
+  ## Uses RTT-compensated error for authoritative position.
+  let now = monotonicTime()
+  if s.extrapolating and s.state == 1:
+    let halfRtt = s.rttEstimate * 0.5
+    let expected = s.posBaseValue + (now - s.posBaseTime) * s.clockSkew
+    let err = authPos + halfRtt - expected
+    let absErr = abs(err)
+    if absErr > 1.0:
+      s.posBaseTime = now
+      s.posBaseValue = authPos + halfRtt
+      s.clockSkew = 1.0
+    elif absErr > 0.01:
+      let dt = now - s.posBaseTime
+      if dt > 0.001:
+        s.clockSkew = s.clockSkew + err * 0.5 / dt
+        s.clockSkew = s.clockSkew.clamp(0.8, 1.2)
+  else:
+    s.posBaseTime = now
+    s.posBaseValue = authPos
+  s.extrapolatedPos = authPos
+  s.timePos = authPos
+
 proc drainEvents*(s: DaemonSession): seq[AudioEvent] =
   result = @[]
   if not s.connected: return
@@ -182,21 +215,11 @@ proc drainEvents*(s: DaemonSession): seq[AudioEvent] =
           let events = drainEventLinesFromJson(json, s)
           for ev in events:
             if ev.kind == evPositionChanged:
-              let now = epochTime()
-              if s.extrapolating and s.state == 1:
-                let expected = s.posBaseValue + (now - s.posBaseTime) * s.clockSkew
-                let err = ev.floatVal - expected
-                if abs(err) > 0.05 and (now - s.posBaseTime) > 0.01:
-                  s.clockSkew += err * 0.1 / (now - s.posBaseTime)
-                  s.clockSkew = s.clockSkew.clamp(0.8, 1.2)
-              s.posBaseTime = now
-              s.posBaseValue = ev.floatVal
-              s.extrapolatedPos = ev.floatVal
-              s.timePos = ev.floatVal
+              s.applyPositionCorrection(ev.floatVal)
             elif ev.kind == evPlaybackStarted:
               s.extrapolating = true
               s.clockSkew = 1.0
-              let now = epochTime()
+              let now = monotonicTime()
               if ev.metadata.hasKey("time_pos"):
                 try:
                   let tp = parseFloat(ev.metadata["time_pos"])
@@ -240,21 +263,11 @@ proc drainEvents*(s: DaemonSession): seq[AudioEvent] =
           let events = deserializeEvents(cast[seq[byte]](binData))
           for ev in events:
             if ev.kind == evPositionChanged:
-              let now = epochTime()
-              if s.extrapolating and s.state == 1:
-                let expected = s.posBaseValue + (now - s.posBaseTime) * s.clockSkew
-                let err = ev.floatVal - expected
-                if abs(err) > 0.05 and (now - s.posBaseTime) > 0.01:
-                  s.clockSkew += err * 0.1 / (now - s.posBaseTime)
-                  s.clockSkew = s.clockSkew.clamp(0.8, 1.2)
-              s.posBaseTime = now
-              s.posBaseValue = ev.floatVal
-              s.extrapolatedPos = ev.floatVal
-              s.timePos = ev.floatVal
+              s.applyPositionCorrection(ev.floatVal)
             elif ev.kind == evPlaybackStarted:
               s.extrapolating = true
               s.clockSkew = 1.0
-              let now = epochTime()
+              let now = monotonicTime()
               if ev.metadata.hasKey("time_pos"):
                 try:
                   let tp = parseFloat(ev.metadata["time_pos"])
@@ -289,6 +302,7 @@ proc send*(s: DaemonSession, cmd: JsonNode) =
     s.nextSeq.inc
     let data = $cmd & "\n"
     s.sock.send(data)
+    s.lastSendTime = monotonicTime()
   except:
     s.connected = false
 
@@ -300,6 +314,7 @@ proc request*(s: DaemonSession, cmd: JsonNode): JsonNode =
     cmd["seq"] = %seqNo
     let data = $cmd & "\n"
     s.sock.send(data)
+    s.lastSendTime = monotonicTime()
     var tmp: array[16384, char]
     let timeout = if s.ipcTimeoutSec > 0: s.ipcTimeoutSec else: 3.0
     var totalWait = 0.0
@@ -326,6 +341,9 @@ proc request*(s: DaemonSession, cmd: JsonNode): JsonNode =
         if line.len == 0: continue
         let j = parseJson(line)
         if j.hasKey("seq") and j["seq"].getInt(-1) == seqNo:
+          let rtt = monotonicTime() - s.lastSendTime
+          if rtt > 0 and rtt < 10.0:
+            s.rttEstimate = s.rttEstimate * 0.75 + rtt * 0.25
           return j
         if j.hasKey("events"):
           for ev in drainEventLinesFromJson(j, s):
@@ -386,7 +404,7 @@ method pollEvents*(s: DaemonSession): seq[AudioEvent] =
   s.ensureRunning()
   result = s.drainEvents()
   if s.extrapolating and s.state == 1:
-    let now = epochTime()
+    let now = monotonicTime()
     let elapsed = now - s.posBaseTime
     if elapsed > 0.01:
       let newPos = s.posBaseValue + elapsed * s.clockSkew
@@ -451,5 +469,6 @@ proc newDaemonSession*(): DaemonSession =
     connected: false, buf: "",
     working: true, sleepTimerRemaining: 0,
     ipcTimeoutSec: 3.0, pingMissed: 0, reconnectCooldown: 0,
-    extrapolating: false, clockSkew: 1.0, wireNegotiated: false
+    extrapolating: false, clockSkew: 1.0, wireNegotiated: false,
+    rttEstimate: 0.0, recoveryWindow: 0.5
   )

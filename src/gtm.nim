@@ -34,7 +34,8 @@
 import os, terminal, strutils, unicode, json, sets, math, sequtils, algorithm, times, posix, tables, osproc, hashes, base64
 from illwave as iw import nil
 from ../vendor/nimwave/nimwave as nw import nil
-import state, ui, audio, library, theme, commands, cli, ytdlp, graphics, lyrics, daemonservice, store, icons
+import state, ui, audio, library, theme, commands, cli, ytdlp, graphics, daemonservice, store, icons
+from lyrics import currentLrcLine
 
 proc loadConfig(state: var AppState) =
   let path = state.configPath
@@ -2529,7 +2530,6 @@ proc processEvents(state: var AppState) =
         state.ytStreamChannel = state.currentPlayingChannel
         if state.tab == tabLibrary:
           state.rebuildItems()
-          state.locatePlayingTrack()
           state.markDirty(ceSearchResults)
       # Fallback: derive from player state if metadata not available
       elif state.player.timePos >= 0 and state.player.duration > 0:
@@ -2667,7 +2667,8 @@ proc processEvents(state: var AppState) =
                   newPaths.add(qPath)
               state.playbackQueue = newQueue
               state.queuePaths = newPaths
-              state.queueCursor = 0
+              if state.queueCursor >= newQueue.len:
+                state.queueCursor = max(0, newQueue.len - 1)
               state.rebuildItems()
               state.markDirty(ceQueue)
             except: discard
@@ -2706,7 +2707,8 @@ proc processEvents(state: var AppState) =
                 newPaths.add(qPath)
             state.playbackQueue = newQueue
             state.queuePaths = newPaths
-            state.queueCursor = 0
+            if state.queueCursor >= newQueue.len:
+              state.queueCursor = max(0, newQueue.len - 1)
             state.rebuildItems()
             state.markDirty(ceQueue)
           except: discard

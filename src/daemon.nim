@@ -1924,6 +1924,12 @@ proc runPulseWorker(d: ptr Daemon) {.thread.} =
             d[].pendingPlayAfterYtLoad = false
           release(d.lock)
       of pakFetchLyrics:
+        if a.strVal2.len == 0 and a.strVal3.len == 0:
+          a.strVal2 = d[].currentTrackTitle
+          let dashPos = d[].currentTrackTitle.find(" - ")
+          if dashPos > 0:
+            a.strVal3 = d[].currentTrackTitle[0..<dashPos].strip()
+            a.strVal2 = d[].currentTrackTitle[dashPos+3..^1].strip()
         let lrc = resolveLyrics(a.strVal, a.strVal2, a.strVal3, a.strVal4, a.floatVal)
         var lrcArr = newJArray()
         for ln in lrc.lines:
