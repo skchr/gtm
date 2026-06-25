@@ -67,6 +67,7 @@ type
     metadata*: TrackMetadata
     backendType*: AudioBackendType
     working*: bool
+    backendName*: string
 
 method loadFile*(b: AudioBackend, path: string, title: string = "", channel: string = ""): bool {.base, gcsafe.} = false
 method play*(b: AudioBackend) {.base, gcsafe.} = discard
@@ -109,6 +110,10 @@ when defined(useFFmpeg):
   when defined(android):
     {.compile: "vendor/android/audio_impl.c".}
     {.passL: " -lOpenSLES".}
+  when defined(android) and defined(usePulseAudio):
+    {.compile: "vendor/android/pulse_audio.c".}
+    {.passL: " -lpulse-simple".}
+    {.passC: "-DUSE_PULSEAUDIO".}
 
   type
     FfmpegCtx = ptr object
@@ -126,6 +131,8 @@ when defined(useFFmpeg):
   proc ffmpeg_audio_is_playing(ctx: FfmpegCtx): cint {.importc.}
   proc ffmpeg_audio_read_pcm(ctx: FfmpegCtx, output: ptr float32, count: cint): cint {.importc.}
   proc ffmpeg_audio_get_metadata(ctx: FfmpegCtx, title, artist, album: ptr cstring, duration: ptr cdouble) {.importc.}
+  proc ffmpeg_audio_get_backend_name(ctx: FfmpegCtx): cstring {.importc.}
+  proc ffmpeg_mixer_get_backend_name(ctx: FfmpegCtx): cstring {.importc.}
   proc ffmpeg_extract_cover(path: cstring, outData: ptr pointer, outSize: ptr cuint, outMime: ptr cstring): cint {.importc.}
   proc ffmpeg_free_cover_data(data: pointer, mime: cstring) {.importc.}
 
@@ -292,7 +299,10 @@ when defined(useFFmpeg):
     )
     result.ctx = ffmpeg_audio_init()
     result.working = result.ctx != nil
-    if not result.working:
+    if result.working:
+      result.backendName = $ffmpeg_audio_get_backend_name(result.ctx)
+    else:
+      result.backendName = "none"
       stderr.writeLine("[gtm] FFmpeg init failed: could not allocate context")
 
   type
@@ -474,7 +484,10 @@ when defined(useFFmpeg):
     )
     result.ctx = ffmpeg_mixer_init()
     result.working = result.ctx != nil
-    if not result.working:
+    if result.working:
+      result.backendName = $ffmpeg_mixer_get_backend_name(result.ctx)
+    else:
+      result.backendName = "none"
       stderr.writeLine("[gtm] Mixer init failed: could not allocate context")
 
 proc newAudioBackend*(backendType: AudioBackendType): AudioBackend =

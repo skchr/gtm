@@ -1461,3 +1461,33 @@ void ffmpeg_mixer_unload(MixerCtx* mx) {
   mx->crossfade_active = 0;
   mx->current_time = 0.0;
 }
+
+const char* ffmpeg_audio_get_backend_name(FfmpegAudioCtx* ctx) {
+  (void)ctx;
+#if defined(__ANDROID__)
+  if (ctx && ctx->android_ctx)
+    return android_audio_get_backend_name(ctx->android_ctx);
+  return "none (Android)";
+#elif defined(HAS_ALSA)
+  return "ALSA";
+#elif defined(__APPLE__)
+  return "CoreAudio";
+#else
+  return "unknown";
+#endif
+}
+
+const char* ffmpeg_mixer_get_backend_name(MixerCtx* mx) {
+  (void)mx;
+#if defined(__ANDROID__)
+  if (mx && mx->android_ctx)
+    return android_audio_get_backend_name(mx->android_ctx);
+  return "none (Android)";
+#elif defined(HAS_ALSA)
+  return "ALSA";
+#elif defined(__APPLE__)
+  return "CoreAudio";
+#else
+  return "unknown";
+#endif
+}

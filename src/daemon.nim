@@ -531,6 +531,7 @@ proc pushFullState(d: Daemon) =
     "shuffleIndex": %d.shuffleIndex,
     "crossfadeDuration": %d.crossfadeDuration,
     "crossfadeCurve": %d.crossfadeCurve,
+    "backend_name": %(if d.player != nil and d.player.working: d.player.backendName else: "none"),
     "version": %d.stateVersion}]}
   d.broadcastJson(ev)
 
@@ -2214,6 +2215,8 @@ proc runDaemon*() =
     player = nil
   if player == nil or not player.working:
     stderr.writeLine("[gtm] All audio backends unavailable")
+  else:
+    stderr.writeLine("[gtm] Audio backend: " & player.backendName)
   let defaultDownloadDir = dataDir() & "/audio"
   var daemonLock: Lock
   initLock(daemonLock)

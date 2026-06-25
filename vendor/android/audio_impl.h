@@ -35,6 +35,7 @@ int  android_audio_stop(AndroidAudioCtx *ctx);
 int  android_audio_get_position(AndroidAudioCtx *ctx, int64_t *frames);
 int  android_audio_set_volume(AndroidAudioCtx *ctx, float volume);
 void android_audio_destroy(AndroidAudioCtx *ctx);
+const char *android_audio_get_backend_name(AndroidAudioCtx *ctx);
 
 #ifdef __cplusplus
 }

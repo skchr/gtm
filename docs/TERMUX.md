@@ -62,16 +62,58 @@ access shared storage.
 
 ### Audio
 
-On Termux, ALSA is not available. gtm falls back to a no-op audio stub.
-To hear audio, you must have a working audio setup in Termux:
+gtm on Termux uses **native Android audio APIs** — not ALSA or a no-op stub.
+
+The daemon probes audio backends at startup in this order:
+
+1. **AAudio** (Android 8.0+, loaded at runtime via `dlopen`) — lowest latency,
+   preferred on modern devices
+2. **OpenSL ES** (Android API 9+, linked at compile time) — fallback for older
+   Android or when AAudio fails to initialize
+3. **PulseAudio** (if built with `--pulse`) — connects to the Termux PulseAudio
+   server via `libpulse-simple`. Useful on Android 16+ where native NDK audio
+   may be blocked or as a workaround on custom ROMs
+
+If all backends fail, audio is unavailable and the daemon logs the reason.
+You can check which backend is active in the About tab or by running:
 
 ```bash
-# If using termux-media-player:
-termux-media-player play /path/to/audio.mp3
-
-# In gtm, you can stream YouTube/Spotify via yt-dlp:
-gtm https://youtube.com/watch?v=...
+gtm status | grep Audio
 ```
+
+#### Volume Control
+
+gtm controls playback volume in software (sample gain) and through the native
+audio API. This does NOT affect the device's hardware master volume. To change
+the system output level, use the physical volume buttons or:
+
+```bash
+termux-volume
+```
+
+(from the `termux-api` package)
+
+#### Troubleshooting Audio
+
+- **No sound on Android 16+**: The OpenSL ES sink often fails on Android 16.
+  gtm prefers AAudio, so this should work automatically. If not, try the
+  PulseAudio build (`--pulse`) or edit `$PREFIX/etc/pulse/default.pa` to
+  uncomment `module-aaudio-sink`.
+- **"dummy output" / auto_null sink**: Switch to AAudio or PulseAudio.
+- **Check active backend**: Look at the About tab in gtm's Settings screen,
+  or run `gtm status` and check the "Audio" line.
+- **Both AAudio and OpenSL ES fail**: Install PulseAudio (`pkg install pulseaudio`)
+  and rebuild with `--pulse`.
+
+### PulseAudio Build
+
+```bash
+pkg install pulseaudio
+nim e build.nims --android --pulse
+```
+
+This enables the PulseAudio backend via `libpulse-simple`. The daemon will try
+AAudio → OpenSL ES → PulseAudio at startup.
 
 ### Notifications
 
@@ -89,14 +131,15 @@ You can change this in Settings → System → Keyboard Mode.
 The About tab shows system information (OS, CPU, memory, tool versions).
 On Termux, `/etc/os-release` is not available, so the OS line may be empty.
 Tool versions (nim, ffmpeg, yt-dlp, etc.) are queried at runtime and will
-appear if the corresponding packages are installed.
+appear if the corresponding packages are installed. The active audio backend
+(AAudio / OpenSL ES / PulseAudio / ALSA) is also displayed in the Info section.
 
 ## Limitations
 
-- **Audio**: No native ALSA/PulseAudio. Audio playback is via yt-dlp streaming or
-  external media players.
-- **MPRIS**: D-Bus MPRIS interface is disabled. Remote control from other apps is
-  not available on Termux.
+- **Audio**: No direct ALSA or OSS access. Uses Android NDK audio APIs
+  (AAudio, OpenSL ES) or PulseAudio via `libpulse-simple`.
+- **MPRIS**: D-Bus MPRIS interface is disabled. Remote control from other apps
+  is not available on Termux.
 - **Desktop notifications**: Skipped on Android.
 - **`pactl` device detection**: Not available — device name shows as "Android".
 - **System info**: OS and some hardware details may not be detectable on Android.

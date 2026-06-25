@@ -1,4 +1,4 @@
-/* Android audio backend: AAudio primary + OpenSL ES fallback.
+/* Android audio backend: AAudio primary + OpenSL ES fallback + PulseAudio.
  * Single compilation unit to avoid symbol conflicts.
  */
 #define _GNU_SOURCE
@@ -9,6 +9,9 @@
 #include <math.h>
 
 #include "audio_impl.h"
+#ifdef USE_PULSEAUDIO
+#include "pulse_audio.h"
+#endif
 
 /* ================================================================
  *  AAudio backend (Android 8.0+, loaded at runtime)
@@ -269,13 +272,19 @@ AndroidAudioCtx *android_audio_init(int sampleRate, int channels,
         return (AndroidAudioCtx *)aaudio;
     free(aaudio);
 
-    /* Fall back to OpenSL ES */
-    SlesCtx *sles = (SlesCtx *)calloc(1, sizeof(SlesCtx));
-    if (sles && slesInit(sles, sampleRate, channels, cb, userdata) == 0)
-        return (AndroidAudioCtx *)sles;
-    free(sles);
+  /* Fall back to OpenSL ES */
+  SlesCtx *sles = (SlesCtx *)calloc(1, sizeof(SlesCtx));
+  if (sles && slesInit(sles, sampleRate, channels, cb, userdata) == 0)
+    return (AndroidAudioCtx *)sles;
+  free(sles);
 
-    return NULL;
+#ifdef USE_PULSEAUDIO
+  /* Fall back to PulseAudio */
+  AndroidAudioCtx *pulse = pulse_audio_init(sampleRate, channels, cb, userdata);
+  if (pulse) return pulse;
+#endif
+
+  return NULL;
 }
 
 int android_audio_start(AndroidAudioCtx *actx) {
@@ -298,6 +307,11 @@ int android_audio_start(AndroidAudioCtx *actx) {
         }
         return ((*ctx->player)->SetPlayState(ctx->player, SL_PLAYSTATE_PLAYING) == SL_RESULT_SUCCESS) ? 0 : -1;
     }
+#ifdef USE_PULSEAUDIO
+    else if (actx->backend == ANDROID_AUDIO_BACKEND_PULSE) {
+        return pulse_audio_start(actx);
+    }
+#endif
     return -1;
 }
 
@@ -318,6 +332,11 @@ int android_audio_stop(AndroidAudioCtx *actx) {
         (*ctx->bufQueue)->Clear(ctx->bufQueue);
         return (res == SL_RESULT_SUCCESS) ? 0 : -1;
     }
+#ifdef USE_PULSEAUDIO
+    else if (actx->backend == ANDROID_AUDIO_BACKEND_PULSE) {
+        return pulse_audio_stop(actx);
+    }
+#endif
     return -1;
 }
 
@@ -337,6 +356,11 @@ int android_audio_get_position(AndroidAudioCtx *actx, int64_t *frames) {
         *frames = ctx->base.framesWritten;
         return 0;
     }
+#ifdef USE_PULSEAUDIO
+    else if (actx->backend == ANDROID_AUDIO_BACKEND_PULSE) {
+        return pulse_audio_get_position(actx, frames);
+    }
+#endif
     return -1;
 }
 
@@ -351,7 +375,24 @@ int android_audio_set_volume(AndroidAudioCtx *actx, float volume) {
                          (SLmillibel)(2000.0f * log10f(volume));
         return ((*ctx->player)->SetVolumeLevel(ctx->player, mb) == SL_RESULT_SUCCESS) ? 0 : -1;
     }
+#ifdef USE_PULSEAUDIO
+    else if (actx->backend == ANDROID_AUDIO_BACKEND_PULSE) {
+        return pulse_audio_set_volume(actx, volume);
+    }
+#endif
     return -1;
+}
+
+const char *android_audio_get_backend_name(AndroidAudioCtx *actx) {
+    if (!actx) return "none";
+    switch (actx->backend) {
+        case ANDROID_AUDIO_BACKEND_AAUDIO: return "AAudio";
+        case ANDROID_AUDIO_BACKEND_SLES:   return "OpenSL ES";
+#ifdef ANDROID_AUDIO_BACKEND_PULSE
+        case ANDROID_AUDIO_BACKEND_PULSE:  return "PulseAudio";
+#endif
+        default: return "unknown";
+    }
 }
 
 void android_audio_destroy(AndroidAudioCtx *actx) {
@@ -375,4 +416,9 @@ void android_audio_destroy(AndroidAudioCtx *actx) {
         for (int i = 0; i < SLES_NUM_BUFS; i++) free(ctx->buffers[i]);
         free(ctx);
     }
+#ifdef USE_PULSEAUDIO
+    else if (actx->backend == ANDROID_AUDIO_BACKEND_PULSE) {
+        pulse_audio_destroy(actx);
+    }
+#endif
 }

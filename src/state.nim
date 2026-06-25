@@ -465,6 +465,7 @@ type
     upNextScrollOffset*: int
     cursorVisible*: bool
     deviceName*: string
+    audioBackendName*: string
     hasKittyGraphics*: bool
     coverCache*: Table[string, tuple[data: seq[byte], mime: string]]
     coverPendingPath*: string

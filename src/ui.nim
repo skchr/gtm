@@ -1726,7 +1726,10 @@ method render*(node: AboutOverlay, ctx: var nw.Context[State]) =
   sep()
 
   # Audio & playback
-  let audioBackendName = case ctx.state.player.backendType
+  let audioBackendName = if ctx.state.audioBackendName.len > 0:
+    ctx.state.audioBackendName
+  else:
+    case ctx.state.player.backendType
     of abtMixer: "ALSA (Mixer)"
     of abtFFmpeg: "ALSA (FFmpeg)"
     of abtDaemon: "ALSA (Daemon)"

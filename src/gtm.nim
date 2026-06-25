@@ -2922,6 +2922,8 @@ proc fullStateSync(state: var AppState, daemonState: JsonNode) =
     state.crossfadeCurve = CrossfadeCurveType(daemonState["crossfadeCurve"].getInt(1))
   if daemonState.hasKey("shuffleIndex"):
     state.shuffleIndex = daemonState["shuffleIndex"].getInt(0)
+  if daemonState.hasKey("backend_name"):
+    state.audioBackendName = daemonState["backend_name"].getStr("unknown")
 
 proc runTui(args: seq[string]) =
   terminal.enableTrueColors()

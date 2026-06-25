@@ -65,7 +65,7 @@ proc buildManpage(version: string) =
     sh("pandoc " & MAN_SRC & " -s -t man -o " & MAN_DST & " --variable=version:" & version)
     echo "    manpage -> " & MAN_DST
 
-proc buildBinary(src, label: string, version: string, musl: bool = false, android: bool = false, staticLinux: bool = false) =
+proc buildBinary(src, label: string, version: string, musl: bool = false, android: bool = false, staticLinux: bool = false, pulse: bool = false) =
   if not fileExists(src):
     echo "  " & src & " not found"
     return
@@ -78,6 +78,8 @@ proc buildBinary(src, label: string, version: string, musl: bool = false, androi
     flags &= " -d:android --gcc.exe:cc --gcc.linkerexe:cc"
   if staticLinux:
     flags &= " -d:staticFfmpeg"
+  if pulse:
+    flags &= " -d:usePulseAudio"
   sh("nim c " & flags & " " & src)
 
   if android:
@@ -100,12 +102,14 @@ when isMainModule:
   var buildMusl = false
   var buildAndroid = false
   var buildStaticLinux = false
+  var buildPulse = false
   for i in 1..paramCount():
     let p = paramStr(i)
     if p == "-t": buildTui = true
     if p == "-d": buildDmd = true
     if p == "-m" or p == "--musl": buildMusl = true
     if p == "--android": buildAndroid = true
+    if p == "--pulse": buildPulse = true
     if p == "--static-linux": buildStaticLinux = true
     if p.startsWith("--tag:"): forcedTag = p[6..^1]
     elif p == "--tag":
@@ -125,6 +129,7 @@ when isMainModule:
   echo "  Version: " & version
   if buildMusl: echo "  Target: musl (static)"
   if buildAndroid: echo "  Target: android (static)"
+  if buildPulse: echo "  PulseAudio: enabled"
   if buildStaticLinux: echo "  Target: linux (static FFmpeg)"
   echo ""
 
@@ -152,9 +157,9 @@ when isMainModule:
 
   echo "-- Build --"
   if buildDmd:
-    buildBinary(GTMD_SRC, "gtmd", version, musl = buildMusl, android = buildAndroid, staticLinux = buildStaticLinux)
+    buildBinary(GTMD_SRC, "gtmd", version, musl = buildMusl, android = buildAndroid, staticLinux = buildStaticLinux, pulse = buildPulse)
   if buildTui:
-    buildBinary(GTM_SRC, "gtm", version, musl = buildMusl, android = buildAndroid, staticLinux = buildStaticLinux)
+    buildBinary(GTM_SRC, "gtm", version, musl = buildMusl, android = buildAndroid, staticLinux = buildStaticLinux, pulse = buildPulse)
   echo ""
 
   echo "-- Summary --"
