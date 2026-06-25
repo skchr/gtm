@@ -1,5 +1,13 @@
 import os, strutils
 
+
+when defined(android):
+  let ndkDir = getEnv("ANDROID_NDK", "")
+  if ndkDir.len > 0:
+    let sysrootInc = ndkDir / "toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include"
+    if dirExists(sysrootInc):
+      switch("passC", "-I" & sysrootInc)
+
 switch("define", "gtm")
 switch("outdir", "bin")
 switch("define", "useFFmpeg")
