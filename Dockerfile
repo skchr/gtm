@@ -48,11 +48,13 @@ RUN curl -sL https://ffmpeg.org/releases/ffmpeg-7.1.tar.gz -o /tmp/ffmpeg.tar.gz
        --cxx=aarch64-linux-android28-clang++ \
        --ar=llvm-ar --ranlib=llvm-ranlib --strip=llvm-strip \
        --ld=aarch64-linux-android28-clang \
+       --enable-small \
        --disable-programs --disable-doc \
        --disable-encoders --disable-muxers --disable-devices --disable-filters \
-       --disable-bsfs --disable-postproc --disable-network \
-       --enable-decoder='mp3*,aac*,flac,vorbis,opus,pcm*,wmav*,wmapro,ape,wavpack,tta,alac,dca,dts*,ac3*,eac3,truehd,dsd*,cook,speex,nellymoser,adpcm*,atrac3*,mlp,sipr,tak,twinvq,binkaudio*,mp1,mp2,qdm2,qdmc,mace*,g723*,g729,gsm*' \
-       --enable-demuxer='*' --enable-parsers --enable-protocol=file \
+       --disable-bsfs --disable-postproc --disable-parsers \
+       --enable-decoder='mp3*,aac*,flac,vorbis,opus,pcm*,wmav*,wmapro,ape,wavpack,tta,alac' \
+       --enable-demuxer='mp3,flac,ogg,wav,mov,opus,aac,asf,aiff,ape,mpegts,matroska' \
+       --enable-protocol='file,http,https,tls' \
        --enable-swresample \
     && make -j$(nproc) \
     && make install \
