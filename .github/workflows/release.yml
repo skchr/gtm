@@ -110,9 +110,13 @@ jobs:
       - name: Run termux-elf-cleaner (Android)
         if: matrix.os-label == 'android'
         run: |
-          curl -sL "https://github.com/termux/termux-elf-cleaner/releases/download/v3.0.1/termux-elf-cleaner" -o /tmp/termux-elf-cleaner
-          chmod +x /tmp/termux-elf-cleaner
-          /tmp/termux-elf-cleaner bin/gtm bin/gtmd
+          docker run --rm -v $PWD:/src gtm-android-builder \
+            sh -c "apt-get update -qq && apt-get install -y -qq cmake && \
+              cd /tmp && \
+              curl -sL https://github.com/termux/termux-elf-cleaner/archive/refs/tags/v3.0.1.tar.gz -o tec.tar.gz && \
+              tar xzf tec.tar.gz && cd termux-elf-cleaner-* && \
+              cmake -B build && cmake --build build && \
+              ./build/termux-elf-cleaner /src/bin/gtm /src/bin/gtmd"
 
       - name: Verify static binary (Linux)
         if: runner.os == 'Linux' && matrix.os-label != 'android'
