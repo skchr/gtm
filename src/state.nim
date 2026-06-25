@@ -404,23 +404,11 @@ type
     spAudioFormat*: string
     spDownloaded*: Table[string, string]
     spDownloadCount*: int
-    spConnected*: bool
-    spFeedRecentlyPlayed*: seq[tuple[id, name, artist, album, url, playedAt: string]]
-    spFeedTopTracks*: seq[tuple[id, name, artist, album, url: string]]
-    spFeedNewReleases*: seq[tuple[id, name, artist, album, url: string]]
-    spFeedPlaylists*: seq[tuple[id, name: string]]
-    spFeedFetchedAt*: float
-    spFeedFetching*: bool
     spSearchResults*: seq[tuple[id, name, artist, album, url: string, durationMs: int]]
     spSearchLoading*: bool
     spUserPlaylists*: seq[tuple[id, name: string]]
     spLikedSongs*: seq[tuple[id, name, artist, album, url: string, durationMs: int]]
     sidebarSpExpanded*: bool
-    dashboardVisible*: bool
-    totalPlayTime*: float
-    totalTracksPlayed*: int
-    sessionStartAt*: float
-    sessionTracksPlayed*: int
     downloadsTab*: DownloadsTab
     downloadProgress*: Table[string, int]
     ytMaxConcurrentDownloads*: int
@@ -491,6 +479,8 @@ type
     lyricsVisible*: bool
     libraryLoading*: bool
     libraryNeedsScan*: bool
+    libraryRetryCount*: int
+    libraryLastRetryAt*: float
 
 const
   GTM_VERSION* {.strdefine.} = staticExec("git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//'").strip

@@ -514,8 +514,9 @@ proc pushFullState(d: Daemon) =
   for p in d.playbackQueue: qArr.add(%p)
   var soArr = newJArray()
   for i in d.shuffleOrder: soArr.add(%i)
+  let stateStr = if d.playerState == 0: "stopped" elif d.playerState == 1: "playing" else: "paused"
   var ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "full_state_sync",
-    "state": $(d.playerState),
+    "state": stateStr,
     "track_path": d.currentTrackPath,
     "track_title": d.currentTrackTitle,
     "track_channel": d.currentTrackChannel,
@@ -1469,6 +1470,15 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     if d.pendingLoadYtActive:
       d.pendingPlayAfterYtLoad = true
       result = %*{"ok": true, "deferred": true}
+    elif d.currentTrackPath.len > 0 and d.playerState == 0 and d.playerDuration == 0.0:
+      # No file loaded yet — load the restored track so Space resumes playback
+      acquire(d.lock)
+      d.pendingActions.add(PulseAction(kind: pakLoadFile, strVal: d.currentTrackPath,
+        strVal2: d.currentTrackTitle, strVal3: d.currentTrackChannel))
+      if d.playerTimePos > 0.0:
+        d.pendingActions.add(PulseAction(kind: pakSeek, floatVal: d.playerTimePos))
+      release(d.lock)
+      result = %*{"ok": true}
     else:
       acquire(d.lock)
       d.pendingActions.add(PulseAction(kind: pakPlay))
@@ -2347,6 +2357,11 @@ proc runDaemon*() =
           discard daemon.lib.addTrack(p, ftitle, fartist, "", 0.0, 0, 0, "")
   discard daemon.spClient.loadTokens()
   daemon.loadStateFile()
+  # Prevent the retry-advance check from firing on startup. The restored
+  # currentTrackPath is kept for display, but auto-advance is gated by a
+  # startup grace period so playback doesn't resume automatically.
+  # (see the pendingAdvance guard in the main loop)
+  daemon.pendingAdvance = true
   removeFile(sockPath())
   let srvFd = posix.socket(posix.AF_UNIX, posix.SOCK_STREAM, 0)
   daemon.server = newSocket(srvFd, Domain.AF_UNIX, SockType.SOCK_STREAM)

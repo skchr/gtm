@@ -278,6 +278,31 @@ proc loadLibrary(state: var AppState) =
   state.rebuildItems()
   state.libraryLoading = false
 
+proc retryLoadLibrary(state: var AppState) =
+  if not state.libraryLoading or not state.libraryNeedsScan:
+    return
+  if state.libraryTracks.len > 0:
+    state.libraryLoading = false
+    state.libraryNeedsScan = false
+    return
+  let now = epochTime()
+  if now - state.libraryLastRetryAt < 0.5:
+    return
+  state.libraryLastRetryAt = now
+  state.libraryRetryCount.inc
+  if state.libraryRetryCount > 10:
+    state.libraryLoading = false
+    state.libraryNeedsScan = false
+    return
+  if state.player.backendType == abtDaemon:
+    let cli = DaemonService(state.svc)
+    if cli.isConnected:
+      let resp = cli.getLibrary()
+      if resp.hasKey("tracks") and resp["tracks"].len > 0:
+        state.loadLibraryFromDaemon(resp)
+        state.libraryLoading = false
+        state.libraryNeedsScan = false
+
 proc buildPlaylistFromArgs(state: var AppState, args: seq[string]) =
   var paths: seq[string] = @[]
   if args.len > 0: paths = loadFromArgs(args)
@@ -909,14 +934,6 @@ proc initCommands(state: var AppState) =
       s.overlay = OverlayState(kind: okSpotifySearch, query: "")
       s.spSearchResults = @[]
       s.spSearchLoading = false)
-  state.registerCommand("dashboard", "Dashboard",
-    "Toggle the Now Playing dashboard with stats and Spotify feed", "\u2316", @["AltD"],
-    proc(s: var AppState) =
-      s.dashboardVisible = not s.dashboardVisible
-      if s.dashboardVisible and not s.spFeedFetching and (s.spFeedRecentlyPlayed.len == 0 or epochTime() - s.spFeedFetchedAt > 300):
-        s.spFeedFetching = true
-        DaemonService(s.svc).sendOnly(%*{"cmd": "sp_feed"})
-      s.markDirty(ceSettings))
   state.registerCommand("toggle_lyrics", "Toggle Lyrics",
     "Show or hide synced lyrics in Now Playing tab", "\U0001F3B5", @["AltL"],
     proc(s: var AppState) =
@@ -929,12 +946,6 @@ proc initCommands(state: var AppState) =
       if s.currentPlayingTitle.len > 0:
         s.overlay.query = s.currentPlayingTitle & " " & s.currentPlayingChannel
       s.overlay.lyricsSearchResults = @[])
-  state.registerCommand("sp_fetch_feed", "Refresh Spotify Feed",
-    "Manually refresh the Spotify feed data", "\U0001F504", @[],
-    proc(s: var AppState) =
-      s.spFeedFetching = true
-      DaemonService(s.svc).sendOnly(%*{"cmd": "sp_feed"})
-      s.setFeedback("Refreshing Spotify feed..."))
   state.registerCommand("yt_recommended", "Recommended Playlists",
     "Search YT for playlists related to current track", "\U0001F3B6", @["CtrlR"],
     proc(s: var AppState) =
@@ -2008,10 +2019,8 @@ proc handleMainKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
       state.playSelected()
     elif state.status == psPlaying:
       state.player.pause()
-      state.status = psPaused
     else:
       state.player.play()
-      state.status = psPlaying
   of iw.Key.CtrlL:
     state.mode = imLeaderMode
   of iw.Key.GraveAccent:
@@ -2086,8 +2095,6 @@ proc handleMainKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         state.setFeedback("Remove item from queue? (Y/N)")
     elif state.isPlaylistView() and state.playlistContentsIdx < 0:
       execCmd(state, "delete_playlist")
-    else:
-      execCmd(state, "dashboard")
   of iw.Key.AltR:
     if state.isPlaylistView() and state.playlistContentsIdx < 0:
       execCmd(state, "rename_playlist")
@@ -2131,14 +2138,13 @@ proc handleMainKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           state.queueCursor = 0
           discard daemonSimpleCmd(DaemonService(state.svc), "next")
           state.markDirty(cePlayState)
-    if state.selectedIndices.len > 0:
+    elif state.selectedIndices.len > 0:
       state.playSelected()
     elif state.filteredCount() > 0 and state.selectIndex >= 0:
       state.playSelected()
   of iw.Key.S:
     if guardDebounce(state): return
     state.player.stop()
-    state.status = psStopped
   of iw.Key.H:
     if state.isPlaylistView():
       if state.playlistContentsIdx >= 0:
@@ -2275,9 +2281,7 @@ proc handleMainKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     restoreTerminal()
     quit(0)
   of iw.Key.Escape:
-    if state.dashboardVisible:
-      state.dashboardVisible = false
-    elif state.addingToPlaylistId > 0:
+    if state.addingToPlaylistId > 0:
       state.addingToPlaylistId = 0
       state.addingToPlaylistName = ""
       state.selectMode = false
@@ -2860,28 +2864,6 @@ proc processEvents(state: var AppState) =
               state.overlay.cursor = 0
             state.markDirty(ceSearchResults)
           except: discard
-      elif ev.strVal == "sp_feed":
-        if ev.metadata.hasKey("connected") and ev.metadata["connected"] == "true":
-          state.spConnected = true
-          state.spFeedRecentlyPlayed = @[]
-          state.spFeedTopTracks = @[]
-          state.spFeedNewReleases = @[]
-          state.spFeedPlaylists = @[]
-          try:
-            for item in parseJson(ev.metadata.getOrDefault("recently_played", "[]")):
-              state.spFeedRecentlyPlayed.add((id: item{"id"}.getStr(""), name: item{"name"}.getStr(""), artist: item{"artist"}.getStr(""), album: item{"album"}.getStr(""), url: item{"url"}.getStr(""), playedAt: item{"played_at"}.getStr("")))
-            for item in parseJson(ev.metadata.getOrDefault("top_tracks", "[]")):
-              state.spFeedTopTracks.add((id: item{"id"}.getStr(""), name: item{"name"}.getStr(""), artist: item{"artist"}.getStr(""), album: item{"album"}.getStr(""), url: item{"url"}.getStr("")))
-            for item in parseJson(ev.metadata.getOrDefault("new_releases", "[]")):
-              state.spFeedNewReleases.add((id: item{"id"}.getStr(""), name: item{"name"}.getStr(""), artist: item{"artist"}.getStr(""), album: item{"album"}.getStr(""), url: item{"url"}.getStr("")))
-            for item in parseJson(ev.metadata.getOrDefault("playlists", "[]")):
-              state.spFeedPlaylists.add((id: item{"id"}.getStr(""), name: item{"name"}.getStr("")))
-          except: discard
-          state.spFeedFetchedAt = epochTime()
-        else:
-          state.spConnected = false
-        state.spFeedFetching = false
-        state.markDirty(ceSettings)
       elif ev.strVal == "scan_done" and state.player.backendType == abtDaemon and state.libraryNeedsScan:
         state.libraryNeedsScan = false
         let cli = DaemonService(state.svc)
@@ -3071,6 +3053,7 @@ proc runTui(args: seq[string]) =
           ctx.state.startupPhase = spReady
           ctx.state.needsRedraw = true
         else: discard
+      retryLoadLibrary(ctx.state)
       processEvents(ctx.state)
       persistConfigIfDirty(ctx.state)
       # Daemon reconnection watchdog — non-blocking async state sync

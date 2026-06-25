@@ -368,53 +368,6 @@ method render*(node: NowPlayingView, ctx: var nw.Context[State]) =
     elif ctx.state.coverImageId >= 0:
       deleteImage(ctx.state.coverImageId)
       ctx.state.coverImageId = -1
-  # Dashboard overlay
-  if state.dashboardVisible:
-    let dashX = 2
-    let dashY = line + 1
-    let dashW = min(60, w - 4)
-    let hello = if state.totalTracksPlayed > 0:
-      let h = int64(epochTime()).fromUnix().inZone(local()).hour
-      if h < 12: "Good morning"
-      elif h < 17: "Good afternoon"
-      else: "Good evening"
-    else: "Welcome"
-    writeStr(ctx.tb, dashX, dashY, hello & ", " & getEnv("USER", "friend"), theme.mauve)
-    line.inc
-    writeStr(ctx.tb, dashX, dashY + 1, "\u2500".repeat(min(dashW - 2, 30)), theme.surface2)
-    line.inc
-    line.inc
-    var statsStr = "Tracks played: " & $state.totalTracksPlayed
-    if state.totalTracksPlayed > 0:
-      let totalMin = int(state.totalPlayTime / 60)
-      statsStr &= "  |  Listening time: " & $(totalMin div 60) & "h " & $(totalMin mod 60) & "m"
-      statsStr &= "  |  This session: " & $state.sessionTracksPlayed
-    writeStr(ctx.tb, dashX, dashY + 2, statsStr, theme.subtext0)
-    line.inc
-    line.inc
-    if state.spConnected and state.spFeedRecentlyPlayed.len > 0:
-      writeStr(ctx.tb, dashX, line, "Recently Played", theme.sky)
-      line.inc
-      for i, t in state.spFeedRecentlyPlayed:
-        if i >= 5: break
-        writeStr(ctx.tb, dashX + 2, line, t.artist & " — " & t.name, theme.text)
-        line.inc
-      if state.spFeedTopTracks.len > 0:
-        line.inc
-        writeStr(ctx.tb, dashX, line, "Top Tracks", theme.sky)
-        line.inc
-        for i, t in state.spFeedTopTracks:
-          if i >= 5: break
-          writeStr(ctx.tb, dashX + 2, line, t.artist & " — " & t.name, theme.text)
-          line.inc
-    elif state.spFeedFetching:
-      writeStr(ctx.tb, dashX, line, "Loading Spotify feed...", theme.overlay0)
-      line.inc
-    else:
-      writeStr(ctx.tb, dashX, line, "Link Spotify in Settings \u2192 Spotify for personalized feed", theme.overlay0)
-      line.inc
-    line.inc
-    writeStr(ctx.tb, dashX, line, "Press Alt+D or Esc to close", theme.overlay0)
   # Lyrics — synced (togglable)
   if state.lyricsVisible and state.currentLyrics.lines.len > 0:
     let maxLyricLines = 6

@@ -18,7 +18,7 @@ type
     quitBg*, quitDaemon*, changeTheme*, savePlaylist*: string
     createPlaylist*, deletePlaylist*, renamePlaylist*: string
     toggleFav*, importM3u*, rescanLib*, sleepTimer*: string
-    ytSearch*, spUrl*, spSearch*, dashboard*, spFeed*: string
+    ytSearch*, spUrl*, spSearch*: string
     ytRecommended*, fuzzyFinder*, enqueue*, stopPlayback*: string
     seekForward*, seekBackward*, navUp*, navDown*: string
     enterFilter*, selectAll*, removeSelected*, addToPlaylist*: string
@@ -39,7 +39,7 @@ proc nerdFontIcons*(): IconPack =
     quitBg: "\uF04C", quitDaemon: "\uF04D", changeTheme: "\uF1FC", savePlaylist: "\uF019",
     createPlaylist: "\uF067", deletePlaylist: "\uF1F8", renamePlaylist: "\uF044",
     toggleFav: "\uF004", importM3u: "\uF07C", rescanLib: "\uF021", sleepTimer: "\uF017",
-    ytSearch: "\uF002", spUrl: "\uF0C1", spSearch: "\uF002", dashboard: "\uF0E4", spFeed: "\uF021",
+    ytSearch: "\uF002", spUrl: "\uF0C1", spSearch: "\uF002",
     ytRecommended: "\uF144", fuzzyFinder: "\uF002", enqueue: "\uF0C9", stopPlayback: "\uF04D",
     seekForward: "\uF051", seekBackward: "\uF048", navUp: "\uF062", navDown: "\uF063",
     enterFilter: "\uF0B0", selectAll: "\uF00C", removeSelected: "\uF00D", addToPlaylist: "\uF0CA"
@@ -61,7 +61,7 @@ proc emojiIcons*(): IconPack =
     quitBg: "\u23F8", quitDaemon: "\u23F9", changeTheme: "\U0001F3A8", savePlaylist: "\U0001F4BE",
     createPlaylist: "\u2795", deletePlaylist: "\u274C", renamePlaylist: "\U0001F4DD",
     toggleFav: "\u2B50", importM3u: "\U0001F4C2", rescanLib: "\U0001F504", sleepTimer: "\u23F0",
-    ytSearch: "\U0001F50D", spUrl: "\U0001F517", spSearch: "\U0001F50D", dashboard: "\U0001F4CA", spFeed: "\U0001F504",
+    ytSearch: "\U0001F50D", spUrl: "\U0001F517", spSearch: "\U0001F50D",
     ytRecommended: "\U0001F3B6", fuzzyFinder: "\U0001F50D", enqueue: "\U0001F3B6", stopPlayback: "\u25A0",
     seekForward: "\u23E9", seekBackward: "\u23EA", navUp: "\u2B06", navDown: "\u2B07",
     enterFilter: "\U0001F50D", selectAll: "\u2714", removeSelected: "\u274C", addToPlaylist: "\U0001F4CB"
@@ -198,8 +198,6 @@ proc commandIcon*(cmdId: string, ic: IconPack): string =
   of "yt_search": ic.ytSearch
   of "spotify_url": ic.spUrl
   of "spotify_search": ic.spSearch
-  of "dashboard": ic.dashboard
-  of "sp_fetch_feed": ic.spFeed
   of "yt_recommended": ic.ytRecommended
   of "fuzzy_finder": ic.fuzzyFinder
   of "queue_picker": ic.enqueue
