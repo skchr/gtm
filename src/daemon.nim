@@ -1924,13 +1924,15 @@ proc runPulseWorker(d: ptr Daemon) {.thread.} =
             d[].pendingPlayAfterYtLoad = false
           release(d.lock)
       of pakFetchLyrics:
-        if a.strVal2.len == 0 and a.strVal3.len == 0:
-          a.strVal2 = d[].currentTrackTitle
+        var lrcArtist = a.strVal2
+        var lrcTitle = a.strVal3
+        if lrcArtist.len == 0 and lrcTitle.len == 0:
+          lrcArtist = d[].currentTrackTitle
           let dashPos = d[].currentTrackTitle.find(" - ")
           if dashPos > 0:
-            a.strVal3 = d[].currentTrackTitle[0..<dashPos].strip()
-            a.strVal2 = d[].currentTrackTitle[dashPos+3..^1].strip()
-        let lrc = resolveLyrics(a.strVal, a.strVal2, a.strVal3, a.strVal4, a.floatVal)
+            lrcTitle = d[].currentTrackTitle[0..<dashPos].strip()
+            lrcArtist = d[].currentTrackTitle[dashPos+3..^1].strip()
+        let lrc = resolveLyrics(a.strVal, lrcArtist, lrcTitle, a.strVal4, a.floatVal)
         var lrcArr = newJArray()
         for ln in lrc.lines:
           lrcArr.add(%*{"ts": %ln.timestamp, "text": %ln.text})

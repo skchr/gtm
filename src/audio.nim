@@ -42,8 +42,12 @@ type
   AudioEvent* = object
     kind*: AudioEventKind
     floatVal*: float
+    floatVal2*: float
     intVal*: int
     strVal*: string
+    strVal2*: string
+    strVal3*: string
+    strVal4*: string
     version*: int
     metadata*: Table[string, string]
 
