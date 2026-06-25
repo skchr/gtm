@@ -268,14 +268,11 @@ proc loadLibrary(state: var AppState) =
         state.loadLibraryFromDaemon(resp)
         state.libraryLoading = false
         return
-      # Daemon library empty: trigger server-side scan, then re-query
+      # Daemon library empty: trigger server-side scan, then wait for scan_done event
       if dirExists(musicDir):
         discard cli.scanDir(musicDir)
-        let resp2 = cli.getLibrary()
-        if resp2.hasKey("tracks") and resp2["tracks"].len > 0:
-          state.loadLibraryFromDaemon(resp2)
-          state.libraryLoading = false
-          return
+        state.libraryNeedsScan = true
+        return
   # Fallback: scan local files
   state.scanLocalDir(musicDir)
   state.rebuildItems()
@@ -766,7 +763,7 @@ proc initCommands(state: var AppState) =
     "Move selected tracks to trash", "\u274C", @["AltX"],
     proc(s: var AppState) = s.deleteConfirm())
   state.registerCommand("add_to_playlist", "Add to Playlist...",
-    "Add selected items to playlist", "\U0001F4CB", @["AltA"],
+    "Add selected items to playlist", "\U0001F4CB", @["AltP"],
     proc(s: var AppState) = s.addToPlaylist())
   state.registerCommand("tab_now_playing", "Now Playing",
     "Switch to Now Playing tab", "\U0001F3B5", @["1"],
@@ -2002,6 +1999,8 @@ proc handleMainKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
   case key
   of iw.Key.Colon:
     state.overlay = OverlayState(kind: okCommandPalette, query: "")
+    for i in 0..<state.commands.len:
+      state.overlay.results.add(i)
   of iw.Key.Space:
     if guardDebounce(state): return
     if state.selectedIndices.len > 0:
@@ -2087,6 +2086,8 @@ proc handleMainKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         state.setFeedback("Remove item from queue? (Y/N)")
     elif state.isPlaylistView() and state.playlistContentsIdx < 0:
       execCmd(state, "delete_playlist")
+    else:
+      execCmd(state, "dashboard")
   of iw.Key.AltR:
     if state.isPlaylistView() and state.playlistContentsIdx < 0:
       execCmd(state, "rename_playlist")
@@ -2291,7 +2292,7 @@ proc handleMainKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     if state.keyDispatch.hasKey(key):
       for idx in state.keyDispatch[key]:
         if idx >= 0 and idx < state.commands.len:
-          execCmd(state, state.commands[idx].name)
+          execCmd(state, state.commands[idx].id)
 
 proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
   if key != iw.Key.None:
@@ -2881,6 +2882,16 @@ proc processEvents(state: var AppState) =
           state.spConnected = false
         state.spFeedFetching = false
         state.markDirty(ceSettings)
+      elif ev.strVal == "scan_done" and state.player.backendType == abtDaemon and state.libraryNeedsScan:
+        state.libraryNeedsScan = false
+        let cli = DaemonService(state.svc)
+        if cli.isConnected:
+          let resp = cli.getLibrary()
+          if resp.hasKey("tracks") and resp["tracks"].len > 0:
+            state.loadLibraryFromDaemon(resp)
+        state.libraryLoading = false
+        state.rebuildItems()
+        state.markDirty(ceSearchResults)
     else: discard
   if state.player.timePos != state.timePos and state.status == psPlaying:
     state.timePos = state.player.timePos

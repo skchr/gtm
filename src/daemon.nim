@@ -2092,6 +2092,7 @@ proc runPulseWorker(d: ptr Daemon) {.thread.} =
 
 
 proc handleAutoAdvance(d: Daemon) =
+  d.autoAdvancing = true
   ## Called when a track ends. Pops next from queue and queues a pakLoadFile action.
   acquire(d.lock)
   var nextPath = ""

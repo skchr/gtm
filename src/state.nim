@@ -490,6 +490,7 @@ type
     lyricsLineIdx*: int
     lyricsVisible*: bool
     libraryLoading*: bool
+    libraryNeedsScan*: bool
 
 const
   GTM_VERSION* {.strdefine.} = staticExec("git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//'").strip

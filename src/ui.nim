@@ -588,8 +588,6 @@ method render*(node: LibraryContentView, ctx: var nw.Context[State]) =
       writeStr(ctx.tb, 1, line, "  No active downloads", theme.subtext0)
       line.inc
     fillBg(ctx.tb, 0, line, w - 1, h - 1, theme.base)
-    if anyItems:
-      ctx.state.markDirty(ceDownloadProgress)
     return
 
   if count == 0:
