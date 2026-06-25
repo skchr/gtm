@@ -114,6 +114,7 @@ type
     sock*: Socket
     buf*: string
     wireVersion*: int
+    lastVersion*: int
 
   Daemon* = ref object
     # Thread 2 (IPCHandler) exclusive — no locking needed
@@ -133,6 +134,9 @@ type
     pendingActions: seq[PulseAction]
     events: seq[string]              # serialized JSON events for T2 to broadcast
     binaryEvents: seq[seq[byte]]     # serialized binary events for v2+ clients
+    eventHistory: seq[string]        # rolling buffer of JSON event frames for reconnection
+    binaryHistory: seq[seq[byte]]    # matching binary event frames
+    historyCapacity: int             # max entries to retain (500)
 
     currentTrackPath: string
     currentTrackTitle: string
@@ -1833,6 +1837,30 @@ proc trySendBinary(client: Socket, data: seq[byte]): bool =
         return false
   true
 
+proc addToHistory(d: var Daemon, jsonEv: string, binEv: seq[byte]) =
+  d.eventHistory.add(jsonEv)
+  d.binaryHistory.add(binEv)
+  if d.eventHistory.len > d.historyCapacity:
+    let excess = d.eventHistory.len - d.historyCapacity
+    d.eventHistory = d.eventHistory[excess .. ^1]
+    d.binaryHistory = d.binaryHistory[excess .. ^1]
+
+proc replayHistory(c: ClientState, d: Daemon) =
+  if c.lastVersion <= 0 or d.eventHistory.len == 0: return
+  let reqVersion = c.lastVersion + 1
+  let curVersion = d.stateVersion
+  if reqVersion > curVersion: return
+  let histLen = d.eventHistory.len
+  let skip = curVersion - reqVersion
+  if skip >= histLen: return
+  let startIdx = histLen - skip - 1
+  for i in startIdx ..< histLen:
+    if c.wireVersion >= 2:
+      if i < d.binaryHistory.len:
+        discard trySendBinary(c.sock, d.binaryHistory[i])
+    else:
+      discard trySend(c.sock, d.eventHistory[i])
+
 proc runPulseWorker(d: ptr Daemon) {.thread.} =
   when not defined(macosx):
     discard prctl(15.cint, "pulse")
@@ -2030,9 +2058,11 @@ proc runPulseWorker(d: ptr Daemon) {.thread.} =
     if audioEvents.len > 0:
       d.stateVersion.inc
       let evJson = %*{"events": serializeEvents(audioEvents, d[])}
-      d.events.add($evJson & "\n")
+      let evJsonStr = $evJson & "\n"
+      d.events.add(evJsonStr)
       let binData = wire.serializeEvents(audioEvents)
       d.binaryEvents.add(binData)
+      addToHistory(d[], evJsonStr, binData)
 
     # Poll async yt-dlp resolution (non-blocking across ticks)
     if d[].pwResolveActive and not d[].pwResolveProcess.running():
@@ -2231,7 +2261,10 @@ proc runDaemon*() =
     lastConsumedFromQueue: @[],
     lastTrackDuration: 0.0,
     spatialWidth: 1.0,
-    stateVersion: 0
+    stateVersion: 0,
+    eventHistory: @[],
+    binaryHistory: @[],
+    historyCapacity: 500
   )
   initMpris(daemon)
   let libPath = dataDir() & "/gtm.db"
@@ -2375,6 +2408,8 @@ proc runDaemon*() =
           let cmdJson = parseJson(line)
           if cmdJson.hasKey("wire") and cmdJson["wire"].getInt(1) >= 2:
             daemon.clients[ci].wireVersion = 2
+          if cmdJson.hasKey("lastVersion"):
+            daemon.clients[ci].lastVersion = cmdJson["lastVersion"].getInt(0)
           let cmd = parseDaemonCommand(line)
           let resp = try:
             executeCommand(daemon, cmd)
@@ -2389,6 +2424,9 @@ proc runDaemon*() =
             daemon.removeClient(ci)
             clientRemoved = true
             break
+          # Replay missed events for recently-reconnected clients
+          if daemon.clients[ci].lastVersion > 0:
+            replayHistory(daemon.clients[ci], daemon)
           if not daemon.running: break
         if not clientRemoved:
           ci.inc

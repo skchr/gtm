@@ -48,6 +48,7 @@ type
     extrapolating: bool
     # Wire protocol negotiation
     wireNegotiated: bool
+    lastVersion*: int
     # RTT tracking
     rttEstimate*: float
     lastSendTime: float
@@ -92,6 +93,7 @@ proc connect*(s: DaemonSession): bool =
     var flags = posix.fcntl(s.sock.getFd, posix.F_GETFL, 0)
     discard posix.fcntl(s.sock.getFd, posix.F_SETFL, flags or posix.O_NONBLOCK)
     s.connected = true
+    s.wireNegotiated = false
     return true
   except:
     s.sock = nil
@@ -214,6 +216,8 @@ proc drainEvents*(s: DaemonSession): seq[AudioEvent] =
         if json.hasKey("events"):
           let events = drainEventLinesFromJson(json, s)
           for ev in events:
+            if ev.version > s.lastVersion:
+              s.lastVersion = ev.version
             if ev.kind == evPositionChanged:
               s.applyPositionCorrection(ev.floatVal)
             elif ev.kind == evPlaybackStarted:
@@ -262,6 +266,8 @@ proc drainEvents*(s: DaemonSession): seq[AudioEvent] =
           s.buf = s.buf[totalLen..^1]
           let events = deserializeEvents(cast[seq[byte]](binData))
           for ev in events:
+            if ev.version > s.lastVersion:
+              s.lastVersion = ev.version
             if ev.kind == evPositionChanged:
               s.applyPositionCorrection(ev.floatVal)
             elif ev.kind == evPlaybackStarted:
@@ -297,6 +303,8 @@ proc send*(s: DaemonSession, cmd: JsonNode) =
   try:
     if not s.wireNegotiated:
       cmd["wire"] = %2
+      if s.lastVersion > 0:
+        cmd["lastVersion"] = %s.lastVersion
       s.wireNegotiated = true
     cmd["seq"] = %s.nextSeq
     s.nextSeq.inc
@@ -309,6 +317,11 @@ proc send*(s: DaemonSession, cmd: JsonNode) =
 proc request*(s: DaemonSession, cmd: JsonNode): JsonNode =
   if s == nil or s.sock == nil or not s.connected: return %*{"ok": false, "error": "not connected"}
   try:
+    if not s.wireNegotiated:
+      cmd["wire"] = %2
+      if s.lastVersion > 0:
+        cmd["lastVersion"] = %s.lastVersion
+      s.wireNegotiated = true
     let seqNo = s.nextSeq
     s.nextSeq.inc
     cmd["seq"] = %seqNo
@@ -470,5 +483,5 @@ proc newDaemonSession*(): DaemonSession =
     working: true, sleepTimerRemaining: 0,
     ipcTimeoutSec: 3.0, pingMissed: 0, reconnectCooldown: 0,
     extrapolating: false, clockSkew: 1.0, wireNegotiated: false,
-    rttEstimate: 0.0, recoveryWindow: 0.5
+    lastVersion: 0, rttEstimate: 0.0, recoveryWindow: 0.5
   )
