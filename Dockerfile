@@ -3,8 +3,8 @@
 # Push:    docker push ghcr.io/skchr/gtm-android-builder:latest
 # Use:     docker run --rm -v $PWD:/src ghcr.io/skchr/gtm-android-builder:latest \
 #            nim c -d:release -d:android \
-#              --gcc.exe:aarch64-linux-android21-clang \
-#              --gcc.linkerexe:aarch64-linux-android21-clang \
+#              --gcc.exe:aarch64-linux-android28-clang \
+#              --gcc.linkerexe:aarch64-linux-android28-clang \
 #            src/gtmd.nim
 
 FROM ubuntu:22.04
@@ -44,10 +44,10 @@ RUN curl -sL https://ffmpeg.org/releases/ffmpeg-7.1.tar.gz -o /tmp/ffmpeg.tar.gz
        --enable-cross-compile \
        --prefix=/opt/ffmpeg-android \
        --target-os=android --arch=aarch64 \
-       --cc=aarch64-linux-android21-clang \
-       --cxx=aarch64-linux-android21-clang++ \
+       --cc=aarch64-linux-android28-clang \
+       --cxx=aarch64-linux-android28-clang++ \
        --ar=llvm-ar --ranlib=llvm-ranlib --strip=llvm-strip \
-       --ld=aarch64-linux-android21-clang \
+       --ld=aarch64-linux-android28-clang \
        --disable-programs --disable-doc \
        --disable-encoders --disable-muxers --disable-devices --disable-filters \
        --disable-bsfs --disable-postproc --disable-network \
@@ -59,9 +59,9 @@ RUN curl -sL https://ffmpeg.org/releases/ffmpeg-7.1.tar.gz -o /tmp/ffmpeg.tar.gz
     && cd / && rm -rf /tmp/ffmpeg*
 
 ENV PKG_CONFIG_PATH=/opt/ffmpeg-android/lib/pkgconfig
-ENV CC=aarch64-linux-android21-clang
-ENV CXX=aarch64-linux-android21-clang++
-ENV LD=aarch64-linux-android21-clang
+ENV CC=aarch64-linux-android28-clang
+ENV CXX=aarch64-linux-android28-clang++
+ENV LD=aarch64-linux-android28-clang
 ENV AR=llvm-ar
 ENV RANLIB=llvm-ranlib
 ENV STRIP=llvm-strip

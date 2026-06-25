@@ -7,6 +7,8 @@ when defined(android):
     let sysrootInc = ndkDir / "toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include"
     if dirExists(sysrootInc):
       switch("passC", "-I" & sysrootInc)
+  switch("passC", "-D_GNU_SOURCE")
+  switch("passC", "-ferror-limit=20")
 
 switch("define", "gtm")
 switch("outdir", "bin")

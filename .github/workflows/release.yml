@@ -95,16 +95,16 @@ jobs:
             sh -c "mkdir -p /src/bin && \
               cd /src && \
               nim c -d:release -d:staticFfmpeg -d:android \
-                --gcc.exe:aarch64-linux-android21-clang \
-                --gcc.linkerexe:aarch64-linux-android21-clang \
-                --clang.exe:aarch64-linux-android21-clang \
-                --clang.linkerexe:aarch64-linux-android21-clang \
+                --gcc.exe:aarch64-linux-android28-clang \
+                --gcc.linkerexe:aarch64-linux-android28-clang \
+                --clang.exe:aarch64-linux-android28-clang \
+                --clang.linkerexe:aarch64-linux-android28-clang \
                 --nimcache:/tmp/nimcache src/gtmd.nim && \
               nim c -d:release -d:staticFfmpeg -d:android \
-                --gcc.exe:aarch64-linux-android21-clang \
-                --gcc.linkerexe:aarch64-linux-android21-clang \
-                --clang.exe:aarch64-linux-android21-clang \
-                --clang.linkerexe:aarch64-linux-android21-clang \
+                --gcc.exe:aarch64-linux-android28-clang \
+                --gcc.linkerexe:aarch64-linux-android28-clang \
+                --clang.exe:aarch64-linux-android28-clang \
+                --clang.linkerexe:aarch64-linux-android28-clang \
                 --nimcache:/tmp/nimcache src/gtm.nim"
 
       - name: Run termux-elf-cleaner (Android)
