@@ -357,7 +357,11 @@ static void* decode_thread(void* arg) {
   int conv_cap = 0;
   uint8_t* out_planes[1] = { NULL };
 
+#ifdef __ANDROID__
+  aaudio_open_device(ctx);
+#else
   alsa_open_device(ctx);
+#endif
 
   while (!ctx->thread_stop) {
     if (!ctx->playing || ctx->paused) {
@@ -846,11 +850,13 @@ static void* mixer_thread(void* arg) {
   float* mixbuf = NULL; int mixcap = 0;
   float* prime_buf = NULL; int prime_cap = 0; int prime_filled = 0;
 
-  if (!mixer_alsa_open(mx)) {
 #ifdef __ANDROID__
-    if (!mixer_aaudio_open(mx))
+  if (!mixer_aaudio_open(mx))
+#else
+  if (!mixer_alsa_open(mx))
 #endif
-    fprintf(stderr, "[ffmpeg] mixer_thread: ALSA/Android audio not available, no audio output\n");
+  {
+    fprintf(stderr, "[ffmpeg] mixer_thread: audio device not available, no audio output\n");
   }
 
   while (!mx->thread_stop) {
