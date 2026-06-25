@@ -82,13 +82,16 @@ jobs:
           nim c -d:release -d:staticFfmpeg --nimcache:/tmp/nimcache src/gtmd.nim
           nim c -d:release -d:staticFfmpeg --nimcache:/tmp/nimcache src/gtm.nim
 
+      - name: Build Android cross-compile Docker image
+        if: matrix.os-label == 'android'
+        run: |
+          docker build -t gtm-android-builder .
+
       - name: Build static binaries (Android via Docker)
         if: matrix.os-label == 'android'
         run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-          docker pull ghcr.io/skchr/gtm-android-builder:latest
           docker run --rm -v $PWD:/src -v /tmp/nimcache:/tmp/nimcache \
-            ghcr.io/skchr/gtm-android-builder:latest \
+            gtm-android-builder \
             sh -c "mkdir -p /src/bin && \
               cd /src && \
               nim c -d:release -d:staticFfmpeg -d:android \

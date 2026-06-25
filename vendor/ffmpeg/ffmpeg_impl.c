@@ -1,6 +1,14 @@
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1
+#else
+#define _GNU_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <stdint.h>
@@ -1232,6 +1240,8 @@ void ffmpeg_mixer_pause(MixerCtx* mx) {
     mx->priming = 0;
   }
 }
+
+void ffmpeg_mixer_unload(MixerCtx* mx);
 
 void ffmpeg_mixer_stop(MixerCtx* mx) {
   ffmpeg_mixer_unload(mx);
