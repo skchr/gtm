@@ -80,6 +80,15 @@ proc buildBinary(src, label: string, version: string, musl: bool = false, androi
     flags &= " -d:staticFfmpeg"
   sh("nim c " & flags & " " & src)
 
+  if android:
+    let binName = "bin/" & label
+    if fileExists("termux-elf-cleaner"):
+      sh("termux-elf-cleaner " & binName)
+    elif fileExists("/usr/bin/termux-elf-cleaner"):
+      sh("/usr/bin/termux-elf-cleaner " & binName)
+    else:
+      echo "  ! termux-elf-cleaner not found — skipping ELF post-processing for " & binName
+
   echo ""
 
   echo "-- Git Hooks --"

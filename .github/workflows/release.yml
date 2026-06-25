@@ -100,6 +100,20 @@ jobs:
                 --gcc.linkerexe:aarch64-linux-android21-clang \
                 --nimcache:/tmp/nimcache src/gtm.nim"
 
+      - name: Run termux-elf-cleaner (Android)
+        if: matrix.os-label == 'android'
+        run: |
+          set -eu
+          ARCH=$(uname -m)
+          case "$ARCH" in
+            x86_64|amd64) TEC_ARCH="x86_64" ;;
+            aarch64|arm64) TEC_ARCH="aarch64" ;;
+            *) echo "Unknown arch $ARCH"; exit 1 ;;
+          esac
+          curl -sL "https://github.com/termux/termux-elf-cleaner/releases/latest/download/termux-elf-cleaner-linux-${TEC_ARCH}.tar.gz" -o /tmp/tec.tar.gz
+          tar xzf /tmp/tec.tar.gz -C /tmp
+          /tmp/termux-elf-cleaner bin/gtm bin/gtmd
+
       - name: Verify static binary (Linux)
         if: runner.os == 'Linux' && matrix.os-label != 'android'
         run: |

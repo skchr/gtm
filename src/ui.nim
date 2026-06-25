@@ -101,21 +101,61 @@ const
   minGridW = 40
   minGridH = 10
 
-  SYS_KERNEL* = staticExec("uname -srmo 2>/dev/null").strip
-  SYS_OS* = staticExec("cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d= -f2 | tr -d '\"'").strip
-  SYS_CPU* = staticExec("grep 'model name' /proc/cpuinfo 2>/dev/null | head -1 | cut -d: -f2 | sed 's/^ *//'").strip
-  SYS_CPU_COUNT* = staticExec("grep -c ^processor /proc/cpuinfo 2>/dev/null").strip
-  SYS_MEM_TOTAL* = staticExec("grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2/1024/1024}'").strip
-  SYS_MEM_AVAIL* = staticExec("grep MemAvailable /proc/meminfo 2>/dev/null | awk '{print $2/1024/1024}'").strip
-  SYS_TERM* = staticExec("echo $TERM 2>/dev/null").strip
-  SYS_FFMPEG* = staticExec("ffmpeg -version 2>/dev/null | head -1 | sed 's/.*ffmpeg version //i; s/ .*//'").strip
-  SYS_GCC_VER* = staticExec("gcc --version 2>/dev/null | head -1 | sed 's/.* //'").strip
-  SYS_NIM_VER* = staticExec("nim --version 2>/dev/null | head -1 | sed 's/.*Version //; s/ .*//'").strip
-  SYS_YTDLP* = staticExec("yt-dlp --version 2>/dev/null").strip
-  SYS_NODE* = staticExec("node --version 2>/dev/null").strip
-  SYS_BUN* = staticExec("bun --version 2>/dev/null").strip
-  SYS_DENO* = staticExec("deno --version 2>/dev/null | head -1").strip
   SYS_GIT_HASH* = staticExec("git rev-parse --short=7 HEAD 2>/dev/null").strip
+
+proc sysCmd(cmd: string): string =
+  try:
+    let (outp, _) = execCmdEx(cmd)
+    outp.strip
+  except:
+    ""
+
+type SysInfo = object
+  kernel, os, cpu, cpuCount, memTotal, memAvail, term: string
+  ffmpeg, gcc, nim, ytdlp, node, bun, deno: string
+
+var sysInfoInitialized: bool
+var sysInfo: SysInfo
+
+proc ensureSysInfo =
+  if not sysInfoInitialized:
+    sysInfoInitialized = true
+    sysInfo = SysInfo(
+      kernel: sysCmd("uname -srmo 2>/dev/null"),
+      os: block:
+        let v = sysCmd("cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d= -f2 | tr -d '\"'")
+        if v.len > 0: v
+        else:
+          let av = sysCmd("grep ro.build.version.release /system/build.prop 2>/dev/null | cut -d= -f2 | head -1")
+          if av.len > 0: "Android " & av else: "",
+      cpu: sysCmd("grep 'model name' /proc/cpuinfo 2>/dev/null | head -1 | cut -d: -f2 | sed 's/^ *//'"),
+      cpuCount: sysCmd("grep -c ^processor /proc/cpuinfo 2>/dev/null"),
+      memTotal: sysCmd("grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2/1024/1024}'"),
+      memAvail: sysCmd("grep MemAvailable /proc/meminfo 2>/dev/null | awk '{print $2/1024/1024}'"),
+      term: getEnv("TERM", ""),
+      ffmpeg: sysCmd("ffmpeg -version 2>/dev/null | head -1 | sed 's/.*ffmpeg version //i; s/ .*//'"),
+      gcc: sysCmd("gcc --version 2>/dev/null | head -1 | sed 's/.* //'"),
+      nim: sysCmd("nim --version 2>/dev/null | head -1 | sed 's/.*Version //; s/ .*//'"),
+      ytdlp: sysCmd("yt-dlp --version 2>/dev/null"),
+      node: sysCmd("node --version 2>/dev/null"),
+      bun: sysCmd("bun --version 2>/dev/null"),
+      deno: sysCmd("deno --version 2>/dev/null | head -1"),
+    )
+
+proc SYS_KERNEL*: string = (ensureSysInfo(); sysInfo.kernel)
+proc SYS_OS*: string = (ensureSysInfo(); sysInfo.os)
+proc SYS_CPU*: string = (ensureSysInfo(); sysInfo.cpu)
+proc SYS_CPU_COUNT*: string = (ensureSysInfo(); sysInfo.cpuCount)
+proc SYS_MEM_TOTAL*: string = (ensureSysInfo(); sysInfo.memTotal)
+proc SYS_MEM_AVAIL*: string = (ensureSysInfo(); sysInfo.memAvail)
+proc SYS_TERM*: string = (ensureSysInfo(); sysInfo.term)
+proc SYS_FFMPEG*: string = (ensureSysInfo(); sysInfo.ffmpeg)
+proc SYS_GCC_VER*: string = (ensureSysInfo(); sysInfo.gcc)
+proc SYS_NIM_VER*: string = (ensureSysInfo(); sysInfo.nim)
+proc SYS_YTDLP*: string = (ensureSysInfo(); sysInfo.ytdlp)
+proc SYS_NODE*: string = (ensureSysInfo(); sysInfo.node)
+proc SYS_BUN*: string = (ensureSysInfo(); sysInfo.bun)
+proc SYS_DENO*: string = (ensureSysInfo(); sysInfo.deno)
 
 type TrackColumns = object
   xTitle, wTitle: int
@@ -1629,33 +1669,44 @@ method render*(node: AboutOverlay, ctx: var nw.Context[State]) =
   sep()
 
   # OS info
-  if SYS_OS.len > 0:
-    line("OS", SYS_OS)
-  if SYS_KERNEL.len > 0:
-    let kernelParts = SYS_KERNEL.split(' ')
-    let kernelShort = if kernelParts.len >= 2: kernelParts[0] & " " & kernelParts[1] else: SYS_KERNEL
+  let sysOs = SYS_OS()
+  if sysOs.len > 0:
+    line("OS", sysOs)
+  let sysKernel = SYS_KERNEL()
+  if sysKernel.len > 0:
+    let kernelParts = sysKernel.split(' ')
+    let kernelShort = if kernelParts.len >= 2: kernelParts[0] & " " & kernelParts[1] else: sysKernel
     line("Kernel", kernelShort)
-  if SYS_CPU.len > 0:
-    line("CPU", SYS_CPU & " (" & SYS_CPU_COUNT & " cores)")
+  let sysCpu = SYS_CPU()
+  let sysCpuCount = SYS_CPU_COUNT()
+  if sysCpu.len > 0:
+    line("CPU", sysCpu & " (" & sysCpuCount & " cores)")
   sep()
 
   # Dependencies
-  if SYS_NIM_VER.len > 0:
-    line("Nim", SYS_NIM_VER)
-  if SYS_GCC_VER.len > 0:
-    line("GCC", SYS_GCC_VER)
-  if SYS_FFMPEG.len > 0:
-    line("FFmpeg", SYS_FFMPEG)
+  let sysNim = SYS_NIM_VER()
+  if sysNim.len > 0:
+    line("Nim", sysNim)
+  let sysGcc = SYS_GCC_VER()
+  if sysGcc.len > 0:
+    line("GCC", sysGcc)
+  let sysFfmpeg = SYS_FFMPEG()
+  if sysFfmpeg.len > 0:
+    line("FFmpeg", sysFfmpeg)
   else:
     line("FFmpeg", "not found", theme.peach)
-  if SYS_YTDLP.len > 0:
-    line("yt-dlp", SYS_YTDLP)
+  let sysYtdlp = SYS_YTDLP()
+  if sysYtdlp.len > 0:
+    line("yt-dlp", sysYtdlp)
   else:
     line("yt-dlp", "not found", theme.peach)
+  let sysNode = SYS_NODE()
+  let sysBun = SYS_BUN()
+  let sysDeno = SYS_DENO()
   var jsRuntimeStr = ""
-  if SYS_NODE.len > 0: jsRuntimeStr.add("node " & SYS_NODE)
-  if SYS_BUN.len > 0: jsRuntimeStr.add(", bun " & SYS_BUN)
-  if SYS_DENO.len > 0: jsRuntimeStr.add(", deno " & SYS_DENO)
+  if sysNode.len > 0: jsRuntimeStr.add("node " & sysNode)
+  if sysBun.len > 0: jsRuntimeStr.add(", bun " & sysBun)
+  if sysDeno.len > 0: jsRuntimeStr.add(", deno " & sysDeno)
   if jsRuntimeStr.len == 0: jsRuntimeStr = "none"
   line("JS runtime", jsRuntimeStr)
   sep()

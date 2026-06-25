@@ -259,7 +259,11 @@ proc loadLibrary(state: var AppState) =
     state.libraryLoading = false
     return
   state.libraryLoading = true
-  let musicDir = getEnv("HOME", "") & "/Music"
+  let musicDir = if existsEnv("TERMUX_VERSION"):
+    let shared = getEnv("HOME", "") & "/storage/shared/Music"
+    if dirExists(shared): shared else: getEnv("HOME", "") & "/Music"
+  else:
+    getEnv("HOME", "") & "/Music"
   if state.player.backendType == abtDaemon:
     let cli = DaemonService(state.svc)
     if cli.isConnected:
