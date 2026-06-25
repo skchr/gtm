@@ -169,6 +169,10 @@ static void aaudio_close_device(FfmpegAudioCtx *ctx) {
         ctx->android_ctx = NULL;
     }
 }
+/* Stubs so unguarded alsa_* call sites compile on Android */
+static int alsa_open_device(FfmpegAudioCtx* ctx) { (void)ctx; return 0; }
+static void alsa_close_device(FfmpegAudioCtx* ctx) { (void)ctx; }
+static int probe_alsa_default(void) { return 0; }
 #else
 static int alsa_open_device(FfmpegAudioCtx* ctx) { (void)ctx; return 0; }
 static void alsa_close_device(FfmpegAudioCtx* ctx) { (void)ctx; }
@@ -811,6 +815,10 @@ static void mixer_aaudio_close(MixerCtx *mx) {
         mx->android_ctx = NULL;
     }
 }
+/* Stubs so unguarded mixer_alsa_* call sites compile on Android */
+static int mixer_alsa_open(MixerCtx* mx) { (void)mx; return 0; }
+static void mixer_alsa_close(MixerCtx* mx) { (void)mx; }
+static void mixer_alsa_reopen(MixerCtx* mx) { (void)mx; }
 #else
 static int mixer_alsa_open(MixerCtx* mx) { (void)mx; return 0; }
 static void mixer_alsa_close(MixerCtx* mx) { (void)mx; }
