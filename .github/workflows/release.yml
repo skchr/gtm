@@ -110,15 +110,8 @@ jobs:
       - name: Run termux-elf-cleaner (Android)
         if: matrix.os-label == 'android'
         run: |
-          set -eu
-          ARCH=$(uname -m)
-          case "$ARCH" in
-            x86_64|amd64) TEC_ARCH="x86_64" ;;
-            aarch64|arm64) TEC_ARCH="aarch64" ;;
-            *) echo "Unknown arch $ARCH"; exit 1 ;;
-          esac
-          curl -sL "https://github.com/termux/termux-elf-cleaner/releases/latest/download/termux-elf-cleaner-linux-${TEC_ARCH}.tar.gz" -o /tmp/tec.tar.gz
-          tar xzf /tmp/tec.tar.gz -C /tmp
+          curl -sL "https://github.com/termux/termux-elf-cleaner/releases/download/v3.0.1/termux-elf-cleaner" -o /tmp/termux-elf-cleaner
+          chmod +x /tmp/termux-elf-cleaner
           /tmp/termux-elf-cleaner bin/gtm bin/gtmd
 
       - name: Verify static binary (Linux)
