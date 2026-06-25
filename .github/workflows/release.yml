@@ -111,7 +111,8 @@ jobs:
         if: matrix.os-label == 'android'
         run: |
           docker run --rm -v $PWD:/src gtm-android-builder \
-            sh -c "apt-get update -qq && apt-get install -y -qq cmake && \
+            sh -c "apt-get update -qq && apt-get install -y -qq python3-pip && \
+              pip3 install cmake --break-system-packages -q && \
               cd /tmp && \
               curl -sL https://github.com/termux/termux-elf-cleaner/archive/refs/tags/v3.0.1.tar.gz -o tec.tar.gz && \
               tar xzf tec.tar.gz && cd termux-elf-cleaner-* && \
