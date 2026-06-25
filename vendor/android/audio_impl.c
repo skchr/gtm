@@ -144,6 +144,7 @@ typedef struct {
     SLObjectItf                outputMixObj;
     SLObjectItf                playerObj;
     SLPlayItf                  player;
+    SLVolumeItf                volumeItf;
     SLAndroidSimpleBufferQueueItf bufQueue;
     int16_t                   *buffers[SLES_NUM_BUFS];
     int                        bufIdx;
@@ -223,12 +224,12 @@ static int slesInit(SlesCtx *ctx, int sampleRate, int channels,
     };
     SLDataSink audioSink = { &outLoc, NULL };
 
-    SLInterfaceID ifaceIds[] = { SL_IID_BUFFERQUEUE };
-    SLboolean ifaceReq[] = { SL_BOOLEAN_TRUE };
+    SLInterfaceID ifaceIds[] = { SL_IID_BUFFERQUEUE, SL_IID_VOLUME };
+    SLboolean ifaceReq[] = { SL_BOOLEAN_TRUE, SL_BOOLEAN_TRUE };
 
     res = (*ctx->engine)->CreateAudioPlayer(ctx->engine, &ctx->playerObj,
                                             &audioSrc, &audioSink,
-                                            1, ifaceIds, ifaceReq);
+                                            2, ifaceIds, ifaceReq);
     if (res != SL_RESULT_SUCCESS) return -1;
     res = (*ctx->playerObj)->Realize(ctx->playerObj, SL_BOOLEAN_FALSE);
     if (res != SL_RESULT_SUCCESS) return -1;
@@ -237,6 +238,10 @@ static int slesInit(SlesCtx *ctx, int sampleRate, int channels,
     res = (*ctx->playerObj)->GetInterface(ctx->playerObj,
                                           SL_IID_ANDROIDSIMPLEBUFFERQUEUE,
                                           &ctx->bufQueue);
+    if (res != SL_RESULT_SUCCESS) return -1;
+    res = (*ctx->playerObj)->GetInterface(ctx->playerObj,
+                                          SL_IID_VOLUME,
+                                          &ctx->volumeItf);
     if (res != SL_RESULT_SUCCESS) return -1;
     res = (*ctx->bufQueue)->RegisterCallback(ctx->bufQueue, slesBufferCb, ctx);
     if (res != SL_RESULT_SUCCESS) return -1;
@@ -373,7 +378,7 @@ int android_audio_set_volume(AndroidAudioCtx *actx, float volume) {
         SlesCtx *ctx = (SlesCtx *)actx;
         SLmillibel mb = (volume <= 0.0f) ? SL_MILLIBEL_MIN :
                          (SLmillibel)(2000.0f * log10f(volume));
-        return ((*ctx->player)->SetVolumeLevel(ctx->player, mb) == SL_RESULT_SUCCESS) ? 0 : -1;
+        return ((*ctx->volumeItf)->SetVolumeLevel(ctx->volumeItf, mb) == SL_RESULT_SUCCESS) ? 0 : -1;
     }
 #ifdef USE_PULSEAUDIO
     else if (actx->backend == ANDROID_AUDIO_BACKEND_PULSE) {
