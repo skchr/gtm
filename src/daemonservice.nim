@@ -136,7 +136,7 @@ proc getLibrary*(svc: DaemonService): JsonNode =
   svc.session.request(%*{"cmd": "get_library"})
 
 proc scanDir*(svc: DaemonService, path: string): JsonNode =
-  svc.session.request(%*{"cmd": "scan_dir", "path": path})
+  svc.session.request(%*{"cmd": "scan", "path": path})
 
 proc deleteTrack*(svc: DaemonService, trackId: int64, permanent: bool = false): JsonNode =
   svc.session.request(%*{"cmd": "delete_track", "track_id": trackId, "permanent": permanent})

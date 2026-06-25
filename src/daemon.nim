@@ -2338,13 +2338,13 @@ proc runDaemon*() =
           daemon.playbackQueue.delete(i)
         else:
           i.inc
-      # Auto-scan download directory for files not yet in library
-      if dirExists(daemon.ytDownloadDir):
-        let existing = scanDirectoryRecursive(daemon.ytDownloadDir)
-        for p in existing:
-          if daemon.lib.findTrackByPath(p) == 0:
-            let (ftitle, fartist) = parseFilenameForMetadata(p)
-            discard daemon.lib.addTrack(p, ftitle, fartist, "", 0.0, 0, 0, "")
+    # Auto-scan download directory for files not yet in library
+    if dirExists(daemon.ytDownloadDir):
+      let existing = scanDirectoryRecursive(daemon.ytDownloadDir)
+      for p in existing:
+        if daemon.lib.findTrackByPath(p) == 0:
+          let (ftitle, fartist) = parseFilenameForMetadata(p)
+          discard daemon.lib.addTrack(p, ftitle, fartist, "", 0.0, 0, 0, "")
   discard daemon.spClient.loadTokens()
   daemon.loadStateFile()
   removeFile(sockPath())
