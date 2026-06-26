@@ -19,9 +19,6 @@
 
 import os, json, strutils, net, osproc, posix, tables
 import audio, state, wire
-{.push warning[GcUnsafe2]:off.}
-
-var debugMode*: bool
 
 proc monotonicTime*(): float =
   ## Wall-clock-independent monotonic time (std::chrono::steady_clock).

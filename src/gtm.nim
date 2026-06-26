@@ -97,6 +97,10 @@ proc loadConfig(state: var AppState) =
         state.transparentBg = json["transparent_bg"].getBool()
       if json.hasKey("overlay_opacity"):
         state.overlayOpacity = json["overlay_opacity"].getFloat()
+      if json.hasKey("border_style"):
+        state.borderStyle = BorderStyle(json["border_style"].getInt(0))
+      if json.hasKey("progress_style"):
+        state.progressStyle = json["progress_style"].getInt(0)
       if json.hasKey("keyboard_mode"):
         state.keyboardMode = if json["keyboard_mode"].getStr("desktop") == "termux": kmTermux else: kmDesktop
       if json.hasKey("on_config_apply"):
@@ -177,6 +181,8 @@ proc saveConfig(state: AppState) =
   j["icon_preference"] = %iconPrefStr
   j["transparent_bg"] = %state.transparentBg
   j["overlay_opacity"] = %state.overlayOpacity
+  j["border_style"] = %state.borderStyle.ord
+  j["progress_style"] = %state.progressStyle
   j["keyboard_mode"] = %(if state.keyboardMode == kmTermux: "termux" else: "desktop")
   # Save footer left/right module sets
   var leftMods = newJArray()
@@ -576,9 +582,10 @@ proc deleteConfirm(state: var AppState) =
 proc restoreTerminal() =
   iw.deinit()
   terminal.showCursor()
-  stdout.write("\e[0m\e[39m\e[49m")
+  stdout.write("\e[0m\e[39m\e[49m\e[?25h")
   eraseScreen()
   setCursorPos(0, 0)
+  stdout.flushFile()
 
 proc cleanQuit(state: var AppState, stopDaemon: bool) =
   state.saveConfig()
@@ -752,10 +759,10 @@ proc initCommands(state: var AppState) =
     "Seek backward 5 seconds", "\u23EA", @[",", "Left"],
     proc(s: var AppState) = s.player.seek(-5.0))
   state.registerCommand("volume_up", "Volume Up",
-    "Increase volume by 5%", "\uF028", @["CtrlU", "ShiftJ", "Plus", "Equals"],
+    "Increase volume by 5%", "\uF028", @["Plus", "Equals"],
     proc(s: var AppState) = s.adjustVolume(5))
   state.registerCommand("volume_down", "Volume Down",
-    "Decrease volume by 5%", "\uF027", @["CtrlD", "ShiftK", "Minus", "Underscore"],
+    "Decrease volume by 5%", "\uF027", @["Minus", "Underscore"],
     proc(s: var AppState) = s.adjustVolume(-5))
   state.registerCommand("toggle_mute", "Toggle Mute",
     "Mute or unmute audio", "\uF026", @["m"],
@@ -985,8 +992,24 @@ proc initCommands(state: var AppState) =
         s.overlay.results.add(i)
         let t = s.libraryTracks[i]
         s.overlay.strResults.add(t.displayName() & "  \u2014  " & t.displayArtist()))
+  state.registerCommand("download_track", "Download Track",
+    "Download the currently selected YouTube or Spotify track", "\u2B07", @["CtrlD"],
+    proc(s: var AppState) =
+      if s.overlay.kind == okYtSearch and s.overlay.ytResults.len > 0 and
+         s.overlay.cursor >= 0 and s.overlay.cursor < s.overlay.ytResults.len:
+        let r = s.overlay.ytResults[s.overlay.cursor]
+        if r.kind == srkVideo:
+          if s.player.backendType == abtDaemon:
+            let cli = DaemonService(s.svc)
+            discard cli.ytDownload(r.url, r.title, r.channel)
+            s.ytDownloadActive = true
+            s.showNotification("Downloading: " & r.title, nkInfo)
+        else:
+          s.showNotification("Cannot download a playlist directly", nkWarning)
+      else:
+        s.showNotification("Select a YouTube result first", nkInfo))
   state.registerCommand("queue_picker", "Enqueue",
-    "Add tracks to playback queue", "\U0001F3B6", @["AltI"],
+    "Add tracks to playback queue", "\U0001F3B6", @["CtrlA", "AltI"],
     proc(s: var AppState) =
       s.overlay = OverlayState(kind: okQueuePicker, query: "")
       if s.displayItems.len > 0:
@@ -2085,8 +2108,8 @@ proc handleMainKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
   of iw.Key.CtrlP:
     if guardDebounce(state): return
     state.prevTrack()
-  of iw.Key.CtrlU: state.adjustVolume(-5)
-  of iw.Key.CtrlD: state.adjustVolume(5)
+  of iw.Key.CtrlA: execCmd(state, "queue_picker")
+  of iw.Key.CtrlD: execCmd(state, "download_track")
   of iw.Key.CtrlJ: state.moveSelection(1)
   of iw.Key.CtrlK: state.moveSelection(-1)
   of iw.Key.CtrlG:
@@ -2250,8 +2273,6 @@ proc handleMainKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     if guardDebounce(state): return
     state.prevTrack()
   of iw.Key.J: state.moveSelection(1)
-  of iw.Key.ShiftJ: state.adjustVolume(-5)
-  of iw.Key.ShiftK: state.adjustVolume(5)
   of iw.Key.Plus, iw.Key.Equals: state.adjustVolume(5)
   of iw.Key.Minus, iw.Key.Underscore: state.adjustVolume(-5)
   of iw.Key.M:
@@ -3260,6 +3281,32 @@ proc runTui(args: seq[string]) =
           oldTimeDisplay = newDisplay
           ctx.state.markDirty(cePosition)
         oldTimePos = ctx.state.timePos
+      # Hover preview: track selection changes and show preview after 3s idle
+      if key != iw.Key.None:
+        ctx.state.hoverState.active = false
+      if ctx.state.tab == tabLibrary and ctx.state.overlay.kind == okNone and not ctx.state.helpVisible and not ctx.state.aboutVisible:
+        if ctx.state.selectIndex != ctx.state.lastHoverSelectIdx:
+          ctx.state.lastHoverSelectIdx = ctx.state.selectIndex
+          ctx.state.hoverState.hoverStart = epochTime()
+          ctx.state.hoverState.active = false
+          ctx.state.hoverState.trackIdx = -1
+          if ctx.state.selectIndex >= 0 and ctx.state.selectIndex < ctx.state.displayItems.len:
+            let item = ctx.state.displayItems[ctx.state.selectIndex]
+            if item.kind == likTrack and item.trackIdx >= 0 and item.trackIdx < ctx.state.libraryTracks.len:
+              let t = ctx.state.libraryTracks[item.trackIdx]
+              ctx.state.hoverState.trackIdx = item.trackIdx
+              ctx.state.hoverState.path = t.path
+              ctx.state.hoverState.title = t.displayName()
+              ctx.state.hoverState.album = t.album
+              ctx.state.hoverState.channel = t.artist
+              ctx.state.hoverState.duration = t.duration
+              ctx.state.hoverState.rowX = 0
+              ctx.state.hoverState.rowY = 3
+        if not ctx.state.hoverState.active and ctx.state.hoverState.trackIdx >= 0 and epochTime() - ctx.state.hoverState.hoverStart > 3.0:
+          ctx.state.hoverState.active = true
+          ctx.state.needsRedraw = true
+      else:
+        ctx.state.hoverState.active = false
       let now = epochTime()
       let shouldDraw = resized or ctx.state.needsRedraw or ctx.state.dirtyFlags.card > 0
       if shouldDraw and (resized or now - lastRenderTime > 0.016):

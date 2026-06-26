@@ -247,7 +247,6 @@ type
     cursor*: int
     scrollOffset*: int
     results*: seq[int]
-    visibleCount*: int
     strResults*: seq[string]
     ytResults*: seq[YtSearchResult]
     selected*: HashSet[int]
@@ -307,6 +306,20 @@ type
 
   SettingsCategory* = enum
     scAudio, scYouTube, scAppearance, scSystem, scSpotify
+
+  BorderStyle* = enum
+    bsRounded, bsSharp, bsDouble, bsBold, bsDotted, bsCurved, bsNone
+
+  HoverPreviewState* = object
+    active*: bool
+    hoverStart*: float
+    trackIdx*: int
+    rowX*, rowY*: int
+    path*: string
+    title*: string
+    album*: string
+    channel*: string
+    duration*: float
 
   AppState* = object
     theme*: Theme
@@ -430,6 +443,8 @@ type
     iconPreference*: IconPreference
     transparentBg*: bool
     overlayOpacity*: float
+    borderStyle*: BorderStyle
+    progressStyle*: int
     keyboardMode*: KeyboardMode
     ytProgressCurrent*: int
     ytProgressTotal*: int
@@ -469,6 +484,7 @@ type
     deviceName*: string
     audioBackendName*: string
     hasKittyGraphics*: bool
+    hoverState*: HoverPreviewState
     coverCache*: Table[string, tuple[data: seq[byte], mime: string]]
     coverPendingPath*: string
     trashItems*: seq[TrashItem]
@@ -488,6 +504,8 @@ type
     volumeSafetyThreshold*: int
     volumeSafetyConfirmed*: bool
     libraryLastVersion*: int
+    lastHoverSelectIdx*: int
+    hoverDismissAt*: float
 
 const
   GTM_VERSION* {.strdefine.} = staticExec("git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//'").strip
@@ -537,7 +555,9 @@ const
       "Individually enable/disable footer modules and assign them to left or right side.",
       "Transparent background mode. Uses terminal's native background color.",
       "Overlay background opacity (0\u2013100%). Only applies in transparent mode.",
-      "Icon style: Auto-detect, Nerd Font, or Emoji fallback."
+      "Icon style: Auto-detect, Nerd Font, or Emoji fallback.",
+      "Border style for overlay windows and popups.",
+      "Progress bar style: Block or Thumb+Track."
     ],
     scSystem: @[
       "Seconds of inactivity before auto-shutdown (0 = never).",

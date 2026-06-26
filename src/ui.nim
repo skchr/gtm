@@ -1,7 +1,7 @@
 import illwave as iw
 import ../vendor/nimwave/nimwave as nw
 from unicode import runeLen, toRunes, Rune
-import colors, sequtils, math, strutils, tables, sets, os, times, posix, osproc, options
+import colors, sequtils, math, strutils, tables, sets, os, times, posix, osproc, options, terminal
 import state, theme, audio, library, icons, commands, graphics, hashes, store, daemonservice
 
 type State* = Store
@@ -222,24 +222,59 @@ proc truncateAt(s: string, maxRunes: int): string =
     result.add($allRunes[i])
   result.add("\u2026")
 
-proc drawRoundedRect*(tb: var iw.TerminalBuffer, x1, y1, x2, y2: int, col: colors.Color) =
+proc drawBorder*(tb: var iw.TerminalBuffer, x1, y1, x2, y2: int, col: colors.Color, style: BorderStyle = bsRounded) =
   if x2 - x1 < 2 or y2 - y1 < 2: return
+  if style == bsNone: return
   tb.setForegroundColor(col)
   let w = x2 - x1
   let h = y2 - y1
-  tb.write(x1, y1, "\u256D")
-  tb.write(x1 + w, y1, "\u256E")
-  tb.write(x1, y1 + h, "\u2570")
-  tb.write(x1 + w, y1 + h, "\u256F")
+  let (tl, tr, bl, br, hz, vt) =
+    case style
+    of bsRounded: ("\u256D", "\u256E", "\u2570", "\u256F", "\u2500", "\u2502")
+    of bsSharp:   ("\u250C", "\u2510", "\u2514", "\u2518", "\u2500", "\u2502")
+    of bsDouble:  ("\u2554", "\u2557", "\u255A", "\u255D", "\u2550", "\u2551")
+    of bsBold:    ("\u250F", "\u2513", "\u2517", "\u251B", "\u2501", "\u2503")
+    of bsDotted:  ("\u250C", "\u2510", "\u2514", "\u2518", "\u2504", "\u250A")
+    of bsCurved:  ("\u256D", "\u256E", "\u2570", "\u256F", "\u2500", "\u2502")
+    of bsNone:    (" ", " ", " ", " ", " ", " ")
+  tb.write(x1, y1, tl)
+  tb.write(x1 + w, y1, tr)
+  tb.write(x1, y1 + h, bl)
+  tb.write(x1 + w, y1 + h, br)
   for x in x1 + 1..<x2:
-    tb.write(x, y1, "\u2500")
-    tb.write(x, y1 + h, "\u2500")
+    tb.write(x, y1, hz)
+    tb.write(x, y1 + h, hz)
   for y in y1 + 1..<y2:
-    tb.write(x1, y, "\u2502")
-    tb.write(x2, y, "\u2502")
+    tb.write(x1, y, vt)
+    tb.write(x2, y, vt)
 
 proc overlayBackground*(tb: var iw.TerminalBuffer, w, h: int, col: colors.Color) =
   fillBg(tb, 0, 0, w - 1, h - 1, col)
+
+proc renderHoverPreview*(ctx: var nw.Context[State]) =
+  let state = ctx.state
+  let theme = state.theme
+  let h = state.hoverState
+  if not h.active or h.trackIdx < 0: return
+  let w = iw.width(ctx.tb)
+  let hh = iw.height(ctx.tb)
+  let boxW = min(40, w div 3 + 8)
+  let boxH = 7
+  let boxX = min(h.rowX + 4, w - boxW - 1)
+  let boxY = min(h.rowY, hh - boxH - 2)
+  if boxX < 0 or boxY < 0: return
+  drawBorder(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.mauve, state.borderStyle)
+  fillBg(ctx.tb, boxX + 1, boxY + 1, boxX + boxW - 2, boxY + boxH - 2, theme.surface0)
+  var ly = boxY + 1
+  writeStr(ctx.tb, boxX + 2, ly, truncateAt(h.title, boxW - 4), theme.text); ly.inc
+  if h.album.len > 0:
+    writeStr(ctx.tb, boxX + 2, ly, truncateAt(h.album, boxW - 4), theme.subtext0); ly.inc
+  if h.channel.len > 0:
+    writeStr(ctx.tb, boxX + 2, ly, truncateAt(h.channel, boxW - 4), theme.subtext0); ly.inc
+  if h.duration > 0:
+    writeStr(ctx.tb, boxX + 2, ly, formatTime(h.duration), theme.subtext0); ly.inc
+  let srcLabel = if h.path.startsWith("http"): "YouTube" else: "Local"
+  writeStr(ctx.tb, boxX + 2, ly, srcLabel, theme.sky)
 
 type TabBar = ref object of nw.Node
 method render*(node: TabBar, ctx: var nw.Context[State]) =
@@ -373,20 +408,44 @@ method render*(node: NowPlayingView, ctx: var nw.Context[State]) =
   if state.duration > 0:
     let elapsed = formatTime(state.timePos)
     let remaining = formatTime(max(0.0, state.duration - state.timePos))
-    let timeStr = elapsed & " / -" & remaining
-    writeStr(ctx.tb, artPad, line, ic.time & " " & timeStr, theme.mauve)
-    let barW = min(w - timeStr.runeLen - 14, 30)
-    if barW > 4:
-      let progress = min(1.0, state.timePos / state.duration)
-      let barStart = artPad + timeStr.runeLen + 6
-      writeStr(ctx.tb, barStart, line, "\u2588".repeat(barW), theme.surface2)
-      for i in 0..<barW:
-        let frac = float(i) / float(max(barW - 1, 1))
-        if frac < progress:
-          writeStr(ctx.tb, barStart + i, line, "\u2588", theme.mauve)
-        else:
-          writeStr(ctx.tb, barStart + i, line, "\u2591", theme.surface2)
-    line.inc
+    if state.progressStyle == 0:
+      # Block bar (original style)
+      let timeStr = elapsed & " / -" & remaining
+      writeStr(ctx.tb, artPad, line, ic.time & " " & timeStr, theme.mauve)
+      let barW = min(w - timeStr.runeLen - 14, 30)
+      if barW > 4:
+        let progress = min(1.0, state.timePos / state.duration)
+        let barStart = artPad + timeStr.runeLen + 6
+        writeStr(ctx.tb, barStart, line, "\u2588".repeat(barW), theme.surface2)
+        for i in 0..<barW:
+          let frac = float(i) / float(max(barW - 1, 1))
+          if frac < progress:
+            writeStr(ctx.tb, barStart + i, line, "\u2588", theme.mauve)
+          else:
+            writeStr(ctx.tb, barStart + i, line, "\u2591", theme.surface2)
+      line.inc
+    else:
+      # Thumb+Track style
+      let pct = int(min(1.0, state.timePos / state.duration) * 100)
+      let timeStr = elapsed & " / -" & remaining
+      writeStr(ctx.tb, artPad, line, ic.time & " " & timeStr, theme.mauve)
+      let barW = min(w - timeStr.runeLen - 20, 28)
+      if barW > 6:
+        let progress = min(1.0, state.timePos / state.duration)
+        let filled = int(progress * float(barW - 2))
+        let barStart = artPad + timeStr.runeLen + 6
+        writeStr(ctx.tb, barStart, line, "\u2503", theme.mauve)
+        for i in 0..<barW - 2:
+          if i < filled:
+            writeStr(ctx.tb, barStart + 1 + i, line, "\u2501", theme.mauve)
+          elif i == filled:
+            writeStr(ctx.tb, barStart + 1 + i, line, "\u25CF", theme.peach)
+          else:
+            writeStr(ctx.tb, barStart + 1 + i, line, "\u2501", theme.surface2)
+        writeStr(ctx.tb, barStart + barW - 1, line, "\u2503", theme.mauve)
+        let pctStr = $pct & "%"
+        writeStr(ctx.tb, barStart + barW + 2, line, pctStr, theme.subtext0)
+      line.inc
   line.inc
   writeStr(ctx.tb, artPad, line, "\u2500".repeat(min(w - 2, 36)), theme.surface2)
   line.inc
@@ -408,7 +467,7 @@ method render*(node: NowPlayingView, ctx: var nw.Context[State]) =
     elif ctx.state.coverImageId >= 0:
       deleteImage(ctx.state.coverImageId)
       ctx.state.coverImageId = -1
-  # Lyrics — synced (togglable)
+  # Lyrics — synced gradient (togglable)
   if state.lyricsVisible and state.currentLyrics.lines.len > 0:
     let maxLyricLines = 6
     let startLine = max(0, state.lyricsLineIdx - 2)
@@ -416,10 +475,20 @@ method render*(node: NowPlayingView, ctx: var nw.Context[State]) =
     for idx in startLine..endLine:
       if idx > state.currentLyrics.lines.high: break
       let lyr = state.currentLyrics.lines[idx]
-      let isCurrent = idx == state.lyricsLineIdx
-      let lyrColor = if isCurrent: theme.green else: theme.overlay1
-      let prefix = if isCurrent: "\u25B6 " else: "  "
+      let dist = abs(idx - state.lyricsLineIdx)
+      let lyrColor = if dist == 0: theme.green
+                     elif dist == 1: theme.teal
+                     else: theme.overlay1
+      let prefix = if dist == 0: "\u25B6 " elif dist == 1: " \u25CB " else: "  "
+      if dist <= 1:
+        ctx.tb.setStyle({styleBright})
       writeStr(ctx.tb, artPad, line, prefix & lyr.text, lyrColor)
+      if dist <= 1:
+        ctx.tb.setStyle({})
+      if dist == 0:
+        line.inc
+        if line < h - statusBarHeight:
+          writeStr(ctx.tb, artPad, line, "", theme.base)
       line.inc
     line.inc
   # Up Next — scrollable
@@ -821,6 +890,29 @@ method render*(node: SettingsView, ctx: var nw.Context[State]) =
     let rightCount = state.footerRightModules.card
     writeStr(ctx.tb, contentX + contentW - 14, line, "L:" & $leftCount & " R:" & $rightCount, theme.subtext0)
     line.inc
+    settingsRow("Transparent BG")
+    toggleWidget(state.transparentBg)
+    line.inc
+    settingsRow("Opacity")
+    sliderWidget(int(state.overlayOpacity * 100), 100, 14)
+    line.inc
+    settingsRow("Icon Style")
+    let iconLabel = case state.iconPreference
+      of ipAuto: "Auto Detect"
+      of ipNerdFont: "Nerd Font"
+      of ipEmoji: "Emoji"
+    writeStr(ctx.tb, contentX + contentW - iconLabel.runeLen - 11, line, "[ " & iconLabel & " ▸]", theme.subtext0)
+    line.inc
+    settingsRow("Border Style")
+    let borderLabels = ["Rounded", "Sharp", "Double", "Bold", "Dotted", "Curved", "None"]
+    let bl = if state.borderStyle.ord < borderLabels.len: borderLabels[state.borderStyle.ord] else: "Rounded"
+    writeStr(ctx.tb, contentX + contentW - bl.runeLen - 11, line, "[ " & bl & " ▸]", theme.subtext0)
+    line.inc
+    settingsRow("Progress Style")
+    let progLabels = ["Block", "Thumb+Track"]
+    let pLabel = if state.progressStyle < progLabels.len: progLabels[state.progressStyle] else: "Block"
+    writeStr(ctx.tb, contentX + contentW - pLabel.runeLen - 11, line, "[ " & pLabel & " ▸]", theme.subtext0)
+    line.inc
   of scSystem:
     sectionHeader("═══ System ═══")
     settingsRow("Idle Timeout")
@@ -1112,7 +1204,7 @@ proc renderPicker*(ctx: var nw.Context[State], props: PickerProps) =
   let boxX = (w - boxW) div 2
   let boxY = (h - boxH) div 2
   fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.surface0)
-  drawRoundedRect(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.mauve)
+  drawBorder(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.mauve, ctx.state.borderStyle)
   writeStr(ctx.tb, boxX + 1, boxY, props.title, theme.mauve)
   var curY = boxY + 1
   if props.showQuery and props.query.len > 0:
@@ -1208,7 +1300,7 @@ method render*(node: GenericOverlay, ctx: var nw.Context[State]) =
   else:
     theme.surface0
   fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, ovBg)
-  drawRoundedRect(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.mauve)
+  drawBorder(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.mauve, ctx.state.borderStyle)
   writeStr(ctx.tb, boxX + 1, boxY, title, theme.mauve)
   var curY = boxY + 1
   if queryLine:
@@ -1557,7 +1649,7 @@ method render*(node: LeaderMenuOverlay, ctx: var nw.Context[State]) =
   let boxX = (w - boxW) div 2
   let boxY = (h - boxH) div 2
   fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.surface0)
-  drawRoundedRect(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.peach)
+  drawBorder(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.peach, ctx.state.borderStyle)
   writeStr(ctx.tb, boxX + 1, boxY, "\u2316 Actions", theme.peach)
   let selCount = state.selectedIndices.len
   let actions = if selCount > 0:
@@ -1614,7 +1706,7 @@ method render*(node: HelpOverlay, ctx: var nw.Context[State]) =
   let boxX = (w - boxW) div 2
   let boxY = (h - boxH) div 2
   fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.surface0)
-  drawRoundedRect(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.mauve)
+  drawBorder(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.mauve, ctx.state.borderStyle)
   writeStr(ctx.tb, boxX + 2, boxY + 1, " Help — Keybindings ", theme.mauve)
   var y = boxY + 3
   let col1x = boxX + 3
@@ -1649,7 +1741,7 @@ method render*(node: AboutOverlay, ctx: var nw.Context[State]) =
   let boxX = (w - boxW) div 2
   let boxY = (h - boxH) div 2
   fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.surface0)
-  drawRoundedRect(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.mauve)
+  drawBorder(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.mauve, ctx.state.borderStyle)
   writeStr(ctx.tb, boxX + 2, boxY + 1, " About gtm ", theme.mauve)
 
   var y = boxY + 3
@@ -1823,7 +1915,7 @@ method render*(node: FeedbackCueOverlay, ctx: var nw.Context[State]) =
   let boxX = w - boxW - 2
   let boxY = 2
   fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, bgCol)
-  drawRoundedRect(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, if kind == nkError: theme.red elif kind == nkWarning: theme.peach else: theme.blue)
+  drawBorder(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, if kind == nkError: theme.red elif kind == nkWarning: theme.peach else: theme.blue, ctx.state.borderStyle)
   var curY = boxY + 1
   for idx, line in titleLines:
     let prefix = if idx == 0: icon else: " ".repeat(icon.runeLen)
@@ -1848,7 +1940,7 @@ method render*(node: NowPlayingCueOverlay, ctx: var nw.Context[State]) =
   let boxX = 2
   let boxY = 2
   fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.surface0)
-  drawRoundedRect(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.blue)
+  drawBorder(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.blue, ctx.state.borderStyle)
   var curY = boxY + 1
   for idx, line in lines:
     let prefix = if idx == 0: ic.play else: "   "
@@ -1870,7 +1962,7 @@ method render*(node: UpNextCueOverlay, ctx: var nw.Context[State]) =
   let boxX = 2
   let boxY = 2
   fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.surface0)
-  drawRoundedRect(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.peach)
+  drawBorder(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.peach, ctx.state.borderStyle)
   var curY = boxY + 1
   for idx, line in lines:
     let prefix = if idx == 0: " " & ic.nextTrack & " " else: "     "
@@ -1888,7 +1980,7 @@ method render*(node: PlaylistInputOverlay, ctx: var nw.Context[State]) =
   let boxX = (w - boxW) div 2
   let boxY = (h - boxH) div 2
   fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.surface0)
-  drawRoundedRect(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.mauve)
+  drawBorder(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.mauve, ctx.state.borderStyle)
   writeStr(ctx.tb, boxX + 1, boxY, ctx.state.playlistInputPrompt, theme.mauve)
   writeStrBg(ctx.tb, boxX + 1, boxY + 2, truncateAt("> " & ctx.state.playlistInputBuffer, boxW - 2), theme.text, theme.surface1)
   let footerText = truncateAt("Enter: confirm  Esc: cancel", boxW - 2)
@@ -1908,7 +2000,7 @@ method render*(node: FooterModulePickerOverlay, ctx: var nw.Context[State]) =
   let boxX = (w - boxW) div 2
   let boxY = (h - boxH) div 2
   fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.surface0)
-  drawRoundedRect(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.mauve)
+  drawBorder(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.mauve, ctx.state.borderStyle)
   ctx.tb.setBackgroundColor(theme.surface0)
   writeStr(ctx.tb, boxX + 2, boxY + 1, " Footer Modules ", theme.mauve)
 
@@ -1993,6 +2085,7 @@ proc renderApp*(ctx: var nw.Context[State]) =
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(FooterModulePickerOverlay(), sliceCtx)
   if ctx.state.overlay.kind != okNone:
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(GenericOverlay(), sliceCtx)
+  renderHoverPreview(ctx)
   if ctx.state.volumeCueTimer > 0:
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(VolumeCueOverlay(), sliceCtx)
   if ctx.state.notificationTimer > 0 and ctx.state.notificationMsg.len > 0:
@@ -2122,3 +2215,6 @@ proc initApp*(state: var AppState) =
   state.volumeSafetyThreshold = 80
   state.volumeSafetyConfirmed = false
   state.libraryLastVersion = 0
+  state.borderStyle = bsRounded
+  state.progressStyle = 0
+  state.lastHoverSelectIdx = -1

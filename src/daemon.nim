@@ -39,7 +39,6 @@ when not defined(macosx):
 else:
   proc pthread_setname_np(name: cstring): cint {.importc, header: "<pthread.h>".}
 proc rename*(oldpath, newpath: cstring): cint {.importc, header: "<stdio.h>".}
-import audio, state, library, ytdlp, lyrics, spotify
 
 
 proc parseFilenameForMetadata(path: string): tuple[title, artist: string] =

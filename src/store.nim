@@ -57,5 +57,3 @@ proc markDirty*(store: var Store, event: ChangeEvent) =
 
 proc markDirtyBatch*(store: var Store, events: varargs[ChangeEvent]) =
   for e in events: store.app.markDirty(e)
-
-proc player*(store: Store): AudioBackend = store.app.player

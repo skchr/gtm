@@ -588,7 +588,7 @@ proc generateGtmdManpage(cmds: seq[DaemonCmd]; events: seq[AudioEvent]; examples
   # Group commands
   let groups = {
     "Playback Control": @["play", "pause", "toggle_pause", "stop", "seek", "next", "prev", "load_file", "resume", "status", "now_playing", "get_state", "ping"],
-    "Volume": @["set_volume", "get_volume", "set_mute", "get_mute"],
+    "Volume": @["set_volume", "get_volume"],
     "Queue": @["queue_add", "queue_remove", "queue_remove_path", "queue_clear", "queue_validate", "queue_list", "queue_set_cursor"],
     "Playback Mode": @["set_shuffle", "set_repeat", "set_sleep_timer"],
     "Crossfade": @["prepare_next", "crossfade", "set_crossfade_duration", "set_crossfade_curve"],
@@ -597,7 +597,7 @@ proc generateGtmdManpage(cmds: seq[DaemonCmd]; events: seq[AudioEvent]; examples
     "Playlists": @["create_playlist", "delete_playlist", "rename_playlist", "add_to_playlist", "remove_from_playlist", "list_playlists", "get_playlist_tracks"],
     "Favourites": @["add_favourite", "remove_favourite", "get_favourites"],
     "State": @["get_full_state", "get_state", "get_volume"],
-    "YouTube": @["yt_search", "yt_search_poll", "yt_search_cancel", "yt_resolve_stream", "yt_resolve_stream_poll", "yt_download", "yt_download_poll", "yt_cancel_download", "yt_list_downloads", "yt_fetch_playlist", "yt_fetch_playlist_poll", "yt_set_config", "yt_get_search_history", "yt_clear_search_history", "yt_recommended"],
+    "YouTube": @["yt_search", "yt_search_poll", "yt_search_cancel", "yt_resolve_stream", "yt_resolve_stream_poll", "yt_download", "yt_download_poll", "yt_cancel_download", "yt_list_downloads", "yt_fetch_playlist", "yt_fetch_playlist_poll", "yt_set_config", "yt_get_search_history", "yt_clear_search_history"],
     "Spotify": @["sp_set_config", "sp_list_downloads"],
     "Cover Art & Lyrics": @["get_cover_art", "get_lyrics", "search_lyrics"],
     "Lifecycle": @["quit"]
