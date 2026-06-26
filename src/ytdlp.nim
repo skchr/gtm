@@ -81,7 +81,7 @@ proc detectBrowserCookieSource*(): string =
       return name
   result = ""
 
-proc appendCookieArgs(args: var seq[string]; source: string; filePath: string = "") =
+proc appendCookieArgs*(args: var seq[string]; source: string; filePath: string = "") =
   if filePath.len > 0 and fileExists(filePath):
     args.add "--cookies"; args.add filePath
   elif source.len == 0: discard
@@ -90,7 +90,7 @@ proc appendCookieArgs(args: var seq[string]; source: string; filePath: string = 
   else:
     args.add "--cookies-from-browser"; args.add source
 
-proc appendJsRuntimeArgs(args: var seq[string]; runtime: string) =
+proc appendJsRuntimeArgs*(args: var seq[string]; runtime: string) =
   if runtime.len > 0:
     args.add "--js-runtimes"; args.add runtime
     args.add "--remote-components"; args.add "ejs:github"

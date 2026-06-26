@@ -1908,9 +1908,15 @@ proc runPulseWorker(d: ptr Daemon) {.thread.} =
         player.seek(a.floatVal)
       of pakLoadFile:
         if a.strVal.len > 0:
-          player.stop()
-          if player.loadFile(a.strVal):
-            player.play()
+          let usingCrossfade = player.state == 1 and d[].crossfadeDuration > 0 and
+            not isYtWatchUrl(a.strVal)
+          if usingCrossfade:
+            player.prepareNext(a.strVal)
+            player.startCrossfade(float(d[].crossfadeDuration))
+          else:
+            player.stop()
+            if player.loadFile(a.strVal):
+              player.play()
           # Sync daemon's current track metadata — covers dckLoadFile,
           # dckNext, dckPrev, handleAutoAdvance, pakResolveYtStream.
           let path = a.strVal
@@ -2105,6 +2111,17 @@ proc runPulseWorker(d: ptr Daemon) {.thread.} =
 proc handleAutoAdvance(d: Daemon) =
   d.autoAdvancing = true
   ## Called when a track ends. Pops next from queue and queues a pakLoadFile action.
+  ## During crossfade, the mixer auto-promotes slave to master — skip pakLoadFile
+  ## to avoid restarting the already-promoted track.
+  if d.crossfadeStarted and d.playerCrossfading and d.playerState == 1:
+    d.crossfadeStarted = false
+    d.crossfadePrepared = false
+    d.crossfadeNextPath = ""
+    d.crossfadeConsumed = false
+    d.autoAdvancing = false
+    d.sendQueueEvent()
+    d.pushFullState()
+    return
   acquire(d.lock)
   var nextPath = ""
 
@@ -2207,10 +2224,10 @@ proc runDaemon*() =
   when defined(useFFmpeg):
     player = newMixerBackend()
     if not player.working:
-      echo "[gtm] Mixer backend unavailable (ALSA?), trying FFmpeg fallback"
+      stderr.writeLine("[gtmd] Mixer backend unavailable (ALSA?), trying FFmpeg fallback")
       player = newFfmpegBackend()
     if not player.working:
-      echo "[gtm] FFmpeg backend unavailable"
+      stderr.writeLine("[gtmd] FFmpeg backend unavailable")
   else:
     player = nil
   if player == nil or not player.working:

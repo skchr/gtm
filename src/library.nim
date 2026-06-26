@@ -689,7 +689,7 @@ else:
 
 proc displayName*(track: Track): string =
   if track.title.len > 0: track.title
-  else: track.path.splitPath().tail
+  else: track.path.splitPath().tail.splitFile().name
 
 proc displayArtist*(track: Track): string =
   if track.artist.len > 0: track.artist else: "Unknown Artist"

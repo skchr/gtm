@@ -526,7 +526,8 @@ method render*(node: LibrarySidebar, ctx: var nw.Context[State]) =
     let display = if label.runeLen > maxLabelW: label[0..<max(1, maxLabelW - 2)] & "\u2026" else: label
     let fg = if isActive: theme.blue elif isSelected: theme.text else: theme.subtext0
     writeStr(ctx.tb, 1, line, display, fg)
-    writeStr(ctx.tb, w - countStr.runeLen - 1, line, countStr, theme.overlay0)
+    if state.showItemCounts:
+      writeStr(ctx.tb, w - countStr.runeLen - 1, line, countStr, theme.overlay0)
     line.inc
 
 type LibraryContentView = ref object of nw.Node
@@ -1242,11 +1243,14 @@ method render*(node: GenericOverlay, ctx: var nw.Context[State]) =
       writeStr(ctx.tb, boxX + 2, curY, "No results found", theme.subtext0)
     let availableLines = max(0, (boxY + boxH - 2) - curY)
     let displayCount = min(ov.ytResults.len, availableLines)
+    let scrollOff = max(0, min(ov.scrollOffset, max(0, ov.ytResults.len - displayCount)))
     var videoCount = 0
     for i in 0..<displayCount:
+      let ri = scrollOff + i
+      if ri >= ov.ytResults.len: break
       let lineY = curY + i
       if lineY >= boxY + boxH - 1: break
-      let r = ov.ytResults[i]
+      let r = ov.ytResults[ri]
       let isSelected = (i == ov.cursor)
       let isMarked = i in ov.selected
       let isPlaylistResult = r.kind == srkPlaylist
@@ -1410,15 +1414,18 @@ method render*(node: GenericOverlay, ctx: var nw.Context[State]) =
   elif ov.kind == okTrashView:
     let items = ctx.state.trashItems
     let displayCount = min(items.len, boxH - 5)
+    let scrollOff = max(0, min(ov.scrollOffset, max(0, items.len - displayCount)))
     for i in 0..<displayCount:
+      let ri = scrollOff + i
+      if ri >= items.len: break
       let lineY = curY + i
       if lineY >= boxY + boxH - 2: break
-      let isSelected = (i == ov.cursor)
+      let isSelected = (ri == ov.cursor)
       let ovRowBg = if isSelected: theme.surface2 else: theme.surface0
       if isSelected:
         fillBg(ctx.tb, boxX + 1, lineY, boxX + boxW - 2, lineY, ovRowBg)
       ctx.tb.setBackgroundColor(ovRowBg)
-      let item = items[i]
+      let item = items[ri]
       let name = item.originalPath.splitPath().tail
       let dateStr = item.trashedAt.fromUnix().format("YYYY-MM-dd")
       let label = truncateAt(name & "  (" & dateStr & ")", boxW - 4)
@@ -1453,10 +1460,13 @@ method render*(node: GenericOverlay, ctx: var nw.Context[State]) =
   elif ov.kind == okQueueOverlay:
     let queue = ctx.state.playbackQueue
     let displayCount = min(queue.len, boxH - 4)
+    let scrollOff = max(0, min(ov.scrollOffset, max(0, queue.len - displayCount)))
     for i in 0..<displayCount:
+      let qi = scrollOff + i
+      if qi >= queue.len: break
       let lineY = curY + i
       if lineY >= boxY + boxH - 1: break
-      let tIdx = queue[i]
+      let tIdx = queue[qi]
       let isSelected = (i == ov.cursor)
       let t = if tIdx >= 0 and tIdx < ctx.state.libraryTracks.len: ctx.state.libraryTracks[tIdx] else: Track()
       let isNowPlaying = i == 0 and ctx.state.status in {psPlaying, psPaused}
@@ -1476,11 +1486,14 @@ method render*(node: GenericOverlay, ctx: var nw.Context[State]) =
   #--- Command Palette ---
   elif ov.kind == okCommandPalette:
     let displayResults = min(20, ov.results.len)
+    let scrollOff = max(0, min(ov.scrollOffset, max(0, ov.results.len - displayResults)))
     for i in 0..<displayResults:
-      let idx = ov.results[i]
+      let ri = scrollOff + i
+      if ri >= ov.results.len: break
+      let idx = ov.results[ri]
       if idx < 0 or idx >= ctx.state.commands.len: continue
       let cmd = ctx.state.commands[idx]
-      let isSelected = (i == ov.cursor)
+      let isSelected = (ri == ov.cursor)
       let lineY = curY + i
       if lineY >= boxY + boxH - 1: break
       let ovRowBg = if isSelected: theme.surface2 else: theme.surface0
@@ -1501,16 +1514,19 @@ method render*(node: GenericOverlay, ctx: var nw.Context[State]) =
   #--- Fuzzy Finder ---
   elif ov.kind == okFuzzyFinder:
     let displayResults = min(20, ov.results.len)
+    let scrollOff = max(0, min(ov.scrollOffset, max(0, ov.results.len - displayResults)))
     for i in 0..<displayResults:
-      let idx = ov.results[i]
+      let ri = scrollOff + i
+      if ri >= ov.results.len: break
+      let idx = ov.results[ri]
       let lineY = curY + i
       if lineY >= boxY + boxH - 1: break
-      let isSelected = (i == ov.cursor)
+      let isSelected = (ri == ov.cursor)
       let ovRowBg = if isSelected: theme.surface2 else: theme.surface0
       if isSelected:
         fillBg(ctx.tb, boxX + 1, lineY, boxX + boxW - 2, lineY, ovRowBg)
       ctx.tb.setBackgroundColor(ovRowBg)
-      let labelRaw = if i < ov.strResults.len and ov.strResults[i].len > 0: ov.strResults[i]
+      let labelRaw = if ri < ov.strResults.len and ov.strResults[ri].len > 0: ov.strResults[ri]
                      else: ic.track & " Track #" & $idx
       let maxW = max(1, boxW - 4)
       let label = if labelRaw.runeLen > maxW: labelRaw[0..<min(labelRaw.len, maxW - 2)] & "\u2026"
@@ -1718,7 +1734,7 @@ method render*(node: AboutOverlay, ctx: var nw.Context[State]) =
   line("Installation path", installPaths)
   line("Download", ctx.state.ytDownloadDir)
   let storageSize = try:
-    let (outp, _) = execCmdEx("du -sh " & stateDir() & " 2>/dev/null | cut -f1")
+    let (outp, _) = execCmdEx("du -sh " & dataDir() & " 2>/dev/null | cut -f1")
     let s = outp.strip
     if s.len > 0: s else: "(unknown)"
   except: "(unknown)"
@@ -2102,3 +2118,7 @@ proc initApp*(state: var AppState) =
   state.currentPlayingTitle = ""
   state.currentPlayingChannel = ""
   state.cursorVisible = false
+  state.showItemCounts = true
+  state.volumeSafetyThreshold = 80
+  state.volumeSafetyConfirmed = false
+  state.libraryLastVersion = 0

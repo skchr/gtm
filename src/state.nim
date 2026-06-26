@@ -245,7 +245,9 @@ type
     kind*: OverlayKind
     query*: string
     cursor*: int
+    scrollOffset*: int
     results*: seq[int]
+    visibleCount*: int
     strResults*: seq[string]
     ytResults*: seq[YtSearchResult]
     selected*: HashSet[int]
@@ -482,6 +484,10 @@ type
     libraryNeedsScan*: bool
     libraryRetryCount*: int
     libraryLastRetryAt*: float
+    showItemCounts*: bool
+    volumeSafetyThreshold*: int
+    volumeSafetyConfirmed*: bool
+    libraryLastVersion*: int
 
 const
   GTM_VERSION* {.strdefine.} = staticExec("git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//'").strip

@@ -1,11 +1,12 @@
 import unittest, json, strutils
 import ../src/ytdlp, ../src/state
+export appendCookieArgs, appendJsRuntimeArgs
 
 suite "parseYtJsonLine":
-  test "parses a valid video result":
-    let raw = """{"id":"abc123","title":"Test Video","webpage_url":"https://youtube.com/watch?v=abc123","duration":245.5,"channel":"TestChannel","ie_key":"Youtube"}"""
+  test "parses a valid audio result":
+    let raw = """{"id":"abc123","title":"Test Audio","webpage_url":"https://youtube.com/watch?v=abc123","duration":245.5,"channel":"TestChannel","ie_key":"Youtube"}"""
     let r = parseYtJsonLine(raw)
-    check r.title == "Test Video"
+    check r.title == "Test Audio"
     check r.url == "https://youtube.com/watch?v=abc123"
     check r.duration == "4:05"
     check r.channel == "TestChannel"
@@ -54,25 +55,25 @@ suite "parseYtJsonLine":
       let r = parseYtJsonLine(raw)
       check r.duration == expected
 
-suite "cookieFlags":
-  test "empty source returns empty string":
-    check cookieFlags("") == ""
+suite "appendCookieArgs":
+  test "file path source adds --cookies arg":
+    var args1: seq[string] = @[]
+    appendCookieArgs(args1, "/path/to/cookies.txt")
+    check args1 == @["--cookies", "/path/to/cookies.txt"]
 
-  test "file path uses --cookies":
-    let r = cookieFlags("/path/to/cookies.txt")
-    check "--cookies" in r
-    check "/path/to/cookies.txt" in r
+  test "browser source adds --cookies-from-browser":
+    var args2: seq[string] = @[]
+    appendCookieArgs(args2, "firefox")
+    check args2 == @["--cookies-from-browser", "firefox"]
 
-  test "browser name uses --cookies-from-browser":
-    let r = cookieFlags("firefox")
-    check "--cookies-from-browser" in r
-    check "firefox" in r
+suite "appendJsRuntimeArgs":
+  test "empty runtime adds nothing":
+    var args3: seq[string] = @[]
+    appendJsRuntimeArgs(args3, "")
+    check args3.len == 0
 
-suite "jsRuntimeFlags":
-  test "empty runtime returns empty string":
-    check jsRuntimeFlags("") == ""
-
-  test "runtime flag includes ejs":
-    let r = jsRuntimeFlags("node")
-    check "node" in r
-    check "ejs:github" in r
+  test "runtime adds args":
+    var args4: seq[string] = @[]
+    appendJsRuntimeArgs(args4, "node")
+    check "node" in args4
+    check "ejs:github" in args4

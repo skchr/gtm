@@ -264,31 +264,26 @@ static void extract_metadata(FfmpegAudioCtx* ctx) {
   }
 }
 
-int ffmpeg_audio_load(FfmpegAudioCtx* ctx, const char* path) {
-  if (!ctx || !path || !path[0]) return 0;
-  if (ctx->fmt_ctx) {
-    avformat_close_input(&ctx->fmt_ctx);
-    ctx->fmt_ctx = NULL;
-  }
-  if (ctx->codec_ctx) {
-    avcodec_free_context(&ctx->codec_ctx);
-    ctx->codec_ctx = NULL;
-  }
-  if (ctx->swr_ctx) {
-    swr_free(&ctx->swr_ctx);
-    ctx->swr_ctx = NULL;
-  }
+static void ffmpeg_audio_cleanup(FfmpegAudioCtx* ctx) {
+  if (ctx->fmt_ctx) { avformat_close_input(&ctx->fmt_ctx); ctx->fmt_ctx = NULL; }
+  if (ctx->codec_ctx) { avcodec_free_context(&ctx->codec_ctx); ctx->codec_ctx = NULL; }
+  if (ctx->swr_ctx) { swr_free(&ctx->swr_ctx); ctx->swr_ctx = NULL; }
   ctx->audio_stream_idx = -1;
   ctx->duration = 0.0;
   ctx->current_time = 0.0;
   ctx->title[0] = '\0';
   ctx->artist[0] = '\0';
   ctx->album[0] = '\0';
+}
+
+int ffmpeg_audio_load(FfmpegAudioCtx* ctx, const char* path) {
+  if (!ctx || !path || !path[0]) return 0;
+  ffmpeg_audio_cleanup(ctx);
 
   if (avformat_open_input(&ctx->fmt_ctx, path, NULL, NULL) != 0)
     return 0;
   if (avformat_find_stream_info(ctx->fmt_ctx, NULL) < 0)
-    return 0;
+    goto fail;
 
   for (unsigned i = 0; i < ctx->fmt_ctx->nb_streams; i++) {
     if (ctx->fmt_ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
@@ -296,24 +291,24 @@ int ffmpeg_audio_load(FfmpegAudioCtx* ctx, const char* path) {
       break;
     }
   }
-  if (ctx->audio_stream_idx < 0) return 0;
+  if (ctx->audio_stream_idx < 0) goto fail;
 
   AVStream* st = ctx->fmt_ctx->streams[ctx->audio_stream_idx];
   AVCodecParameters* par = st->codecpar;
   ctx->time_base = st->time_base;
 
   const AVCodec* codec = avcodec_find_decoder(par->codec_id);
-  if (!codec) return 0;
+  if (!codec) goto fail;
 
   ctx->codec_ctx = avcodec_alloc_context3(codec);
-  if (!ctx->codec_ctx) return 0;
-  if (avcodec_parameters_to_context(ctx->codec_ctx, par) < 0) return 0;
+  if (!ctx->codec_ctx) goto fail;
+  if (avcodec_parameters_to_context(ctx->codec_ctx, par) < 0) goto fail;
   ctx->codec_ctx->pkt_timebase = st->time_base;
-  if (avcodec_open2(ctx->codec_ctx, codec, NULL) < 0) return 0;
+  if (avcodec_open2(ctx->codec_ctx, codec, NULL) < 0) goto fail;
 
   ctx->sample_rate = par->sample_rate;
   ctx->swr_ctx = swr_alloc();
-  if (!ctx->swr_ctx) return 0;
+  if (!ctx->swr_ctx) goto fail;
 
 #ifdef HAVE_NEW_CHANNEL_API
   ctx->channels = par->ch_layout.nb_channels;
@@ -330,7 +325,7 @@ int ffmpeg_audio_load(FfmpegAudioCtx* ctx, const char* path) {
   av_opt_set_int(ctx->swr_ctx, "out_sample_rate", par->sample_rate, 0);
   av_opt_set_sample_fmt(ctx->swr_ctx, "out_sample_fmt", AV_SAMPLE_FMT_FLT, 0);
 
-  if (swr_init(ctx->swr_ctx) < 0) return 0;
+  if (swr_init(ctx->swr_ctx) < 0) goto fail;
 
   ctx->channels = out_ch_layout.nb_channels;
 #else
@@ -347,10 +342,19 @@ int ffmpeg_audio_load(FfmpegAudioCtx* ctx, const char* path) {
   av_opt_set_int(ctx->swr_ctx, "out_sample_rate", par->sample_rate, 0);
   av_opt_set_sample_fmt(ctx->swr_ctx, "out_sample_fmt", AV_SAMPLE_FMT_FLT, 0);
 
-  if (swr_init(ctx->swr_ctx) < 0) return 0;
+  if (swr_init(ctx->swr_ctx) < 0) goto fail;
 #endif
   extract_metadata(ctx);
   return 1;
+
+fail:
+  if (ctx->codec_ctx) { avcodec_free_context(&ctx->codec_ctx); ctx->codec_ctx = NULL; }
+  if (ctx->swr_ctx) { swr_free(&ctx->swr_ctx); ctx->swr_ctx = NULL; }
+  if (ctx->fmt_ctx) { avformat_close_input(&ctx->fmt_ctx); ctx->fmt_ctx = NULL; }
+  ctx->audio_stream_idx = -1;
+  ctx->duration = 0.0;
+  ctx->current_time = 0.0;
+  return 0;
 }
 
 static void* decode_thread(void* arg) {
