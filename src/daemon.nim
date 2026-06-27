@@ -97,7 +97,8 @@ type
     dckSetSpatialWidth,
     dckPing,
     dckDeleteTrack, dckRestoreTrack, dckPermanentDelete, dckListTrash, dckPurgeTrash,
-    dckRequestCoverArt, dckRequestLyrics, dckIdentifySong
+    dckRequestCoverArt, dckRequestLyrics, dckIdentifySong,
+    dckQueuePlayIndex, dckGetLibraryVersion
 
   DaemonCmd* = object
     kind*: DaemonCmdKind
@@ -147,7 +148,7 @@ type
     repeatMode*: int
     sleepTimerRemaining*: int
     sleepTimerFrames*: int
-    playbackQueue*: seq[string]
+    playbackQueue*: seq[QueueItem]
     shuffleOrder*: seq[int]
     shuffleIndex*: int
     crossfadeDuration*: int
@@ -163,6 +164,7 @@ type
     spatialWidth*: float
     lastTrackDuration: float
     stateVersion*: int
+    libraryVersion*: int
 
     # Snapshot fields — T1 copies from AudioBackend every tick (under lock)
     # T2 reads for status queries and MPRIS (under lock, ≤16ms stale)
@@ -361,6 +363,10 @@ proc parseDaemonCommand(line: string): DaemonCmd =
       result.kind = dckQueueList
     of "queue_set_cursor":
       result.kind = dckQueueSetCursor; result.intArg = j{"index"}.getInt(0)
+    of "queue_play_index":
+      result.kind = dckQueuePlayIndex; result.intArg = j{"index"}.getInt(0)
+    of "get_library_version":
+      result.kind = dckGetLibraryVersion
     of "add_favourite":
       result.kind = dckAddFavourite; result.intArg = j{"track_id"}.getInt(0)
     of "remove_favourite":
@@ -499,7 +505,7 @@ proc broadcastJson(d: Daemon, ev: JsonNode) =
 proc sendQueueEvent(d: Daemon) =
   if d.clients.len == 0: return
   var qArr = newJArray()
-  for p in d.playbackQueue: qArr.add(%p)
+  for qi in d.playbackQueue: qArr.add(%*{"id": %qi.id, "path": %qi.path})
   var soArr = newJArray()
   for i in d.shuffleOrder: soArr.add(%i)
   let ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "queue_changed",
@@ -510,7 +516,7 @@ proc pushFullState(d: Daemon) =
   if d.clients.len == 0: return
   d.stateVersion.inc
   var qArr = newJArray()
-  for p in d.playbackQueue: qArr.add(%p)
+  for qi in d.playbackQueue: qArr.add(%*{"id": %qi.id, "path": %qi.path})
   var soArr = newJArray()
   for i in d.shuffleOrder: soArr.add(%i)
   let stateStr = if d.playerState == 0: "stopped" elif d.playerState == 1: "playing" else: "paused"
@@ -531,7 +537,8 @@ proc pushFullState(d: Daemon) =
     "crossfadeDuration": %d.crossfadeDuration,
     "crossfadeCurve": %d.crossfadeCurve,
     "backend_name": %(if d.player != nil and d.player.working: d.player.backendName else: "none"),
-    "version": %d.stateVersion}]}
+    "version": %d.stateVersion,
+    "library_version": %d.libraryVersion}]}
   d.broadcastJson(ev)
 
 proc savePlaybackState(d: Daemon) =
@@ -556,8 +563,8 @@ proc savePlaybackState(d: Daemon) =
     d.lib.setPlaybackState("sp_cookie_file_path", d.spCookieFilePath)
     d.lib.setPlaybackState("sp_audio_format", d.spAudioFormat)
     var qArr = newJArray()
-    for p in d.playbackQueue:
-      qArr.add(%p)
+    for qi in d.playbackQueue:
+      qArr.add(%qi.path)
     d.lib.setPlaybackState("queue_json", $qArr)
     d.lib.setPlaybackState("shuffle_index", $(d.shuffleIndex))
 
@@ -597,9 +604,9 @@ proc saveStateFile(d: Daemon) =
     "spAudioFormat": d.spAudioFormat,
     "watchDirMtimes": newJObject()
   }
-  for p in d.playbackQueue:
-    if validateNoCrlf(p):
-      state["queue"].add(%p)
+  for qi in d.playbackQueue:
+    if validateNoCrlf(qi.path):
+      state["queue"].add(%qi.path)
   for i in d.shuffleOrder:
     state["shuffleOrder"].add(%i)
   if validateNoCrlf(d.currentTrackPath):
@@ -633,11 +640,11 @@ proc loadStateFile(d: Daemon) =
     let state = parseJson(jsonStr)
     if state{"version"}.getInt(0) < 1: return
     if state.hasKey("queue"):
-      d.playbackQueue = @[]
-      for p in state["queue"].items:
-        let s = p.getStr("")
-        if s.len > 0 and validateNoCrlf(s):
-          d.playbackQueue.add(s)
+        d.playbackQueue = @[]
+        for p in state["queue"].items:
+          let s = p.getStr("")
+          if s.len > 0 and validateNoCrlf(s):
+            d.playbackQueue.add(QueueItem(id: 0, path: s))
     if state.hasKey("shuffleOrder"):
       d.shuffleOrder = @[]
       for i in state["shuffleOrder"].items:
@@ -698,22 +705,23 @@ proc nextTrackFromQueue(d: Daemon): string =
     if d.shuffleIndex < d.shuffleOrder.len:
       let idx = d.shuffleOrder[d.shuffleIndex]
       if idx >= 0 and idx < d.playbackQueue.len:
-        result = d.playbackQueue[idx]
+        result = d.playbackQueue[idx].path
       d.shuffleIndex.inc
     if d.shuffleIndex >= d.shuffleOrder.len:
       if d.repeatMode == 1:
         d.shuffleOrder = shuffleOrder(d.playbackQueue.len)
         d.shuffleIndex = 0
         if d.shuffleOrder.len > 0:
-          result = d.playbackQueue[d.shuffleOrder[0]]
+          result = d.playbackQueue[d.shuffleOrder[0]].path
           d.shuffleIndex = 1
       else:
         result = ""
   elif d.playbackQueue.len > 0:
-    result = d.playbackQueue[0]
+    let qi = d.playbackQueue[0]
+    result = qi.path
     d.playbackQueue.delete(0)
     if d.repeatMode == 1 and result.len > 0:
-      d.playbackQueue.add(result)
+      d.playbackQueue.add(QueueItem(id: qi.id, path: result))
   if result.len > 0:
     d.lastConsumedFromQueue.add(result)
     if d.lastConsumedFromQueue.len > 10:
@@ -777,9 +785,9 @@ proc advanceToNextTrack(d: Daemon, forward: bool = true): bool =
     # Peek at next candidate without consuming
     var nextCandidate = ""
     if d.shuffleEnabled and d.shuffleIndex < d.shuffleOrder.len:
-      nextCandidate = d.playbackQueue[d.shuffleOrder[d.shuffleIndex]]
-    elif not d.shuffleEnabled:
-      nextCandidate = d.playbackQueue[0]
+      nextCandidate = d.playbackQueue[d.shuffleOrder[d.shuffleIndex]].path
+    elif not d.shuffleEnabled and d.playbackQueue.len > 0:
+      nextCandidate = d.playbackQueue[0].path
     if nextCandidate.len == 0: return false
     # Resolve YouTube watch URLs: prefer downloaded file, fall back to stream URL
     var loadPath = nextCandidate
@@ -877,6 +885,7 @@ proc execLibrary(d: Daemon, cmd: DaemonCmd): JsonNode =
         if path.len > 0:
           let trackId = d.lib.addTrack(path, title, artist, album, duration, 0, 0, "")
           result["track_id"] = %trackId
+          d.libraryVersion.inc
       except: stderr.writeLine("[gtm] addTrack error: " & getCurrentExceptionMsg())
   of dckUpdateTrackPath:
     if d.lib != nil and cmd.strArg.len > 0:
@@ -887,6 +896,7 @@ proc execLibrary(d: Daemon, cmd: DaemonCmd): JsonNode =
         let newTitle = data{"title"}.getStr("")
         if oldPath.len > 0 and newPath.len > 0:
           d.lib.updateTrackPath(oldPath, newPath, newTitle)
+          d.libraryVersion.inc
           result["updated"] = %true
       except: stderr.writeLine("[gtm] updateTrackPath error: " & getCurrentExceptionMsg())
   of dckDeleteTrack:
@@ -904,6 +914,7 @@ proc execLibrary(d: Daemon, cmd: DaemonCmd): JsonNode =
         if permanent:
           try: removeFile(origPath) except: discard
           d.lib.deleteTrack(trackId)
+          d.libraryVersion.inc
           result["ok"] = %true
         else:
           let trashDir = dataDir() / "trash"
@@ -915,6 +926,7 @@ proc execLibrary(d: Daemon, cmd: DaemonCmd): JsonNode =
             moveFile(origPath, trashPath)
             d.lib.trashTrack(trackId, origPath, trashPath)
             d.lib.deleteTrack(trackId)
+            d.libraryVersion.inc
             result["ok"] = %true
           except:
             result["ok"] = %false
@@ -932,6 +944,7 @@ proc execLibrary(d: Daemon, cmd: DaemonCmd): JsonNode =
           if not dirExists(dir): createDir(dir)
           try:
             moveFile(trashPath, origPath)
+            d.libraryVersion.inc
             result["ok"] = %true
             result["track_id"] = %trackId
             result["path"] = %origPath
@@ -971,6 +984,8 @@ proc execLibrary(d: Daemon, cmd: DaemonCmd): JsonNode =
         purged.inc
       result["purged"] = %purged
     result["ok"] = %true
+  of dckGetLibraryVersion:
+    result["library_version"] = %d.libraryVersion
   else: discard
 
 proc execPlaylists(d: Daemon, cmd: DaemonCmd): JsonNode =
@@ -979,6 +994,7 @@ proc execPlaylists(d: Daemon, cmd: DaemonCmd): JsonNode =
   of dckCreatePlaylist:
     if d.lib != nil and cmd.strArg.len > 0:
       let id = d.lib.createPlaylist(cmd.strArg)
+      d.libraryVersion.inc
       result["playlist_id"] = %id
       let pls = d.lib.loadPlaylists()
       var arr = newJArray()
@@ -988,6 +1004,7 @@ proc execPlaylists(d: Daemon, cmd: DaemonCmd): JsonNode =
   of dckDeletePlaylist:
     if d.lib != nil and cmd.intArg > 0:
       d.lib.deletePlaylist(int64(cmd.intArg))
+      d.libraryVersion.inc
       let pls = d.lib.loadPlaylists()
       var arr = newJArray()
       for pl in pls:
@@ -996,6 +1013,7 @@ proc execPlaylists(d: Daemon, cmd: DaemonCmd): JsonNode =
   of dckRenamePlaylist:
     if d.lib != nil and cmd.intArg > 0 and cmd.strArg.len > 0:
       d.lib.renamePlaylist(int64(cmd.intArg), cmd.strArg)
+      d.libraryVersion.inc
       let pls = d.lib.loadPlaylists()
       var arr = newJArray()
       for pl in pls:
@@ -1013,6 +1031,7 @@ proc execPlaylists(d: Daemon, cmd: DaemonCmd): JsonNode =
             d.lib.addTrackToPlaylist(plId, trackId, pos)
           else:
             d.lib.removeTrackFromPlaylist(plId, trackId)
+          d.libraryVersion.inc
       except: stderr.writeLine("[gtm] addToPlaylist error: " & getCurrentExceptionMsg())
   of dckListPlaylists:
     if d.lib != nil:
@@ -1047,14 +1066,19 @@ proc execQueue(d: Daemon, cmd: DaemonCmd): JsonNode =
           var path = ""
           var title = ""
           var channel = ""
+          var trackId = 0'i64
           if item.kind == JString:
             path = item.getStr("")
           elif item.kind == JObject:
             path = item{"path"}.getStr("")
             title = item{"title"}.getStr("")
             channel = item{"channel"}.getStr("")
+            trackId = item{"id"}.getInt(0).int64
           if path.len > 0 and (isUrl(path) or fileExists(path)):
-            d.playbackQueue.add(path)
+            if trackId == 0 and d.lib != nil:
+              let foundId = d.lib.findTrackByPath(path)
+              if foundId > 0: trackId = foundId
+            d.playbackQueue.add(QueueItem(id: trackId, path: path))
             if isYtWatchUrl(path):
                 let existingPath = if d.lib != nil: d.lib.getDownloadByUrl(path) else: ""
                 if existingPath.len == 0:
@@ -1095,7 +1119,10 @@ proc execQueue(d: Daemon, cmd: DaemonCmd): JsonNode =
     d.sendQueueEvent()
   of dckQueueRemovePath:
     if cmd.strArg.len > 0:
-      let idx = d.playbackQueue.find(cmd.strArg)
+      var idx = -1
+      for i, qi in d.playbackQueue:
+        if qi.path == cmd.strArg:
+          idx = i; break
       if idx >= 0:
         d.playbackQueue.delete(idx)
     d.regenShuffleIfNeeded()
@@ -1113,7 +1140,7 @@ proc execQueue(d: Daemon, cmd: DaemonCmd): JsonNode =
     var removed = 0
     var i = 0
     while i < d.playbackQueue.len:
-      let p = d.playbackQueue[i]
+      let p = d.playbackQueue[i].path
       if p.len > 0 and not isYtWatchUrl(p) and not fileExists(p):
         d.playbackQueue.delete(i)
         removed.inc
@@ -1125,12 +1152,49 @@ proc execQueue(d: Daemon, cmd: DaemonCmd): JsonNode =
     result["removed"] = %removed
   of dckQueueList:
     var arr = newJArray()
-    for p in d.playbackQueue:
-      arr.add(%p)
+    for qi in d.playbackQueue:
+      arr.add(%*{"id": %qi.id, "path": %qi.path})
     result["queue"] = arr
   of dckQueueSetCursor:
     d.shuffleIndex = cmd.intArg
     result["cursor"] = %d.shuffleIndex
+  of dckQueuePlayIndex:
+    let idx = cmd.intArg
+    if idx >= 0 and idx < d.playbackQueue.len:
+      for i in 0..<idx:
+        if d.playbackQueue.len > 0:
+          d.playbackQueue.delete(0)
+      if d.playbackQueue.len > 0:
+        let qitem = d.playbackQueue[0]
+        var loadPath = qitem.path
+        if isYtWatchUrl(loadPath):
+          if d.ytDownloaded.hasKey(loadPath):
+            loadPath = d.ytDownloaded[loadPath]
+          elif d.ytStreamResolvedFor == loadPath and d.ytStreamResolvedUrl.len > 0:
+            loadPath = d.ytStreamResolvedUrl
+        if loadPath.len > 0 and d.player != nil:
+          d.playbackQueue.delete(0)
+          d.pendingActions.add(PulseAction(kind: pakLoadFile, strVal: loadPath))
+          d.currentTrackPath = qitem.path
+          if d.shuffleEnabled:
+            d.shuffleOrder = shuffleOrder(d.playbackQueue.len)
+            d.shuffleIndex = 0
+          d.autoAdvancing = false
+          d.crossfadePrepared = false
+          d.crossfadeStarted = false
+          d.crossfadeNextPath = ""
+          d.crossfadeConsumed = false
+          d.sendQueueEvent()
+          d.pushFullState()
+          result["played"] = %qitem.path
+        elif d.player == nil:
+          result["error"] = %"no audio backend"
+        else:
+          result["error"] = %"empty path"
+      else:
+        result["error"] = %"empty queue after truncation"
+    else:
+      result["error"] = %"index out of range"
   else: discard
 
 proc execShuffleRepeat(d: Daemon, cmd: DaemonCmd): JsonNode =
@@ -1577,15 +1641,18 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
       result = %*{"ok": false, "error": "no next track"}
     else:
       var nextPath = ""
+      var nextId = 0'i64
       acquire(d.lock)
       if d.shuffleEnabled and d.shuffleOrder.len > 0 and d.shuffleIndex < d.shuffleOrder.len:
-        nextPath = d.playbackQueue[d.shuffleOrder[d.shuffleIndex]]
+        let qi = d.playbackQueue[d.shuffleOrder[d.shuffleIndex]]
+        nextPath = qi.path; nextId = qi.id
         d.shuffleIndex.inc
       elif not d.shuffleEnabled:
-        nextPath = d.playbackQueue[0]
+        let qi = d.playbackQueue[0]
+        nextPath = qi.path; nextId = qi.id
         d.playbackQueue.delete(0)
         if d.repeatMode == 1:
-          d.playbackQueue.add(nextPath)
+          d.playbackQueue.add(QueueItem(id: nextId, path: nextPath))
       if nextPath.len > 0:
         d.pendingActions.add(PulseAction(kind: pakLoadFile, strVal: nextPath))
       release(d.lock)
@@ -1761,13 +1828,14 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     result["crossfading"] = %d.playerCrossfading
     result["master_ended"] = %d.playerMasterEnded
     var qArr = newJArray()
-    for p in d.playbackQueue: qArr.add(%p)
+    for qi in d.playbackQueue: qArr.add(%*{"id": %qi.id, "path": %qi.path})
     result["queue"] = qArr
     var soArr = newJArray()
     for i in d.shuffleOrder: soArr.add(%i)
     result["shuffleOrder"] = soArr
     result["shuffleIndex"] = %d.shuffleIndex
     result["version"] = %d.stateVersion
+    result["library_version"] = %d.libraryVersion
     result["spatialWidth"] = %d.spatialWidth
     result["crossfadeDuration"] = %d.crossfadeDuration
     result["crossfadeCurve"] = %d.crossfadeCurve
@@ -1781,11 +1849,11 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     result["state"] = %st3
 
   # --- Non-audio commands (existing dispatch procs — no d.player access) ---
-  of dckGetLibrary, dckAddTrack, dckUpdateTrackPath, dckDeleteTrack, dckRestoreTrack, dckPermanentDelete, dckListTrash, dckPurgeTrash:
+  of dckGetLibrary, dckAddTrack, dckUpdateTrackPath, dckDeleteTrack, dckRestoreTrack, dckPermanentDelete, dckListTrash, dckPurgeTrash, dckGetLibraryVersion:
     result = execLibrary(d, cmd)
   of dckCreatePlaylist, dckDeletePlaylist, dckRenamePlaylist, dckAddToPlaylist, dckRemoveFromPlaylist, dckListPlaylists, dckGetPlaylistTracks:
     result = execPlaylists(d, cmd)
-  of dckQueueAdd, dckQueueRemove, dckQueueRemovePath, dckQueueClear, dckQueueValidate, dckQueueList, dckQueueSetCursor:
+  of dckQueueAdd, dckQueueRemove, dckQueueRemovePath, dckQueueClear, dckQueueValidate, dckQueueList, dckQueueSetCursor, dckQueuePlayIndex:
     result = execQueue(d, cmd)
   of dckSetShuffle, dckSetRepeat, dckSetSleepTimer:
     result = execShuffleRepeat(d, cmd)
@@ -2141,21 +2209,24 @@ proc handleAutoAdvance(d: Daemon) =
     d.crossfadeConsumed = false
     d.upNextSent = false
     if not d.shuffleEnabled and d.playbackQueue.len > 0:
+      let qi = d.playbackQueue[0]
       d.playbackQueue.delete(0)
       if d.repeatMode == 1:
-        d.playbackQueue.add(nextPath)
+        d.playbackQueue.add(QueueItem(id: qi.id, path: qi.path))
   elif d.playbackQueue.len > 0:
     var attempts = 0
     while attempts < d.playbackQueue.len:
+      var qi: QueueItem
       if d.shuffleEnabled and d.shuffleOrder.len > 0 and d.shuffleIndex < d.shuffleOrder.len:
-        nextPath = d.playbackQueue[d.shuffleOrder[d.shuffleIndex]]
+        qi = d.playbackQueue[d.shuffleOrder[d.shuffleIndex]]
         d.shuffleIndex.inc
       elif not d.shuffleEnabled:
-        nextPath = d.playbackQueue[0]
+        qi = d.playbackQueue[0]
         d.playbackQueue.delete(0)
+      nextPath = qi.path
       if nextPath.len > 0 and (isUrl(nextPath) or fileExists(nextPath)):
         if not d.shuffleEnabled and d.repeatMode == 1:
-          d.playbackQueue.add(nextPath)
+          d.playbackQueue.add(QueueItem(id: qi.id, path: nextPath))
         break
       nextPath = ""
       attempts.inc
@@ -2358,7 +2429,9 @@ proc runDaemon*() =
         let qj = parseJson(queueStr)
         daemon.playbackQueue = @[]
         for p in qj:
-          daemon.playbackQueue.add(p.getStr(""))
+          let pStr = p.getStr("")
+          if pStr.len > 0:
+            daemon.playbackQueue.add(QueueItem(id: 0, path: pStr))
       except: discard
       # Restore shuffle cursor
       let siStr = daemon.lib.getPlaybackState("shuffle_index")
@@ -2367,7 +2440,7 @@ proc runDaemon*() =
       # Validate restored queue paths
       var i = 0
       while i < daemon.playbackQueue.len:
-        let p = daemon.playbackQueue[i]
+        let p = daemon.playbackQueue[i].path
         if p.len > 0 and not isYtWatchUrl(p) and not fileExists(p):
           daemon.playbackQueue.delete(i)
         else:
@@ -2724,6 +2797,7 @@ proc runDaemon*() =
           let (ftitle, fartist) = parseFilenameForMetadata(p)
           discard daemon.lib.addTrack(p, ftitle, fartist, "", 0.0, 0, 0, "")
         daemon.scanningIdx.inc
+      daemon.libraryVersion.inc
       if daemon.scanningIdx >= daemon.scanningFiles.len:
         daemon.scanningDir = ""
         daemon.scanningFiles = @[]
@@ -2743,9 +2817,9 @@ proc runDaemon*() =
     var nextQueuedPath = ""
     if daemon.playerState == 1:
       if daemon.shuffleEnabled and daemon.shuffleOrder.len > 0 and daemon.shuffleIndex < daemon.shuffleOrder.len:
-        nextQueuedPath = daemon.playbackQueue[daemon.shuffleOrder[daemon.shuffleIndex]]
+        nextQueuedPath = daemon.playbackQueue[daemon.shuffleOrder[daemon.shuffleIndex]].path
       elif not daemon.shuffleEnabled and daemon.playbackQueue.len > 0:
-        nextQueuedPath = daemon.playbackQueue[0]
+        nextQueuedPath = daemon.playbackQueue[0].path
 
     if nextQueuedPath.len > 0 and not daemon.upNextSent:
       let dur = daemon.playerDuration

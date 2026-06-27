@@ -130,6 +130,10 @@ type
     settingsCategory*: SettingsCategory
     settingsFocusPanel*: LibraryPanel
 
+  QueueItem* = object
+    id*: int64
+    path*: string
+
   Track* = object
     path*: string
     title*: string
@@ -406,6 +410,8 @@ type
     feedbackTimer*: int
     playbackQueue*: seq[int]
     queuePaths*: seq[string]
+    queueItemIds*: seq[int64]
+    trackIdToIdx*: Table[int64, int]
     ytDebounceAt*: float
     ytStreamPendingItem*: YtSearchResult
     ytStreamTitle*: string

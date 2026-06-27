@@ -248,6 +248,11 @@ proc loadLibraryFromDaemon(state: var AppState, resp: JsonNode) =
       year: a{"year"}.getInt(0),
       genre: a{"genre"}.getStr("")
     ))
+  # Build track ID → index lookup table
+  state.trackIdToIdx = initTable[int64, int]()
+  for i, t in state.libraryTracks:
+    if t.id > 0:
+      state.trackIdToIdx[t.id] = i
   state.rebuildItems()
 
 proc scanLocalDir(state: var AppState, dir: string) =
@@ -335,8 +340,13 @@ proc buildPlaylistFromArgs(state: var AppState, args: seq[string]) =
     let addedCount = state.libraryTracks.len - startIdx
     if addedCount > 0:
       state.playbackQueue = @[]
+      state.queuePaths = @[]
+      state.queueItemIds = @[]
       for i in startIdx..<state.libraryTracks.len:
+        let t = state.libraryTracks[i]
         state.playbackQueue.add(i)
+        state.queuePaths.add("")
+        state.queueItemIds.add(t.id)
       # Sync queue to daemon (clear first, then add)
       if state.player.backendType == abtDaemon:
         let cli = DaemonService(state.svc)
@@ -419,22 +429,40 @@ proc sendPlayRequest(state: var AppState, path, title, channel: string, queuePat
       state.startupQueueFlushed = true
       state.playbackQueue = @[]
       state.queuePaths = @[]
+      state.queueItemIds = @[]
     cli.sendOnly(%*{"cmd": "load_file", "path": path, "title": title, "channel": channel})
     if queuePaths.len > 0:
       cli.sendOnly(%*{"cmd": "queue_clear"})
-      cli.sendOnly(%*{"cmd": "queue_add", "data": %queuePaths})
+      var dataArr = newJArray()
+      state.playbackQueue = @[]
+      state.queuePaths = @[]
+      state.queueItemIds = @[]
+      for qp in queuePaths:
+        dataArr.add(%qp)
+        var qId = 0'i64
+        var tIdx = -1
+        for i, t in state.libraryTracks:
+          if t.path == qp:
+            qId = t.id; tIdx = i; break
+        state.playbackQueue.add(tIdx)
+        state.queuePaths.add(qp)
+        state.queueItemIds.add(qId)
+      cli.sendOnly(%*{"cmd": "queue_add", "data": dataArr})
     cli.sendOnly(%*{"cmd": "play"})
   else:
     discard state.player.loadFile(path, title, channel)
     state.playbackQueue = @[]
     state.queuePaths = @[]
+    state.queueItemIds = @[]
     for p in queuePaths:
       var tIdx = -1
+      var qId = 0'i64
       for i, t in state.libraryTracks:
         if t.path == p:
-          tIdx = i; break
+          tIdx = i; qId = t.id; break
       state.playbackQueue.add(tIdx)
       state.queuePaths.add(p)
+      state.queueItemIds.add(qId)
     state.player.play()
   state.markDirtyBatch(cePlayState, ceTrack)
 
@@ -1287,7 +1315,11 @@ proc handleYtSearchOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           id: int64(state.libraryTracks.len + 1)
         )
         state.libraryTracks.add(track)
+        if track.id > 0:
+          state.trackIdToIdx[track.id] = state.libraryTracks.len - 1
         state.playbackQueue.add(state.libraryTracks.len - 1)
+        state.queuePaths.add("")
+        state.queueItemIds.add(track.id)
         daemonItems.add((item.url, item.title, item.channel))
       state.rebuildItems()
       state.markDirty(ceQueue)
@@ -1477,7 +1509,11 @@ proc handleYtBatchOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
             id: int64(state.libraryTracks.len + 1)
           )
           state.libraryTracks.add(track)
+          if track.id > 0:
+            state.trackIdToIdx[track.id] = state.libraryTracks.len - 1
           state.playbackQueue.add(state.libraryTracks.len - 1)
+          state.queuePaths.add("")
+          state.queueItemIds.add(track.id)
           daemonItems.add((item.url, item.title, item.channel))
         state.rebuildItems()
         state.markDirty(ceQueue)
@@ -1551,8 +1587,10 @@ proc handleQueuePickerOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]
     var items: seq[(string, string, string)] = @[]
     for idx in state.overlay.selected:
       if idx >= 0 and idx < state.libraryTracks.len:
-        state.playbackQueue.add(idx)
         let t = state.libraryTracks[idx]
+        state.playbackQueue.add(idx)
+        state.queuePaths.add("")
+        state.queueItemIds.add(t.id)
         items.add((t.path, t.title, t.artist))
     if items.len > 0 and state.player.backendType == abtDaemon:
       discard DaemonService(state.svc).queueAdd(items)
@@ -1989,8 +2027,13 @@ proc handlePlaylistInput(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           let addedCount = state.libraryTracks.len - startIdx
           if addedCount > 0:
             state.playbackQueue = @[]
+            state.queuePaths = @[]
+            state.queueItemIds = @[]
             for i in startIdx..<state.libraryTracks.len:
+              let t = state.libraryTracks[i]
               state.playbackQueue.add(i)
+              state.queuePaths.add("")
+              state.queueItemIds.add(t.id)
             if state.player.backendType == abtDaemon:
               let cli = DaemonService(state.svc)
               if cli.isConnected:
@@ -2165,24 +2208,12 @@ proc handleMainKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     if state.tab == tabNowPlaying and state.playbackQueue.len > 0:
       let qIdx = state.queueCursor
       if qIdx >= 0 and qIdx < state.playbackQueue.len:
-        let tIdx = state.playbackQueue[qIdx]
-        let trackPath = if tIdx >= 0 and tIdx < state.libraryTracks.len:
-          state.libraryTracks[tIdx].path
-        elif qIdx < state.queuePaths.len:
-          state.queuePaths[qIdx]
-        else:
-          ""
-        if trackPath.len > 0:
-          for i in 0..<qIdx:
-            if state.playbackQueue.len > 0:
-              state.playbackQueue.delete(0)
-          if state.queuePaths.len >= qIdx:
-            for i in 0..<qIdx:
-              if state.queuePaths.len > 0:
-                state.queuePaths.delete(0)
-          state.queueCursor = 0
+        state.queueCursor = 0
+        if qIdx == 0:
           discard daemonSimpleCmd(DaemonService(state.svc), "next")
-          state.markDirty(cePlayState)
+        else:
+          discard DaemonService(state.svc).queuePlayIndex(qIdx)
+        state.markDirty(cePlayState)
     elif state.tab != tabSettings and state.selectedIndices.len > 0:
       state.playSelected()
     elif state.tab != tabSettings and state.filteredCount() > 0 and state.selectIndex >= 0:
@@ -2675,6 +2706,8 @@ proc processEvents(state: var AppState) =
             try: fs["crossfadeDuration"] = %parseInt(ev.metadata["full_crossfade_duration"]) except: discard
           if ev.metadata.hasKey("full_crossfade_curve"):
             try: fs["crossfadeCurve"] = %parseInt(ev.metadata["full_crossfade_curve"]) except: discard
+          if ev.metadata.hasKey("library_version"):
+            try: state.libraryLastVersion = parseInt(ev.metadata["library_version"]) except: discard
           if fs.len > 0:
             fullStateSync(state, fs)
             state.markDirtyBatch(cePlayState, ceTrack, cePosition, ceVolume)
@@ -2684,20 +2717,24 @@ proc processEvents(state: var AppState) =
               let daemonQueue = parseJson(ev.metadata["queue"])
               var newQueue: seq[int] = @[]
               var newPaths: seq[string] = @[]
+              var newIds: seq[int64] = @[]
               for qItem in daemonQueue.items:
-                let qPath = qItem.getStr("")
-                var found = false
-                for i, t in state.libraryTracks:
-                  if t.path == qPath:
-                    newQueue.add(i)
-                    newPaths.add("")
-                    found = true
-                    break
-                if not found:
-                  newQueue.add(-1)
-                  newPaths.add(qPath)
+                let qId = qItem{"id"}.getInt(0).int64
+                let qPath = qItem{"path"}.getStr("")
+                var idx = -1
+                if qId > 0 and state.trackIdToIdx.hasKey(qId):
+                  idx = state.trackIdToIdx[qId]
+                else:
+                  for i, t in state.libraryTracks:
+                    if t.path == qPath:
+                      idx = i
+                      break
+                newQueue.add(idx)
+                newPaths.add(if idx >= 0: "" else: qPath)
+                newIds.add(qId)
               state.playbackQueue = newQueue
               state.queuePaths = newPaths
+              state.queueItemIds = newIds
               if state.queueCursor >= newQueue.len:
                 state.queueCursor = max(0, newQueue.len - 1)
               state.rebuildItems()
@@ -2725,26 +2762,30 @@ proc processEvents(state: var AppState) =
               state.shuffleOrder.add(v.getInt(0))
           except: discard
         state.markDirty(ceQueue)
-        # Rebuild TUI playbackQueue from daemon queue paths
+        # Rebuild TUI playbackQueue from daemon queue items (ID-based)
         if ev.metadata.hasKey("queue"):
           try:
             let daemonQueue = parseJson(ev.metadata["queue"])
             var newQueue: seq[int] = @[]
             var newPaths: seq[string] = @[]
+            var newIds: seq[int64] = @[]
             for qItem in daemonQueue.items:
-              let qPath = qItem.getStr("")
-              var found = false
-              for i, t in state.libraryTracks:
-                if t.path == qPath:
-                  newQueue.add(i)
-                  newPaths.add("")
-                  found = true
-                  break
-              if not found:
-                newQueue.add(-1)
-                newPaths.add(qPath)
+              let qId = qItem{"id"}.getInt(0).int64
+              let qPath = qItem{"path"}.getStr("")
+              var idx = -1
+              if qId > 0 and state.trackIdToIdx.hasKey(qId):
+                idx = state.trackIdToIdx[qId]
+              else:
+                for i, t in state.libraryTracks:
+                  if t.path == qPath:
+                    idx = i
+                    break
+              newQueue.add(idx)
+              newPaths.add(if idx >= 0: "" else: qPath)
+              newIds.add(qId)
             state.playbackQueue = newQueue
             state.queuePaths = newPaths
+            state.queueItemIds = newIds
             if state.queueCursor >= newQueue.len:
               state.queueCursor = max(0, newQueue.len - 1)
             state.rebuildItems()
@@ -3102,6 +3143,20 @@ proc runTui(args: seq[string]) =
         else: discard
       retryLoadLibrary(ctx.state)
       processEvents(ctx.state)
+      # Periodic library poll (every ~2 seconds) — detect changes from daemon mutations
+      if ctx.state.startupPhase == spReady and ctx.state.player.backendType == abtDaemon and ctx.state.libraryTracks.len > 0:
+        let now = epochTime()
+        if now - ctx.state.libraryLastRetryAt > 2.0:
+          ctx.state.libraryLastRetryAt = now
+          let cli = DaemonService(ctx.state.svc)
+          if cli.isConnected:
+            let libVer = cli.getLibraryVersion()
+            if libVer > ctx.state.libraryLastVersion:
+              ctx.state.libraryLastVersion = libVer
+              let resp = cli.getLibrary()
+              if resp.hasKey("tracks") and resp["tracks"].len > 0:
+                ctx.state.loadLibraryFromDaemon(resp)
+                ctx.state.markDirty(ceSearchResults)
       ctx.state.spinnerFrame.inc
       persistConfigIfDirty(ctx.state)
       # Daemon reconnection watchdog — non-blocking async state sync
@@ -3243,6 +3298,13 @@ proc runTui(args: seq[string]) =
         lastW = curW
         lastH = curH
         resized = true
+        # Force re-transmit cover on resize — terminal may have cleared image slots
+        if ctx.state.hasKittyGraphics:
+          ctx.state.coverImageId = -1
+          ctx.state.hoverState.coverTransmitted = false
+      # Periodic cover re-transmit (every 60 frames ~1s) for robustness
+      if ctx.state.hasKittyGraphics and ctx.state.spinnerFrame mod 60 == 0 and ctx.state.coverImageId >= 0:
+        ctx.state.coverImageId = -1
       if ctx.state.status != oldStatus:
         ctx.state.needsRedraw = true
       oldStatus = ctx.state.status

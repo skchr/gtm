@@ -85,6 +85,9 @@ proc queueList*(svc: DaemonService): JsonNode =
 proc queueSetCursor*(svc: DaemonService, index: int): JsonNode =
   svc.session.request(%*{"cmd": "set_queue_cursor", "index": index})
 
+proc queuePlayIndex*(svc: DaemonService, index: int): JsonNode =
+  svc.session.request(%*{"cmd": "queue_play_index", "index": index})
+
 # ── Playback control (daemon-specific, not on AudioBackend) ──
 
 proc sendNext*(svc: DaemonService) =
@@ -137,6 +140,11 @@ proc getLibrary*(svc: DaemonService): JsonNode =
 
 proc scanDir*(svc: DaemonService, path: string): JsonNode =
   svc.session.request(%*{"cmd": "scan", "path": path})
+
+proc getLibraryVersion*(svc: DaemonService): int =
+  if svc.session == nil: return 0
+  let resp = svc.session.request(%*{"cmd": "get_library_version"})
+  resp{"library_version"}.getInt(0)
 
 proc deleteTrack*(svc: DaemonService, trackId: int64, permanent: bool = false): JsonNode =
   svc.session.request(%*{"cmd": "delete_track", "track_id": trackId, "permanent": permanent})
