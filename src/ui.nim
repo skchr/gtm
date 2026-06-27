@@ -1333,6 +1333,11 @@ method render*(node: GenericOverlay, ctx: var nw.Context[State]) =
     title = ic.search & " Search Lyrics (artist title)"
     boxW = min(60, w - 8)
     boxH = min(24, h - 4)
+  of okDeleteConfirm:
+    title = ic.cross & " Delete Tracks"
+    boxW = min(44, w - 8)
+    boxH = 6
+    queryLine = false
   else: return
   let boxX = (w - boxW) div 2
   let boxY = (h - boxH) div 2
@@ -1671,6 +1676,12 @@ method render*(node: GenericOverlay, ctx: var nw.Context[State]) =
     elif ov.results.len == 0:
       writeStr(ctx.tb, boxX + 2, curY, ic.search & " Type to search for tracks...", theme.subtext0)
     writeStr(ctx.tb, boxX + 1, boxY + boxH - 1, truncateAt(ic.play & " Enter:Play  Esc:Cancel", boxW - 2), theme.subtext0)
+  #--- Delete Confirm ---
+  elif ov.kind == okDeleteConfirm:
+    let msg = if ov.query.len > 0: ov.query else: "Delete selected track(s)?"
+    writeStr(ctx.tb, boxX + 2, curY, truncateAt(msg, boxW - 4), theme.text)
+    writeStr(ctx.tb, boxX + 1, boxY + boxH - 1,
+      truncateAt("[T] Trash  [Shift+P] Permanent  [Esc] Cancel", boxW - 2), theme.subtext0)
 
 type HelpOverlay = ref object of nw.Node
 method render*(node: HelpOverlay, ctx: var nw.Context[State]) =

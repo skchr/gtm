@@ -237,6 +237,7 @@ type
     okSpotifyUrlInput
     okSpotifySearch
     okLyricsSearch
+    okDeleteConfirm
 
   YtSubTab* = enum ystAll, ystPlaylists
 
@@ -468,7 +469,6 @@ type
     spinnerFrame*: int
     queueCursor*: int
     queuePendingConfirm*: int
-    deleteConfirmPending*: int
     eqPreset*: string
     spatialWidth*: float
     eqPresetList*: seq[string]

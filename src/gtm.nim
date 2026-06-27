@@ -686,8 +686,8 @@ proc deleteConfirm(state: var AppState) =
     state.setFeedback("No tracks selected")
     return
   let n = state.selectedIndices.len
-  state.deleteConfirmPending = 1
-  state.setFeedback("Delete " & $n & " track(s)? (t=trash, P=perm, n=cancel)")
+  state.overlay = OverlayState(kind: okDeleteConfirm,
+    query: "Delete " & $n & " track(s)? (t=trash, P=perm, n=cancel)")
 
 proc restoreTerminal() =
   iw.deinit()
@@ -1459,6 +1459,15 @@ proc handleLyricsSearchOverlay(state: var AppState, key: iw.Key, chars: seq[Rune
           let parts = state.overlay.query.split(' ', 1)
           let artist = if parts.len > 1: parts[1] else: ""
           DaemonService(state.svc).sendOnly(%*{"cmd": "search_lyrics", "title": parts[0], "artist": artist})
+
+proc handleDeleteConfirmOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
+  if key == iw.Key.T:
+    state.deleteSelected(false)
+    state.showNotification("Moved to trash", nkSuccess)
+  elif key == iw.Key.ShiftP:
+    state.deleteSelected(true)
+    state.showNotification("Permanently deleted", nkWarning)
+  state.overlay = OverlayState(kind: okNone)
 
 proc handleYtBatchOverlay(state: var AppState, key: iw.Key, chars: seq[Rune]) =
   if state.overlay.batchShowPls:
@@ -2390,6 +2399,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     of okSpotifyUrlInput: state.handleSpotifyUrlOverlay(key, chars)
     of okSpotifySearch: state.handleSpotifySearchOverlay(key, chars)
     of okLyricsSearch: state.handleLyricsSearchOverlay(key, chars)
+    of okDeleteConfirm: state.handleDeleteConfirmOverlay(key, chars)
     of okNone: discard
     return
   let sidebarScopes = if state.sidebarSpExpanded:
@@ -2511,21 +2521,6 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     state.queuePendingConfirm = 0
     state.markDirty(ceQueue)
     state.setFeedback("")
-    return
-  if state.deleteConfirmPending != 0:
-    if key == iw.Key.T:
-      state.deleteSelected(false)
-      state.showNotification("Moved to trash", nkInfo)
-    elif key == iw.Key.ShiftP:
-      state.deleteSelected(true)
-      state.showNotification("Permanently deleted", nkInfo)
-    else:
-      if key != iw.Key.None:
-        let idx = state.selectIndex
-        if idx >= 0 and idx < state.filteredIndices.len:
-          state.selectIndex = idx
-        state.setFeedback("")
-    state.deleteConfirmPending = 0
     return
   if state.pendingSeq.len > 0:
     state.pendingSeq.add(key)
