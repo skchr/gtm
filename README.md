@@ -148,6 +148,25 @@ gtm can import Spotify playlists and search Spotify tracks via [spotDL](https://
                                │  (FFT bars)  │
                                └─────────────┘
 ```
+## Technical Changes (v0.7.30)
+
+### Queue & Playlist Index Consistency
+
+The codebase uses five distinct indexing systems: `libraryTracks[i]` (library array position, changes on rescan), `displayItems[i]` (UI visible item position, rebuilt per view change), `playbackQueue[i]` (queue position), `track.id` (stable SQLite row ID), and `UserPlaylist.trackIds` (SQLite IDs in playlist). Seven fixes address index confusion and state sync gaps:
+
+1. **`getCurrentTrack` fallback guard** — Removed `libraryTracks[selectIndex]` fallback that played a random unrelated track when pressing Enter on artist, album, or playlist items. The function now returns an empty `Track()` for non-track selections.
+
+2. **`playSelected` non-track guard** — Returns early when the selected item is not a track (`kind != likTrack`), preventing Enter on artist/album/playlist/Spotify playlist items from triggering playback of a wrong track.
+
+3. **Dead fallback removal** — Removed unreachable fallback loop in `playSelected` that iterated `libraryTracks` by raw index (ignoring sort/filter), which was dead code after the above two guards.
+
+4. **Playlist contents rendering** — `rebuildItems` now renders individual playlist tracks (via `trackIds`→`libraryTracks` index resolution) when `playlistContentsIdx >= 0`, instead of showing the playlist list stub. Users can now see, scroll, and play tracks inside a playlist view.
+
+5. **Shuffle order sync** — `shuffleOrder` from daemon `queue_changed` events was missing from the IPC metadata key list (`src/session.nim:146`) and was never parsed by the TUI. Now it is serialized through the wire protocol and reconstructed on the TUI side, so `state.shuffleOrder` reflects the actual daemon permutation.
+
+6. **Queue cursor sync** — Up/Down key presses in the Now Playing tab's "Up Next" section now send `queue_set_cursor` to the daemon, aligning `d.shuffleIndex` with `state.queueCursor` so that Enter on a queue item correctly advances playback to the selected position even in shuffle mode.
+
+7. **File existence validation** — Non-existent local files are now skipped in `dckQueueAdd` (guard before `playbackQueue.add`), rejected in `dckLoadFile` (returns `"file not found"` error), and scanned past in `handleAutoAdvance` (loop advances through the queue until finding a valid path or exhausting the queue).
 
 ---
 
@@ -158,4 +177,5 @@ gtm can import Spotify playlists and search Spotify tracks via [spotDL](https://
 > This is free software, released under the GPL-3.0 license.
 
 ---
+
 ---
