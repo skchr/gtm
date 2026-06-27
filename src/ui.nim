@@ -793,7 +793,7 @@ method render*(node: SettingsView, ctx: var nw.Context[State]) =
       let fg = if isSel: theme.base else: theme.subtext0
       writeStr(ctx.tb, 2, y, prefix & cat.icon & " " & cat.label, fg)
     fillBg(ctx.tb, 0, h - 1, w - 1, h - 1, theme.base)
-    writeStr(ctx.tb, 1, h - 1, " Enter:Select  Tab:Content ", theme.subtext0)
+    writeStr(ctx.tb, 1, h - 1, " Tab/→:Content ", theme.subtext0)
     return
 
   let sidebarW = if w < 55: 0 else: max(14, min(22, w div 5))
@@ -1011,8 +1011,8 @@ method render*(node: SettingsView, ctx: var nw.Context[State]) =
   # Bottom status line (shared) — keybinding hints instead of version
   fillBg(ctx.tb, 0, h - 1, w - 1, h - 1, theme.base)
   let kbLine = "Tracks: " & $state.libraryTracks.len & "  |  " &
-    (if sidebarFocused: "Tab/Enter:Content  \u2190/\u2192:Switch"
-     else: "\u2190/\u2192:Adjust  Tab:Category  Enter:Open")
+    (if sidebarFocused: "Tab/\u2192:Content"
+     else: "\u2190/Tab:Category")
   writeStr(ctx.tb, 1, h - 1, truncateAt(kbLine, w - 2), theme.subtext0)
 
 type ProgressBarComp = ref object of nw.Node

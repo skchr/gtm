@@ -2093,7 +2093,12 @@ proc handleMainKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     if state.keyboardMode == kmTermux:
       state.mode = imLeaderMode
   of iw.Key.Tab:
-    if state.libraryFocusPanel == lpSidebar:
+    if state.tab == tabSettings:
+      if state.settingsFocusPanel == lpSidebar:
+        state.settingsFocusPanel = lpContent
+      else:
+        state.settingsFocusPanel = lpSidebar
+    elif state.libraryFocusPanel == lpSidebar:
       state.libraryFocusPanel = lpContent
     else:
       state.libraryFocusPanel = lpSidebar
@@ -2206,9 +2211,9 @@ proc handleMainKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           state.queueCursor = 0
           discard daemonSimpleCmd(DaemonService(state.svc), "next")
           state.markDirty(cePlayState)
-    elif state.selectedIndices.len > 0:
+    elif state.tab != tabSettings and state.selectedIndices.len > 0:
       state.playSelected()
-    elif state.filteredCount() > 0 and state.selectIndex >= 0:
+    elif state.tab != tabSettings and state.filteredCount() > 0 and state.selectIndex >= 0:
       state.playSelected()
   of iw.Key.S:
     if guardDebounce(state): return
@@ -2246,7 +2251,9 @@ proc handleMainKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
   of iw.Key.Dot: state.player.seek(5.0); state.setFeedback("[Seeking +5s]")
   of iw.Key.Left:
     if state.tab == tabSettings:
-      state.switchTab(AppTab((state.tab.int - 1 + 3) mod 3))
+      if state.settingsFocusPanel == lpContent:
+        state.settingsFocusPanel = lpSidebar
+        state.needsRedraw = true
     elif state.libraryFocusPanel == lpContent and not state.isPlaylistView():
       state.libraryFocusPanel = lpSidebar; state.needsRedraw = true
     elif state.isPlaylistView():
@@ -2254,7 +2261,9 @@ proc handleMainKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         state.playlistContentsIdx = -1; state.selectIndex = 0; state.rebuildItems(); state.setFeedback("[Playlist Up]")
   of iw.Key.Right:
     if state.tab == tabSettings:
-      state.switchTab(AppTab((state.tab.int + 1) mod 3))
+      if state.settingsFocusPanel == lpSidebar:
+        state.settingsFocusPanel = lpContent
+        state.needsRedraw = true
     elif state.libraryFocusPanel == lpSidebar:
       state.libraryFocusPanel = lpContent; state.needsRedraw = true
     elif state.isPlaylistView():
