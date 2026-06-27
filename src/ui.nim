@@ -258,23 +258,42 @@ proc renderHoverPreview*(ctx: var nw.Context[State]) =
   if not h.active or h.trackIdx < 0: return
   let w = iw.width(ctx.tb)
   let hh = iw.height(ctx.tb)
-  let boxW = min(40, w div 3 + 8)
-  let boxH = 7
+  let hasCover = h.coverData.len > 0 and state.hasKittyGraphics
+  let imgW = if hasCover: 6 else: 0
+  let imgH = if hasCover: 6 else: 0
+  let textH = 5
+  let boxH = max(textH, imgH) + 2
+  let boxW = min(48, w div 3 + 14)
   let boxX = min(h.rowX + 4, w - boxW - 1)
   let boxY = min(h.rowY, hh - boxH - 2)
   if boxX < 0 or boxY < 0: return
   drawBorder(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.mauve, state.borderStyle)
   fillBg(ctx.tb, boxX + 1, boxY + 1, boxX + boxW - 2, boxY + boxH - 2, theme.surface0)
+  # Kitty image on right side
+  if hasCover:
+    let imgX = boxX + boxW - imgW - 2
+    let imgY = boxY + 1
+    deleteImage(HoverImageId)
+    transmitImage(h.coverData, h.coverMime, HoverImageId)
+    placeImage(imgX, imgY, HoverImageId, imgW)
+    for y in imgY..min(imgY + imgH - 1, boxY + boxH - 2):
+      for x in imgX..min(imgX + imgW - 1, boxX + boxW - 2):
+        var cell = ctx.tb[x, y]
+        cell.protected = true
+        ctx.tb[x, y] = cell
+  # Text metadata on left side
   var ly = boxY + 1
-  writeStr(ctx.tb, boxX + 2, ly, truncateAt(h.title, boxW - 4), theme.text); ly.inc
+  let textX = boxX + 2
+  let maxTextW = if imgW > 0: boxW - imgW - 5 else: boxW - 4
+  writeStr(ctx.tb, textX, ly, truncateAt(h.title, maxTextW), theme.text); ly.inc
   if h.album.len > 0:
-    writeStr(ctx.tb, boxX + 2, ly, truncateAt(h.album, boxW - 4), theme.subtext0); ly.inc
+    writeStr(ctx.tb, textX, ly, truncateAt(h.album, maxTextW), theme.subtext0); ly.inc
   if h.channel.len > 0:
-    writeStr(ctx.tb, boxX + 2, ly, truncateAt(h.channel, boxW - 4), theme.subtext0); ly.inc
+    writeStr(ctx.tb, textX, ly, truncateAt(h.channel, maxTextW), theme.subtext0); ly.inc
   if h.duration > 0:
-    writeStr(ctx.tb, boxX + 2, ly, formatTime(h.duration), theme.subtext0); ly.inc
+    writeStr(ctx.tb, textX, ly, "Duration: " & formatTime(h.duration), theme.subtext0); ly.inc
   let srcLabel = if h.path.startsWith("http"): "YouTube" else: "Local"
-  writeStr(ctx.tb, boxX + 2, ly, srcLabel, theme.sky)
+  writeStr(ctx.tb, textX, ly, srcLabel, theme.sky)
 
 type TabBar = ref object of nw.Node
 method render*(node: TabBar, ctx: var nw.Context[State]) =

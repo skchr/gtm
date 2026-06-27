@@ -3,6 +3,7 @@ import os, strutils, base64
 const
   KittyChunkSize = 3584
   CoverImageId* = 1
+  HoverImageId* = 2
 
 proc supportsKittyGraphics*(): bool =
   let tp = getEnv("TERM_PROGRAM", "")

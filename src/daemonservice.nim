@@ -8,7 +8,7 @@
 ## methods (play, stop, loadFile, seek, setVolume, etc.) work via
 ## store.state.player while daemon-specific IPC goes through store.service.
 
-import json, session, audio
+import json, session, audio, base64
 
 type
   DaemonService* = ref object of RootObj
@@ -245,6 +245,17 @@ proc purgeTrash*(svc: DaemonService): JsonNode =
 
 proc requestCoverArt*(svc: DaemonService, path: string) =
   svc.session.send(%*{"cmd": "request_cover_art", "path": path})
+
+proc getCoverArt*(svc: DaemonService, path: string): tuple[data: seq[byte], mime: string] =
+  if svc.session == nil: return (@[], "")
+  let resp = svc.session.request(%*{"cmd": "get_cover_art", "path": path})
+  if resp.hasKey("cover_data") and resp["cover_data"].getStr("").len > 0:
+    try:
+      let mime = resp{"cover_mime"}.getStr("image/jpeg")
+      let decoded = decode(resp["cover_data"].getStr(""))
+      return (cast[seq[byte]](decoded), mime)
+    except: discard
+  (@[], "")
 
 proc requestLyrics*(svc: DaemonService, path, title, artist: string, duration: float) =
   svc.session.send(%*{"cmd": "request_lyrics",

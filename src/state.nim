@@ -320,7 +320,10 @@ type
     album*: string
     channel*: string
     duration*: float
-
+    coverData*: seq[byte]
+    coverMime*: string
+    coverFetching*: bool
+    coverRequestedPath*: string
   AppState* = object
     theme*: Theme
     highlightGroups*: HighlightGroups

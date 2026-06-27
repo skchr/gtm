@@ -3283,13 +3283,21 @@ proc runTui(args: seq[string]) =
         oldTimePos = ctx.state.timePos
       # Hover preview: track selection changes and show preview after 3s idle
       if key != iw.Key.None:
+        if ctx.state.hoverState.active:
+          deleteImage(HoverImageId)
+          ctx.state.markDirty(ceSearchResults)
         ctx.state.hoverState.active = false
+        ctx.state.hoverState.coverData = @[]
+        ctx.state.hoverState.coverFetching = false
       if ctx.state.tab == tabLibrary and ctx.state.overlay.kind == okNone and not ctx.state.helpVisible and not ctx.state.aboutVisible:
         if ctx.state.selectIndex != ctx.state.lastHoverSelectIdx:
           ctx.state.lastHoverSelectIdx = ctx.state.selectIndex
           ctx.state.hoverState.hoverStart = epochTime()
           ctx.state.hoverState.active = false
           ctx.state.hoverState.trackIdx = -1
+          ctx.state.hoverState.coverData = @[]
+          ctx.state.hoverState.coverFetching = false
+          deleteImage(HoverImageId)
           if ctx.state.selectIndex >= 0 and ctx.state.selectIndex < ctx.state.displayItems.len:
             let item = ctx.state.displayItems[ctx.state.selectIndex]
             if item.kind == likTrack and item.trackIdx >= 0 and item.trackIdx < ctx.state.libraryTracks.len:
@@ -3305,8 +3313,30 @@ proc runTui(args: seq[string]) =
         if not ctx.state.hoverState.active and ctx.state.hoverState.trackIdx >= 0 and epochTime() - ctx.state.hoverState.hoverStart > 3.0:
           ctx.state.hoverState.active = true
           ctx.state.needsRedraw = true
+          # Fetch cover art for hover preview
+          if ctx.state.hasKittyGraphics and ctx.state.hoverState.path.len > 0 and not ctx.state.hoverState.coverFetching and ctx.state.hoverState.coverRequestedPath != ctx.state.hoverState.path:
+            ctx.state.hoverState.coverRequestedPath = ctx.state.hoverState.path
+            let cacheKey = hash(ctx.state.hoverState.path).toHex
+            if ctx.state.coverCache.hasKey(cacheKey):
+              let (cd, cm) = ctx.state.coverCache[cacheKey]
+              ctx.state.hoverState.coverData = cd
+              ctx.state.hoverState.coverMime = cm
+            elif ctx.state.player.backendType == abtDaemon:
+              ctx.state.hoverState.coverFetching = true
+              let cli = DaemonService(ctx.state.svc)
+              let (coverData, coverMime) = cli.getCoverArt(ctx.state.hoverState.path)
+              ctx.state.hoverState.coverData = coverData
+              ctx.state.hoverState.coverMime = coverMime
+              ctx.state.hoverState.coverFetching = false
+              if coverData.len > 0:
+                ctx.state.coverCache[cacheKey] = (coverData, coverMime)
+              ctx.state.needsRedraw = true
       else:
+        if ctx.state.hoverState.active:
+          deleteImage(HoverImageId)
         ctx.state.hoverState.active = false
+        ctx.state.hoverState.coverData = @[]
+        ctx.state.hoverState.coverFetching = false
       let now = epochTime()
       let shouldDraw = resized or ctx.state.needsRedraw or ctx.state.dirtyFlags.card > 0
       if shouldDraw and (resized or now - lastRenderTime > 0.016):

@@ -849,6 +849,7 @@ type
     bgTruecolor*: colors.Color
     style*: set[terminal.Style]
     forceWrite*: bool
+    protected*: bool
     cursor*: bool
 
   InternalBuffer = object
@@ -1270,7 +1271,10 @@ proc displayDiff(tb: var TerminalBuffer, prevTb: TerminalBuffer) =
     bufYPos = y
     for x in 0 ..< min(tb.width, terminal.terminalWidth()):
       let c = tb[x,y]
-      if c != prevTb[x,y] or c.forceWrite:
+      if c.protected:
+        flushBuf()
+        bufXPos = x+1
+      elif c != prevTb[x,y] or c.forceWrite:
         if c.bg != tb.currAttribs.bg or c.fg != tb.currAttribs.fg or c.bgTruecolor != tb.currAttribs.bgTruecolor or c.fgTruecolor != tb.currAttribs.fgTruecolor or c.style != tb.currAttribs.style:
           flushBuf()
           bufXPos = x
