@@ -14,7 +14,7 @@ type
     commandPalette*, filter*, selectMode*: string
     track*, time*, folder*, file*: string
     # Command palette icons (added for terminal fallback support)
-    leaderMenu*, showAbout*, trash*, eqPresets*: string
+    showAbout*, trash*, eqPresets*: string
     quitBg*, quitDaemon*, changeTheme*, savePlaylist*: string
     createPlaylist*, deletePlaylist*, renamePlaylist*: string
     toggleFav*, importM3u*, rescanLib*, sleepTimer*: string
@@ -35,7 +35,7 @@ proc nerdFontIcons*(): IconPack =
     musicNote: "\uF3B5", disk: "\uF0A0", headphone: "\uF025", speaker: "\uF028",
     commandPalette: "\uF120", filter: "\uF0B0", selectMode: "\uF204",
     track: "\uF001", time: "\uF017", folder: "\uF07B", file: "\uF15B",
-    leaderMenu: "\uF0C9", showAbout: "\uF059", trash: "\uF1F8", eqPresets: "\uF025",
+    showAbout: "\uF059", trash: "\uF1F8", eqPresets: "\uF025",
     quitBg: "\uF04C", quitDaemon: "\uF04D", changeTheme: "\uF1FC", savePlaylist: "\uF019",
     createPlaylist: "\uF067", deletePlaylist: "\uF1F8", renamePlaylist: "\uF044",
     toggleFav: "\uF004", importM3u: "\uF07C", rescanLib: "\uF021", sleepTimer: "\uF017",
@@ -57,7 +57,7 @@ proc emojiIcons*(): IconPack =
     musicNote: "\u266B", disk: "\U0001F4BF", headphone: "\U0001F3A7", speaker: "\U0001F509",
     commandPalette: "\u2328", filter: "\U0001F50D", selectMode: "\U0001F7E8",
     track: "\U0001F3B5", time: "\u23F1", folder: "\U0001F4C1", file: "\U0001F4C4",
-    leaderMenu: "\u2630", showAbout: "\u2139", trash: "\U0001F5D1", eqPresets: "\U0001F3B5",
+    showAbout: "\u2139", trash: "\U0001F5D1", eqPresets: "\U0001F3B5",
     quitBg: "\u23F8", quitDaemon: "\u23F9", changeTheme: "\U0001F3A8", savePlaylist: "\U0001F4BE",
     createPlaylist: "\u2795", deletePlaylist: "\u274C", renamePlaylist: "\U0001F4DD",
     toggleFav: "\u2B50", importM3u: "\U0001F4C2", rescanLib: "\U0001F504", sleepTimer: "\u23F0",
@@ -154,7 +154,6 @@ proc applyOverrides(pack: IconPack): IconPack =
 
 proc commandIcon*(cmdId: string, ic: IconPack): string =
   case cmdId
-  of "leader_menu": ic.leaderMenu
   of "toggle_play_pause": ic.play
   of "stop_playback": ic.stopPlayback
   of "seek_forward": ic.seekForward

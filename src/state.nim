@@ -51,9 +51,6 @@ type
     cePlaylists, ceQueueCursor, ceFeedback, ceDownloadProgress,
     ceReconnecting
 
-  KeyboardMode* = enum
-    kmDesktop, kmTermux
-
   StartupPhase* = enum
     spInit, spDaemonConnecting, spConfigLoading, spLibraryLoading,
     spSpotifySync, spReady
@@ -116,7 +113,7 @@ type
     cctEqualPower, cctQuadratic, cctCubic, cctAsymmetric
 
   InputMode* = enum
-    imNormal, imFilter, imLeaderMode
+    imNormal, imFilter
 
   LibraryPanel* = enum
     lpSidebar, lpContent
@@ -449,7 +446,6 @@ type
     overlayOpacity*: float
     borderStyle*: BorderStyle
     progressStyle*: int
-    keyboardMode*: KeyboardMode
     ytProgressCurrent*: int
     ytProgressTotal*: int
     crossfadeDuration*: int

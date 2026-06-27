@@ -105,8 +105,6 @@ proc loadConfig(state: var AppState) =
         state.borderStyle = BorderStyle(json["border_style"].getInt(0))
       if json.hasKey("progress_style"):
         state.progressStyle = json["progress_style"].getInt(0)
-      if json.hasKey("keyboard_mode"):
-        state.keyboardMode = if json["keyboard_mode"].getStr("desktop") == "termux": kmTermux else: kmDesktop
       if json.hasKey("on_config_apply"):
         let arr = json["on_config_apply"]
         if arr.kind == JArray:
@@ -188,7 +186,6 @@ proc saveConfig(state: AppState) =
   j["overlay_opacity"] = %state.overlayOpacity
   j["border_style"] = %state.borderStyle.ord
   j["progress_style"] = %state.progressStyle
-  j["keyboard_mode"] = %(if state.keyboardMode == kmTermux: "termux" else: "desktop")
   # Save footer left/right module sets
   var leftMods = newJArray()
   for m in state.footerLeftModules:
@@ -718,9 +715,11 @@ proc quitDaemon(state: var AppState) =
 
 proc goToFirst(state: var AppState) =
   state.selectIndex = 0
+  state.needsRedraw = true
 
 proc goToLast(state: var AppState) =
   state.selectIndex = max(0, state.filteredCount() - 1)
+  state.needsRedraw = true
 
 proc queuePath*(state: AppState): string = state.dataDir / "queue.json"
 
@@ -836,12 +835,16 @@ proc switchTab(state: var AppState, tab: AppTab) =
   state.needsRedraw = true
 
 proc initCommands(state: var AppState) =
-  state.registerCommand("leader_menu", "Actions Menu",
-    "Open the actions/leader menu", "\u2316", @["CtrlL"],
-    proc(s: var AppState) = s.mode = imLeaderMode)
   state.registerCommand("toggle_play_pause", "Toggle Play/Pause",
     "Toggle between play and pause states", "\u25B6", @["Space"],
-    proc(s: var AppState) = s.player.togglePause())
+    proc(s: var AppState) =
+      if s.selectedIndices.len > 0:
+        s.selectMode = false
+        s.playSelected()
+      elif s.status == psPlaying:
+        s.player.pause()
+      else:
+        s.player.play())
   state.registerCommand("stop_playback", "Stop",
     "Stop playback and reset position", "\u25A0", @["CtrlS", "s"],
     proc(s: var AppState) = s.player.stop(); s.status = psStopped)
@@ -900,10 +903,10 @@ proc initCommands(state: var AppState) =
     "Jump to last item in the list", "\u23ED", @["ShiftG"],
     proc(s: var AppState) = s.goToLast(); s.playSelected())
   state.registerCommand("toggle_select_mode", "Toggle Select Mode",
-    "Enter or exit multi-select mode", "\U0001F7E8", @["v"],
+    "Enter or exit multi-select mode", "\U0001F7E8", @["CtrlV"],
     proc(s: var AppState) = s.toggleSelect())
   state.registerCommand("select_all", "Select All",
-    "Select all visible items", "\U0001F7E9", @[],
+    "Select all visible items", "\U0001F7E9", @["CtrlZ"],
     proc(s: var AppState) = s.selectAll())
   state.registerCommand("remove_selected", "Delete Selected",
     "Move selected tracks to trash", "\u274C", @["AltX"],
@@ -977,7 +980,7 @@ proc initCommands(state: var AppState) =
     "Save current queue as a playlist file", "\U0001F4BE", @[],
     proc(s: var AppState) = s.saveCurrentQueue())
   state.registerCommand("create_playlist", "Create Playlist",
-    "Create a new playlist", "\U0001F4CB", @["AltP", "a"],
+    "Create a new playlist", "\U0001F4CB", @["a"],
     proc(s: var AppState) =
       s.playlistInputActive = true; s.playlistInputPrompt = "New Playlist Name:"; s.playlistInputBuffer = "")
   state.registerCommand("delete_playlist", "Delete Playlist",
@@ -1050,7 +1053,7 @@ proc initCommands(state: var AppState) =
       s.overlay = OverlayState(kind: okSpotifyUrlInput, query: "")
       s.setFeedback("Paste a Spotify playlist URL (e.g. https://open.spotify.com/playlist/...)"))
   state.registerCommand("spotify_search", "Spotify Search",
-    "Search Spotify for tracks", "\U0001F3B5", @[""],
+    "Search Spotify for tracks", "\U0001F3B5", @["CtrlE"],
     proc(s: var AppState) =
       s.overlay = OverlayState(kind: okSpotifySearch, query: "")
       s.spSearchResults = @[]
@@ -1074,6 +1077,7 @@ proc initCommands(state: var AppState) =
       if s.ytStreamChannel.len > 0:
         q &= " " & s.ytStreamChannel
       q &= " playlist"
+      s.switchTab(tabNowPlaying)
       if q.len > 0:
         s.overlay = OverlayState(kind: okYtSearch, query: q)
         s.ytDebounceAt = 0)
@@ -1112,7 +1116,7 @@ proc initCommands(state: var AppState) =
 proc execCmd(state: var AppState, cmdId: string) =
   let idx = findCommandIdx(state, cmdId)
   if idx >= 0:
-    if state.overlay.kind == okNone and not state.helpVisible and not state.aboutVisible and state.mode != imLeaderMode:
+    if state.overlay.kind == okNone and not state.helpVisible and not state.aboutVisible:
       state.lastCommandName = state.commands[idx].name
     state.commands[idx].handler(state)
 
@@ -2048,108 +2052,6 @@ proc handlePlaylistInput(state: var AppState, key: iw.Key, chars: seq[Rune]) =
       if code >= 32 and code < 127:
         state.playlistInputBuffer &= $ch
 
-proc handleLeaderMode(state: var AppState, key: iw.Key, chars: seq[Rune]) =
-  case key
-  of iw.Key.Escape:
-    state.mode = imNormal
-  of iw.Key.Space:
-    state.player.togglePause()
-    state.mode = imNormal
-  of iw.Key.S:
-    state.player.stop()
-    state.status = psStopped
-    state.mode = imNormal
-  of iw.Key.N:
-    state.nextTrack()
-    state.mode = imNormal
-  of iw.Key.P:
-    state.prevTrack()
-    state.mode = imNormal
-  of iw.Key.H:
-    if state.tab == tabLibrary:
-      const scopes = ord(high(FilterScope)) + 1
-      state.filterScope = FilterScope((state.filterScope.ord - 1 + scopes) mod scopes)
-      state.selectIndex = 0; state.rebuildItems()
-    elif state.isPlaylistView():
-      if state.playlistContentsIdx >= 0:
-        state.playlistContentsIdx = -1
-        state.selectIndex = 0
-        state.rebuildItems()
-        state.setFeedback("[Playlist Up]")
-    else:
-      state.adjustVolume(-5)
-    state.mode = imNormal
-  of iw.Key.L:
-    if state.tab == tabLibrary:
-      const scopes = ord(high(FilterScope)) + 1
-      state.filterScope = FilterScope((state.filterScope.ord + 1) mod scopes)
-      state.selectIndex = 0; state.rebuildItems()
-    elif state.isPlaylistView():
-      if state.playlistContentsIdx < 0:
-        let item = state.selectedItem()
-        if item.kind == likPlaylist:
-          let plIdx = state.selectIndex
-          if plIdx >= 0 and plIdx < state.libraryPlaylists.len and state.libraryPlaylists[plIdx].trackIds.len == 0:
-            state.mode = imNormal
-            return
-          state.playlistContentsIdx = state.selectIndex
-          state.selectIndex = 0
-          state.rebuildItems()
-          state.setFeedback("[Playlist Down]")
-    else:
-      state.adjustVolume(5)
-    state.mode = imNormal
-  of iw.Key.Enter:
-    if state.selectedIndices.len > 0:
-      state.playSelected()
-    state.mode = imNormal
-  of iw.Key.ShiftX:
-    state.deleteConfirm()
-    state.mode = imNormal
-  of iw.Key.V:
-    state.toggleSelect()
-    state.mode = imNormal
-  of iw.Key.ShiftV:
-    state.selectAll()
-    state.mode = imNormal
-  of iw.Key.ShiftA:
-    execCmd(state, "add_to_playlist")
-    state.mode = imNormal
-  of iw.Key.Slash:
-    state.mode = imFilter
-    state.filterText = ""
-    state.filteredIndices = @[]
-  of iw.Key.A:
-    if state.isPlaylistView() and state.playlistContentsIdx < 0:
-      execCmd(state, "create_playlist")
-    state.mode = imNormal
-  of iw.Key.D:
-    if state.isPlaylistView() and state.playlistContentsIdx < 0:
-      execCmd(state, "delete_playlist")
-    state.mode = imNormal
-  of iw.Key.R:
-    if state.isPlaylistView() and state.playlistContentsIdx < 0:
-      execCmd(state, "rename_playlist")
-    state.mode = imNormal
-  of iw.Key.Down:
-    state.moveSelection(1)
-    state.mode = imNormal
-  of iw.Key.Up:
-    state.moveSelection(-1)
-    state.mode = imNormal
-  of iw.Key.One: state.switchTab(tabNowPlaying); state.mode = imNormal
-  of iw.Key.Two: state.switchTab(tabLibrary); state.mode = imNormal
-  of iw.Key.Three: state.switchTab(tabSettings); state.mode = imNormal
-  of iw.Key.Comma: state.player.seek(-5.0); state.setFeedback("[Seeking -5s]"); state.mode = imNormal
-  of iw.Key.Dot: state.player.seek(5.0); state.setFeedback("[Seeking +5s]"); state.mode = imNormal
-  of iw.Key.Y: execCmd(state, "yt_search"); state.mode = imNormal
-  of iw.Key.E: execCmd(state, "show_equalizer"); state.mode = imNormal
-  of iw.Key.W: execCmd(state, "spotify_search"); state.mode = imNormal
-  of iw.Key.Q: execCmd(state, "queue_picker"); state.mode = imNormal
-  of iw.Key.T: execCmd(state, "change_theme"); state.mode = imNormal
-  else:
-    state.mode = imNormal
-
 proc handleFilterMode(state: var AppState, key: iw.Key, chars: seq[Rune]) =
   case key
   of iw.Key.Escape:
@@ -2186,23 +2088,10 @@ proc handleFilterMode(state: var AppState, key: iw.Key, chars: seq[Rune]) =
 proc handleMainKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
   case key
   of iw.Key.Colon:
-    state.overlay = OverlayState(kind: okCommandPalette, query: "")
-    for i in 0..<state.commands.len:
-      state.overlay.results.add(i)
+    execCmd(state, "command_palette")
   of iw.Key.Space:
     if guardDebounce(state): return
-    if state.selectedIndices.len > 0:
-      state.selectMode = false
-      state.playSelected()
-    elif state.status == psPlaying:
-      state.player.pause()
-    else:
-      state.player.play()
-  of iw.Key.CtrlL:
-    state.mode = imLeaderMode
-  of iw.Key.GraveAccent:
-    if state.keyboardMode == kmTermux:
-      state.mode = imLeaderMode
+    execCmd(state, "toggle_play_pause")
   of iw.Key.Tab:
     if state.tab == tabSettings:
       if state.settingsFocusPanel == lpSidebar:
@@ -2216,49 +2105,25 @@ proc handleMainKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     state.needsRedraw = true
   of iw.Key.CtrlS:
     if guardDebounce(state): return
-    state.player.stop()
-    state.status = psStopped
+    execCmd(state, "stop_playback")
   of iw.Key.CtrlN:
     if guardDebounce(state): return
-    state.nextTrack()
+    execCmd(state, "next_track")
   of iw.Key.CtrlP:
     if guardDebounce(state): return
-    state.prevTrack()
+    execCmd(state, "prev_track")
   of iw.Key.CtrlA: execCmd(state, "queue_picker")
   of iw.Key.CtrlD: execCmd(state, "download_track")
-  of iw.Key.CtrlJ: state.moveSelection(1)
-  of iw.Key.CtrlK: state.moveSelection(-1)
-  of iw.Key.CtrlG:
-    state.selectIndex = 0
-    state.needsRedraw = true
-  of iw.Key.CtrlF:
-    state.mode = imFilter
-    state.filterText = ""
-    state.filteredIndices = @[]
-  of iw.Key.CtrlR:
-    state.switchTab(tabNowPlaying)
-    if state.player.backendType == abtDaemon:
-      state.overlay = OverlayState(kind: okYtSearch, query: "", cursor: 0)
-      state.setFeedback("YouTube Recommended: press Enter to load or type to search")
-  of iw.Key.AltY:
-    state.overlay = OverlayState(kind: okYtSearch, query: "", cursor: 0)
-  of iw.Key.AltC:
-    state.overlay = OverlayState(kind: okThemePicker, query: "")
-    state.updateThemePickerResults()
-  of iw.Key.AltE:
-    if state.player.backendType == abtDaemon:
-      let cli = DaemonService(state.svc)
-      let resp = cli.getEqPresets()
-      if resp.hasKey("presets"):
-        state.eqPresetList = @[]
-        for p in resp["presets"]:
-          state.eqPresetList.add(p.getStr(""))
-    state.overlay = OverlayState(kind: okEqPresetPicker, query: "")
-    state.updateEqPresetPickerResults()
-  of iw.Key.AltS:
-    state.overlay = OverlayState(kind: okSpotifyUrlInput, query: "")
-  of iw.Key.AltA:
-    state.aboutVisible = true
+  of iw.Key.CtrlJ: execCmd(state, "nav_down")
+  of iw.Key.CtrlK: execCmd(state, "nav_up")
+  of iw.Key.CtrlG: execCmd(state, "go_to_first")
+  of iw.Key.CtrlF: execCmd(state, "enter_filter")
+  of iw.Key.CtrlR: execCmd(state, "yt_recommended")
+  of iw.Key.AltY: execCmd(state, "yt_search")
+  of iw.Key.AltC: execCmd(state, "change_theme")
+  of iw.Key.AltE: execCmd(state, "show_equalizer")
+  of iw.Key.AltS: execCmd(state, "spotify_url")
+  of iw.Key.AltA: execCmd(state, "show_about")
   of iw.Key.AltQ:
     state.overlay = OverlayState(kind: okQueueOverlay, query: "", cursor: state.queueCursor)
   of iw.Key.AltP:
@@ -2328,7 +2193,7 @@ proc handleMainKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
       state.playSelected()
   of iw.Key.S:
     if guardDebounce(state): return
-    state.player.stop()
+    execCmd(state, "stop_playback")
   of iw.Key.H:
     if state.isPlaylistView():
       if state.playlistContentsIdx >= 0:
@@ -2358,8 +2223,8 @@ proc handleMainKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
     elif state.libraryFocusPanel == lpSidebar:
       state.libraryFocusPanel = lpContent
       state.needsRedraw = true
-  of iw.Key.Comma: state.player.seek(-5.0); state.setFeedback("[Seeking -5s]")
-  of iw.Key.Dot: state.player.seek(5.0); state.setFeedback("[Seeking +5s]")
+  of iw.Key.Comma: execCmd(state, "seek_backward")
+  of iw.Key.Dot: execCmd(state, "seek_forward")
   of iw.Key.Left:
     if state.tab == tabSettings and state.settingsFocusPanel == lpContent:
       state.adjustSettingValue(-1)
@@ -2380,16 +2245,16 @@ proc handleMainKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
             state.playlistContentsIdx = state.selectIndex; state.selectIndex = 0; state.rebuildItems(); state.setFeedback("[Playlist Down]")
   of iw.Key.N:
     if guardDebounce(state): return
-    state.nextTrack()
+    execCmd(state, "next_track")
   of iw.Key.P:
     if guardDebounce(state): return
-    state.prevTrack()
-  of iw.Key.J: state.moveSelection(1)
-  of iw.Key.Plus, iw.Key.Equals: state.adjustVolume(5)
-  of iw.Key.Minus, iw.Key.Underscore: state.adjustVolume(-5)
+    execCmd(state, "prev_track")
+  of iw.Key.J: execCmd(state, "nav_down")
+  of iw.Key.Plus, iw.Key.Equals: execCmd(state, "volume_up")
+  of iw.Key.Minus, iw.Key.Underscore: execCmd(state, "volume_down")
   of iw.Key.M:
     if guardDebounce(state): return
-    state.toggleMute()
+    execCmd(state, "toggle_mute")
   of iw.Key.G:
     if state.pendingSeq.len == 0 or state.pendingSeq[state.pendingSeq.len - 1] != iw.Key.G:
       state.pendingSeq = @[iw.Key.G]
@@ -2398,12 +2263,7 @@ proc handleMainKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
       state.pendingSeq = @[]
       state.selectIndex = 0
       state.needsRedraw = true
-  of iw.Key.ShiftG:
-    if state.filteredCount() > 0:
-      state.selectIndex = state.filteredCount() - 1
-    state.needsRedraw = true
-    if state.selectedIndices.len > 0:
-      state.playSelected()
+  of iw.Key.ShiftG: execCmd(state, "go_to_last")
   of iw.Key.A:
     if state.libraryFocusPanel == lpContent and state.filterScope == fsPlaylists:
       if state.isPlaylistView() and state.playlistContentsIdx >= 0:
@@ -2440,28 +2300,18 @@ proc handleMainKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
       execCmd(state, "rename_playlist")
   of iw.Key.ShiftS:
     if guardDebounce(state): return
-    state.toggleShuffle()
+    execCmd(state, "toggle_shuffle")
   of iw.Key.ShiftR:
     if guardDebounce(state): return
-    state.cycleRepeat()
-  of iw.Key.Slash:
-    state.mode = imFilter
-    state.filterText = ""
-    state.filteredIndices = @[]
-  of iw.Key.V:
-    state.toggleSelect()
-  of iw.Key.One: state.switchTab(tabNowPlaying)
-  of iw.Key.Two: state.switchTab(tabLibrary)
-  of iw.Key.Three: state.switchTab(tabSettings)
-  of iw.Key.ShiftQ:
-    if state.player.backendType == abtDaemon:
-      discard daemonSimpleCmd(DaemonService(state.svc), "quit")
-    restoreTerminal()
-    quit(0)
+    execCmd(state, "toggle_repeat")
+  of iw.Key.Slash: execCmd(state, "enter_filter")
+  of iw.Key.CtrlV: execCmd(state, "toggle_select_mode")
+  of iw.Key.One: execCmd(state, "tab_now_playing")
+  of iw.Key.Two: execCmd(state, "tab_library")
+  of iw.Key.Three: execCmd(state, "tab_settings")
+  of iw.Key.ShiftQ: execCmd(state, "quit_daemon")
   of iw.Key.ShiftF: execCmd(state, "toggle_favourite")
-  of iw.Key.Q:
-    restoreTerminal()
-    quit(0)
+  of iw.Key.Q: execCmd(state, "quit_background")
   of iw.Key.Escape:
     if state.addingToPlaylistId > 0:
       state.addingToPlaylistId = 0
@@ -2484,7 +2334,7 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
   if key != iw.Key.None:
     state.lastKeyDisplay = keyDisplayName(key)
     state.lastKeyTimer = 120
-    if state.overlay.kind == okNone and not state.helpVisible and not state.aboutVisible and state.mode != imLeaderMode:
+    if state.overlay.kind == okNone and not state.helpVisible and not state.aboutVisible:
       state.lastCommandName = ""
   if state.aboutVisible:
     if key notin {iw.Key.None}:
@@ -2600,15 +2450,9 @@ proc handleKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
       state.libraryFocusPanel = lpContent
       state.needsRedraw = true; return
     else: discard
-  case state.mode
-  of imLeaderMode:
-    handleLeaderMode(state, key, chars)
-    return
-  of imFilter:
+  if state.mode == imFilter:
     handleFilterMode(state, key, chars)
     return
-  of imNormal:
-    discard
   if state.queuePendingConfirm != 0:
     if key == iw.Key.Y:
       if state.queuePendingConfirm == 1:
@@ -3123,7 +2967,6 @@ proc runTui(args: seq[string]) =
   ctx.data = store
   initApp(ctx.state)
   ctx.state.hasKittyGraphics = hasKittyGraphics
-  ctx.state.keyboardMode = if existsEnv("ANDROID_ROOT") and existsEnv("TERMUX_VERSION"): kmTermux else: kmDesktop
   ctx.state.loadConfig()
   ctx.state.highlightGroups = initHighlightGroups(ctx.state.theme, ctx.state.transparentBg)
   setIconPreference(ctx.state.iconPreference)

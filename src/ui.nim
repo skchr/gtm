@@ -325,7 +325,7 @@ var gCursorX, gCursorY: int = -1
 
 proc showInputCursor*(state: var AppState, w, h: int) =
   let shouldShow = state.overlay.kind in {okYtSearch, okCommandPalette, okThemePicker, okEqPresetPicker, okQueuePicker, okPlaylistSearch, okQueueOverlay, okFuzzyFinder, okSpotifyUrlInput, okSpotifySearch, okLyricsSearch} or
-    (state.overlay.kind == okNone and (state.playlistInputActive or state.mode == imFilter or state.mode == imLeaderMode))
+    (state.overlay.kind == okNone and (state.playlistInputActive or state.mode == imFilter))
   if shouldShow == state.cursorVisible: return
   state.cursorVisible = shouldShow
   if shouldShow:
@@ -347,7 +347,7 @@ proc showInputCursor*(state: var AppState, w, h: int) =
         let boxY = (h - boxH) div 2
         cx = boxX + 3
         cy = boxY + 3
-      elif state.mode == imFilter or state.mode == imLeaderMode:
+      elif state.mode == imFilter:
         cx = 9
         cy = 1
     else: discard
@@ -1098,7 +1098,7 @@ method render*(node: StatusBarComp, ctx: var nw.Context[State]) =
 
   # 2. Key pressed / command display (fmKeyPressed module, always after elapsed time)
   let showKeyPressed = fmKeyPressed in activeModules
-  let isOverlayActive = state.overlay.kind != okNone or state.helpVisible or state.aboutVisible or state.mode == imLeaderMode
+  let isOverlayActive = state.overlay.kind != okNone or state.helpVisible or state.aboutVisible
   if showKeyPressed and isOverlayActive:
     if state.lastKeyTimer > 0 and state.lastKeyDisplay.len > 0:
       let keyText = " [" & state.lastKeyDisplay & "] "
@@ -1665,70 +1665,6 @@ method render*(node: GenericOverlay, ctx: var nw.Context[State]) =
       writeStr(ctx.tb, boxX + 2, curY, ic.search & " Type to search for tracks...", theme.subtext0)
     writeStr(ctx.tb, boxX + 1, boxY + boxH - 1, truncateAt(ic.play & " Enter:Play  Esc:Cancel", boxW - 2), theme.subtext0)
 
-proc cmdKey(state: AppState, id: string): string =
-  let idx = findCommandIdx(state, id)
-  if idx >= 0 and state.commands[idx].keyCodes.len > 0:
-    bindingDisplay(state.commands[idx].keyCodes[0])
-  else: ""
-
-type LeaderMenuOverlay = ref object of nw.Node
-method render*(node: LeaderMenuOverlay, ctx: var nw.Context[State]) =
-  let w = iw.width(ctx.tb)
-  let h = iw.height(ctx.tb)
-  if w < 20 or h < 8: return
-  let state = ctx.state
-  let theme = state.theme
-  let boxW = min(44, w - 8)
-  let boxH = min(20, h - 4)
-  let boxX = (w - boxW) div 2
-  let boxY = (h - boxH) div 2
-  fillBg(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.surface0)
-  drawBorder(ctx.tb, boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, theme.peach, ctx.state.borderStyle)
-  writeStr(ctx.tb, boxX + 1, boxY, "\u2316 Actions", theme.peach)
-  let selCount = state.selectedIndices.len
-  let actions = if selCount > 0:
-    @[(cmdKey(state, "remove_selected"), "Remove " & $selCount & " items"),
-      (cmdKey(state, "add_to_playlist"), "Add to playlist..."),
-      (cmdKey(state, "play_selected"), "Play selection"),
-      ("Esc", "Deselect all")]
-  else:
-    case state.tab
-    of tabLibrary:
-      if state.filterScope == fsPlaylists:
-        @[(cmdKey(state, "create_playlist"), "New playlist"),
-          (cmdKey(state, "delete_playlist"), "Delete playlist"),
-          (cmdKey(state, "rename_playlist"), "Rename playlist"),
-          (cmdKey(state, "add_to_playlist"), "Add to playlist"),
-          (cmdKey(state, "remove_selected"), "Remove from playlist")]
-      else:
-        @[(cmdKey(state, "play_selected"), "Play selected"),
-          (cmdKey(state, "add_to_playlist"), "Add to playlist"),
-          (cmdKey(state, "toggle_select_mode"), "Toggle select mode"),
-          (cmdKey(state, "select_all"), "Select all"),
-          (cmdKey(state, "enter_filter"), "Filter"),
-          (cmdKey(state, "quit_background"), "Quit")]
-    of tabNowPlaying:
-      @[(cmdKey(state, "toggle_play_pause"), "Play/Pause"),
-        (cmdKey(state, "stop_playback"), "Stop"),
-        (cmdKey(state, "next_track"), "Next Track"),
-        (cmdKey(state, "prev_track"), "Previous Track"),
-        (cmdKey(state, "volume_up"), "Volume +5"),
-        (cmdKey(state, "volume_down"), "Volume -5"),
-        (cmdKey(state, "seek_forward"), "Seek +5s"),
-        (cmdKey(state, "seek_backward"), "Seek -5s"),
-        (cmdKey(state, "toggle_mute"), "Toggle mute"),
-        (cmdKey(state, "quit_background"), "Quit")]
-    of tabSettings:
-      @[("j/Down", "Scroll down"),
-        ("k/Up", "Scroll up"),
-        (cmdKey(state, "play_selected"), "Toggle item"),
-        (cmdKey(state, "quit_background"), "Quit")]
-  for i, (key, name) in actions:
-    let lineY = boxY + 2 + i
-    if lineY >= boxY + boxH - 1: break
-    writeStr(ctx.tb, boxX + 2, lineY, name, theme.text)
-    writeStr(ctx.tb, boxX + boxW - 2 - key.runeLen, lineY, key, theme.blue)
-
 type HelpOverlay = ref object of nw.Node
 method render*(node: HelpOverlay, ctx: var nw.Context[State]) =
   let w = iw.width(ctx.tb)
@@ -2112,8 +2048,6 @@ proc renderApp*(ctx: var nw.Context[State]) =
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(HelpOverlay(), sliceCtx)
   if ctx.state.aboutVisible:
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(AboutOverlay(), sliceCtx)
-  if ctx.state.mode == imLeaderMode:
-    sliceCtx = nw.slice(ctx, 0, 0, w, h); render(LeaderMenuOverlay(), sliceCtx)
   if ctx.state.playlistInputActive:
     sliceCtx = nw.slice(ctx, 0, 0, w, h); render(PlaylistInputOverlay(), sliceCtx)
   if ctx.state.overlay.kind == okFooterModulePicker:
