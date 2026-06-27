@@ -898,7 +898,7 @@ proc rebuildItems*(state: var AppState) =
     state.displayItems.add(LibraryItem(kind: likTrack, label: "Daemon: " & (if state.daemonConnected: "Connected" else: "Disconnected"), sublabel: "", id: 4))
     state.displayItems.add(LibraryItem(kind: likTrack, label: "Reset to Defaults", sublabel: "Enter to reset all settings", id: 5))
     state.displayItems.add(LibraryItem(kind: likTrack, label: "Max Concurrent Downloads: " & $state.ytMaxConcurrentDownloads, sublabel: "Enter to adjust", id: 7))
-    state.displayItems.add(LibraryItem(kind: likTrack, label: "Batch YT Mode: " & (if state.ytBatchDownloadMode: "Download" else: "URL Ref"), sublabel: "Enter to toggle", id: 8))
+    state.displayItems.add(LibraryItem(kind: likTrack, label: "Auto Download: " & (if state.ytAutoDownload: "On" else: "Off"), sublabel: "Enter to toggle", id: 8))
     let cookieLabel = if state.ytCookieSource.len == 0: "(none)" else: state.ytCookieSource
     state.displayItems.add(LibraryItem(kind: likTrack, label: "YT Cookie: " & cookieLabel, sublabel: "Enter to change", id: 9))
     let runtimeLabel = if state.ytJsRuntime.len == 0: "node (default)" else: state.ytJsRuntime

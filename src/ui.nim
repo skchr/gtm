@@ -117,7 +117,7 @@ type SysInfo = object
 var sysInfoInitialized: bool
 var sysInfo: SysInfo
 
-proc ensureSysInfo =
+proc ensureSysInfo* =
   if not sysInfoInitialized:
     sysInfoInitialized = true
     sysInfo = SysInfo(
@@ -160,18 +160,13 @@ proc SYS_DENO*: string = (ensureSysInfo(); sysInfo.deno)
 type TrackColumns = object
   xTitle, wTitle: int
   xArtist, wArtist: int
-  xAlbum, wAlbum: int
-  xDuration: int
 
 proc calcTrackCols(w: int): TrackColumns =
   let avail = max(16, w - 8)
   result.xTitle = 1
-  result.wTitle = avail * 35 div 100
+  result.wTitle = avail * 45 div 100
   result.xArtist = result.xTitle + result.wTitle + 1
-  result.wArtist = avail * 30 div 100
-  result.xAlbum = result.xArtist + result.wArtist + 1
-  result.wAlbum = avail * 25 div 100
-  result.xDuration = max(1, w - 7)
+  result.wArtist = avail * 50 div 100
 
 proc filteredCount*(state: AppState): int =
   if state.filteredIndices.len > 0: state.filteredIndices.len
@@ -273,8 +268,10 @@ proc renderHoverPreview*(ctx: var nw.Context[State]) =
   if hasCover:
     let imgX = boxX + boxW - imgW - 2
     let imgY = boxY + 1
-    deleteImage(HoverImageId)
-    transmitImage(h.coverData, h.coverMime, HoverImageId)
+    if not ctx.state.hoverState.coverTransmitted:
+      deleteImage(HoverImageId)
+      transmitImage(h.coverData, h.coverMime, HoverImageId)
+      ctx.state.hoverState.coverTransmitted = true
     placeImage(imgX, imgY, HoverImageId, imgW)
     for y in imgY..min(imgY + imgH - 1, boxY + boxH - 2):
       for x in imgX..min(imgX + imgW - 1, boxX + boxW - 2):
@@ -617,6 +614,25 @@ method render*(node: LibrarySidebar, ctx: var nw.Context[State]) =
     if state.showItemCounts:
       writeStr(ctx.tb, w - countStr.runeLen - 1, line, countStr, theme.overlay0)
     line.inc
+  if state.hoverDelay == 0.0 and state.selectIndex >= 0 and state.selectIndex < state.displayItems.len:
+    let item = state.displayItems[state.selectIndex]
+    if item.kind == likTrack and item.trackIdx >= 0 and item.trackIdx < state.libraryTracks.len:
+      let t = state.libraryTracks[item.trackIdx]
+      line.inc
+      fillBg(ctx.tb, 0, line, w - 1, h - 1, theme.base)
+      let sep = "\u2500".repeat(max(0, w - 2))
+      writeStr(ctx.tb, 1, line, sep, theme.surface2)
+      line.inc
+      writeStr(ctx.tb, 1, line, t.displayName(), theme.text)
+      line.inc
+      if t.artist.len > 0:
+        writeStr(ctx.tb, 1, line, t.artist, theme.subtext0)
+        line.inc
+      if t.album.len > 0:
+        writeStr(ctx.tb, 1, line, t.album, theme.subtext0)
+        line.inc
+      if t.duration > 0:
+        writeStr(ctx.tb, 1, line, formatTime(t.duration), theme.overlay0)
 
 type LibraryContentView = ref object of nw.Node
 method render*(node: LibraryContentView, ctx: var nw.Context[State]) =
@@ -674,7 +690,10 @@ method render*(node: LibraryContentView, ctx: var nw.Context[State]) =
 
   if count == 0:
     if state.libraryLoading:
-      writeStr(ctx.tb, 1, line + 1, "Loading library...", theme.subtext0)
+      let spinnerChars = ["\u25D0", "\u25D3", "\u25D1", "\u25D2"]
+      let sp = spinnerChars[state.spinnerFrame mod 4]
+      let msg = "Scanning library" & (if state.libraryRetryCount > 0: " (attempt " & $state.libraryRetryCount & ")" else: "") & "..."
+      writeStr(ctx.tb, 1, line + 1, sp & " " & msg, theme.blue)
     else:
       writeStr(ctx.tb, 1, line + 1, "No items found", theme.subtext0)
     return
@@ -686,8 +705,6 @@ method render*(node: LibraryContentView, ctx: var nw.Context[State]) =
     let cols = calcTrackCols(w)
     writeStr(ctx.tb, cols.xTitle, line, "Title", theme.subtext0)
     writeStr(ctx.tb, cols.xArtist, line, "Artist", theme.subtext0)
-    writeStr(ctx.tb, cols.xAlbum, line, "Album", theme.subtext0)
-    writeStr(ctx.tb, cols.xDuration, line, "Time", theme.subtext0)
   elif state.filterScope == fsArtists:
     writeStr(ctx.tb, 1, line, "Artist", theme.subtext0)
     writeStr(ctx.tb, w - 6, line, "Tracks", theme.subtext0)
@@ -716,16 +733,10 @@ method render*(node: LibraryContentView, ctx: var nw.Context[State]) =
         let artistTrunc = if track.displayArtist().runeLen > cols.wArtist - 2:
           track.displayArtist()[0..<min(track.displayArtist().len, max(1, cols.wArtist - 4))] & "\u2026"
         else: track.displayArtist()
-        let albumTrunc = if track.displayAlbum().runeLen > cols.wAlbum - 2:
-          track.displayAlbum()[0..<min(track.displayAlbum().len, max(1, cols.wAlbum - 4))] & "\u2026"
-        else: track.displayAlbum()
-        let time = if track.duration > 0: formatTime(track.duration) else: ""
         let playingMarker = if track.path == state.currentPlayingPath and state.status == psPlaying: "\u25B6 " else: ""
         let playFg = if track.path == state.currentPlayingPath and state.status == psPlaying: theme.green else: (if isSelected: theme.blue else: theme.text)
         writeStr(ctx.tb, cols.xTitle, line, playingMarker & nameTrunc, playFg)
         writeStr(ctx.tb, cols.xArtist, line, artistTrunc, theme.subtext1)
-        writeStr(ctx.tb, cols.xAlbum, line, albumTrunc, theme.subtext1)
-        writeStr(ctx.tb, cols.xDuration, line, time, theme.overlay0)
     else:
       let ic = currentIcons()
       let prefix = case item.kind
@@ -885,8 +896,8 @@ method render*(node: SettingsView, ctx: var nw.Context[State]) =
     settingsRow("Search History")
     writeStr(ctx.tb, contentX + contentW - 15, line, "[" & $state.ytSearchHistory.len & " entries ▸]", theme.subtext0)
     line.inc
-    settingsRow("Batch Mode")
-    toggleWidget(state.ytBatchDownloadMode)
+    settingsRow("Auto Download")
+    toggleWidget(state.ytAutoDownload)
     line.inc
     settingsRow("Clear Search History")
     writeStr(ctx.tb, contentX + contentW - 8, line, "[Clear]", theme.peach)
@@ -931,6 +942,10 @@ method render*(node: SettingsView, ctx: var nw.Context[State]) =
     let progLabels = ["Block", "Thumb+Track"]
     let pLabel = if state.progressStyle < progLabels.len: progLabels[state.progressStyle] else: "Block"
     writeStr(ctx.tb, contentX + contentW - pLabel.runeLen - 11, line, "[ " & pLabel & " ▸]", theme.subtext0)
+    line.inc
+    settingsRow("Hover Delay")
+    sliderWidget(int(state.hoverDelay), 6, 14)
+    writeStr(ctx.tb, contentX + contentW - 9, line, $(state.hoverDelay) & "s", theme.subtext0)
     line.inc
   of scSystem:
     sectionHeader("═══ System ═══")
@@ -1386,14 +1401,14 @@ method render*(node: GenericOverlay, ctx: var nw.Context[State]) =
     if ov.multiMode:
       let footerText = if footerW < 34: "Enter:Toggle(" & $ov.selected.len & ")  Esc:Cancel"
                        elif footerW < 44: "Enter:Toggle  Ctrl+S:Done  Esc:Cancel"
-                       else: "Enter:Toggle  Ctrl+D:Batch(" & $ov.selected.len & ")  Ctrl+S:Done  Esc:Cancel"
+                       else: "Enter:Toggle  Ctrl+A:Queue(" & $ov.selected.len & ")  Ctrl+D:Download(" & $ov.selected.len & ")  Ctrl+S:Done  Esc:Cancel"
       let ft = truncateAt(footerText, boxW - 2)
       if ft.len > 0: writeStr(ctx.tb, boxX + 1, boxY + boxH - 1, ft, theme.subtext0)
     else:
       let pageInfo = if ctx.state.ytSearchPage > 0: " [Page " & $(ctx.state.ytSearchPage + 1) & "]" else: ""
       let footerText = if footerW < 34: "Enter:Play  Esc:Cancel"
-                       elif footerW < 44: "Enter:Play  Ctrl+D:Queue  Esc:Cancel"
-                       else: "Enter:Play  Ctrl+D:Queue  Ctrl+S:Multi" & pageInfo & "  Esc:Cancel"
+                       elif footerW < 44: "Enter:Play  Ctrl+A:Queue  Esc:Cancel"
+                       else: "Enter:Play  Ctrl+A:Queue  Ctrl+D:Download  Ctrl+S:Multi" & pageInfo & "  Esc:Cancel"
       let ft = truncateAt(footerText, boxW - 2)
       if ft.len > 0: writeStr(ctx.tb, boxX + 1, boxY + boxH - 1, ft, theme.subtext0)
   #--- Spotify Search results ---
@@ -1789,7 +1804,8 @@ method render*(node: AboutOverlay, ctx: var nw.Context[State]) =
       y.inc
 
   let relType = when defined(release): "release" else: "debug"
-  let verStr = "v" & GTM_VERSION & "-" & SYS_GIT_HASH & ":" & relType
+  let displayV = if GTM_VERSION.startsWith("v"): GTM_VERSION else: "v" & GTM_VERSION
+  let verStr = displayV & "-" & SYS_GIT_HASH & ":" & relType
   line("Version", verStr, theme.mauve)
   if GTM_BUILD_TIME.len > 0:
     line("Built", GTM_BUILD_TIME)
@@ -2174,7 +2190,7 @@ proc initApp*(state: var AppState) =
   state.downloadsTab = dtDownloading
   state.downloadProgress = initTable[string, int]()
   state.ytMaxConcurrentDownloads = 4
-  state.ytBatchDownloadMode = false
+  state.ytAutoDownload = false
   state.ytJsRuntime = JsRuntimes[0]
   state.ytDownloadDir = dataDir() & "/audio"
   # Count existing downloaded files
@@ -2201,6 +2217,7 @@ proc initApp*(state: var AppState) =
   state.ytProgressTotal = 0
   state.crossfadeDuration = 6
   state.crossfadeCurve = cctAsymmetric
+  state.hoverDelay = 3.0
   state.spinnerFrame = 0
   state.reconnecting = false
   state.reconnectAttempts = 0

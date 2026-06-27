@@ -324,6 +324,7 @@ type
     coverMime*: string
     coverFetching*: bool
     coverRequestedPath*: string
+    coverTransmitted*: bool
   AppState* = object
     theme*: Theme
     highlightGroups*: HighlightGroups
@@ -430,7 +431,7 @@ type
     downloadsTab*: DownloadsTab
     downloadProgress*: Table[string, int]
     ytMaxConcurrentDownloads*: int
-    ytBatchDownloadMode*: bool
+    ytAutoDownload*: bool
     ytCookieSource*: string
     ytCookieFilePath*: string
     ytJsRuntime*: string
@@ -493,8 +494,10 @@ type
     trashItems*: seq[TrashItem]
     coverFetching*: bool
     coverImageId*: int
+    hoverDelay*: float
     daemonStateVersion*: int
     startupPhase*: StartupPhase
+    startupQueueFlushed*: bool
     configDirty*: bool
     currentLyrics*: LrcData
     lyricsLineIdx*: int
@@ -548,7 +551,7 @@ const
       "Maximum concurrent YouTube downloads (1\u201310).",
       "YouTube search results per page (10\u201350).",
       "View and manage saved YouTube search history.",
-      "When enabled, all YouTube results are queued as batch downloads.",
+      "When enabled, pressing Enter on a YouTube result starts downloading immediately instead of resolving a stream URL.",
       "Remove all saved YouTube search queries permanently."
     ],
     scAppearance: @[
