@@ -352,8 +352,6 @@ proc getCurrentTrack(state: AppState): Track =
   let item = state.selectedItem()
   if item.kind == likTrack and item.trackIdx >= 0 and item.trackIdx < state.libraryTracks.len:
     return state.libraryTracks[item.trackIdx]
-  if state.libraryTracks.len > 0 and state.selectIndex >= 0 and state.selectIndex < state.libraryTracks.len:
-    return state.libraryTracks[state.selectIndex]
   Track()
 
 proc applyFilter(state: var AppState) =
@@ -446,6 +444,8 @@ proc playTrackFromLibrary(state: var AppState, path, title, channel: string, lib
   state.sendPlayRequest(path, title, channel)
 
 proc playSelected(state: var AppState) =
+  let item = state.selectedItem()
+  if item.kind != likTrack: return
   let track = state.getCurrentTrack()
   if track.path.len > 0:
     queueLog("playSelected: track=" & track.path & " title=" & track.title & " id=" & $track.id)
@@ -458,14 +458,6 @@ proc playSelected(state: var AppState) =
           let tp = state.libraryTracks[item.trackIdx].path
           if tp.len > 0 and (isUrl(tp) or fileExists(tp)):
             queuedPaths.add(tp)
-    else:
-      for i in state.selectIndex + 1 ..< state.libraryTracks.len:
-        if i >= 0 and i < state.libraryTracks.len:
-          let tp = state.libraryTracks[i].path
-          if tp.len > 0 and (isUrl(tp) or fileExists(tp)):
-            queuedPaths.add(tp)
-            if queuedPaths.len >= 200:
-              break
     state.sendPlayRequest(track.path, track.title, track.artist, queuedPaths)
 
 proc nextTrack(state: var AppState) =
@@ -2153,6 +2145,8 @@ proc handleMainKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         state.queueCursor.inc
         if state.queueCursor >= state.upNextScrollOffset + 5:
           state.upNextScrollOffset.inc
+        if state.player.backendType == abtDaemon:
+          DaemonService(state.svc).sendOnly(%*{"cmd": "queue_set_cursor", "index": state.queueCursor})
       state.markDirty(ceQueue)
     else:
       state.moveSelection(1)
@@ -2162,6 +2156,8 @@ proc handleMainKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
         state.queueCursor.dec
         if state.queueCursor < state.upNextScrollOffset:
           state.upNextScrollOffset = max(0, state.upNextScrollOffset - 1)
+        if state.player.backendType == abtDaemon:
+          DaemonService(state.svc).sendOnly(%*{"cmd": "queue_set_cursor", "index": state.queueCursor})
       state.markDirty(ceQueue)
     else:
       state.moveSelection(-1)
@@ -2721,6 +2717,13 @@ proc processEvents(state: var AppState) =
           except: discard
       elif ev.strVal == "queue_changed" and state.player.backendType == abtDaemon:
         state.shuffleIndex = ev.intVal
+        if ev.metadata.hasKey("shuffleOrder"):
+          try:
+            let so = parseJson(ev.metadata["shuffleOrder"])
+            state.shuffleOrder = @[]
+            for v in so.items:
+              state.shuffleOrder.add(v.getInt(0))
+          except: discard
         state.markDirty(ceQueue)
         # Rebuild TUI playbackQueue from daemon queue paths
         if ev.metadata.hasKey("queue"):

@@ -1053,7 +1053,7 @@ proc execQueue(d: Daemon, cmd: DaemonCmd): JsonNode =
             path = item{"path"}.getStr("")
             title = item{"title"}.getStr("")
             channel = item{"channel"}.getStr("")
-          if path.len > 0:
+          if path.len > 0 and (isUrl(path) or fileExists(path)):
             d.playbackQueue.add(path)
             if isYtWatchUrl(path):
                 let existingPath = if d.lib != nil: d.lib.getDownloadByUrl(path) else: ""
@@ -1544,6 +1544,8 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
           return %*{"ok": true, "pending": true}
     else:
       loadPath = cmd.strArg
+      if loadPath.len > 0 and not isUrl(loadPath) and not fileExists(loadPath):
+        return %*{"ok": false, "error": "file not found"}
     result = %*{"ok": true}
     if cmd.strArg.len > 0:
       d.upNextSent = false
@@ -2143,17 +2145,20 @@ proc handleAutoAdvance(d: Daemon) =
       if d.repeatMode == 1:
         d.playbackQueue.add(nextPath)
   elif d.playbackQueue.len > 0:
-    if d.shuffleEnabled and d.shuffleOrder.len > 0 and d.shuffleIndex < d.shuffleOrder.len:
-      nextPath = d.playbackQueue[d.shuffleOrder[d.shuffleIndex]]
-    elif not d.shuffleEnabled:
-      nextPath = d.playbackQueue[0]
-    if nextPath.len > 0:
-      if d.shuffleEnabled:
+    var attempts = 0
+    while attempts < d.playbackQueue.len:
+      if d.shuffleEnabled and d.shuffleOrder.len > 0 and d.shuffleIndex < d.shuffleOrder.len:
+        nextPath = d.playbackQueue[d.shuffleOrder[d.shuffleIndex]]
         d.shuffleIndex.inc
-      else:
+      elif not d.shuffleEnabled:
+        nextPath = d.playbackQueue[0]
         d.playbackQueue.delete(0)
-        if d.repeatMode == 1:
+      if nextPath.len > 0 and (isUrl(nextPath) or fileExists(nextPath)):
+        if not d.shuffleEnabled and d.repeatMode == 1:
           d.playbackQueue.add(nextPath)
+        break
+      nextPath = ""
+      attempts.inc
 
   let copyCtp = d.currentTrackPath
   release(d.lock)

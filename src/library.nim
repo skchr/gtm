@@ -841,12 +841,22 @@ proc rebuildItems*(state: var AppState) =
           id: a.id
         ))
     elif state.filterScope == fsPlaylists:
-      for pl in state.libraryPlaylists:
-        state.displayItems.add(LibraryItem(
-          kind: likPlaylist, label: pl.name,
-          sublabel: $pl.trackIds.len & " tracks",
-          id: pl.id
-        ))
+      if state.playlistContentsIdx >= 0 and state.playlistContentsIdx < state.libraryPlaylists.len:
+        let pl = state.libraryPlaylists[state.playlistContentsIdx]
+        var plIndices: seq[int] = @[]
+        for tid in pl.trackIds:
+          for i, t in state.libraryTracks:
+            if t.id == tid:
+              plIndices.add(i)
+              break
+        state.addTrackItems(plIndices)
+      else:
+        for pl in state.libraryPlaylists:
+          state.displayItems.add(LibraryItem(
+            kind: likPlaylist, label: pl.name,
+            sublabel: $pl.trackIds.len & " tracks",
+            id: pl.id
+          ))
     elif state.filterScope == fsFavourites:
       var favIndices: seq[int] = @[]
       for i, t in state.libraryTracks:

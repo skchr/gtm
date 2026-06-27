@@ -143,7 +143,7 @@ proc drainEventLinesFromJson(j: JsonNode, s: DaemonSession): seq[AudioEvent] =
       if evJson.hasKey("shuffleIndex"): ev.intVal = evJson["shuffleIndex"].getInt(0)
       for key in ["url", "path", "title", "channel", "next_path", "next_title", "next_channel", "cover_data", "cover_mime"]:
         if evJson.hasKey(key): ev.metadata[key] = evJson[key].getStr("")
-      for key in ["queue", "results", "tracks", "lines", "duration", "curve"]:
+      for key in ["queue", "results", "tracks", "lines", "duration", "curve", "shuffleOrder"]:
         if evJson.hasKey(key): ev.metadata[key] = $evJson[key]
       if evJson.hasKey("shuffle"): ev.metadata["shuffle"] = $(evJson["shuffle"].getBool(false))
       if evJson.hasKey("repeat"): ev.metadata["repeat"] = $(evJson["repeat"].getInt(0))
