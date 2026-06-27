@@ -486,6 +486,7 @@ type
     hasKittyGraphics*: bool
     hoverState*: HoverPreviewState
     coverCache*: Table[string, tuple[data: seq[byte], mime: string]]
+    coverCacheOrder*: seq[string]
     coverPendingPath*: string
     trashItems*: seq[TrashItem]
     coverFetching*: bool
@@ -508,6 +509,9 @@ type
     libraryLastVersion*: int
     lastHoverSelectIdx*: int
     hoverDismissAt*: float
+
+const
+  CoverCacheMaxSize* = 100
 
 const
   GTM_VERSION* {.strdefine.} = staticExec("git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//'").strip
@@ -661,6 +665,18 @@ template clearDirty*(state: var AppState) =
 
 template isDirty*(state: AppState, event: ChangeEvent): bool =
   event in state.dirtyFlags
+
+proc ensureCoverCacheFit*(state: var AppState) =
+  while state.coverCache.len > CoverCacheMaxSize and state.coverCacheOrder.len > 0:
+    let oldest = state.coverCacheOrder[0]
+    state.coverCacheOrder.delete(0)
+    state.coverCache.del(oldest)
+
+proc touchCoverCache*(state: var AppState, key: string) =
+  let idx = state.coverCacheOrder.find(key)
+  if idx >= 0:
+    state.coverCacheOrder.delete(idx)
+  state.coverCacheOrder.add(key)
 
 template guardDebounce*(state: var AppState): bool =
   ## Returns true if action should be skipped (debounced). Seek exempt.

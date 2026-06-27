@@ -45,10 +45,12 @@ proc transmitImage*(data: seq[byte], mime: string, imageId: int) =
     offset += chunkSize
   flushFile(stdout)
 
-proc placeImage*(x, y: int, imageId: int, cellWidth: int = 0) =
+proc placeImage*(x, y: int, imageId: int, cellWidth: int = 0, cellHeight: int = 0) =
   var esc = "\e_Ga=p,i=" & $imageId & ",X=" & $x & ",Y=" & $y & ",c=1"
   if cellWidth > 0:
     esc &= ",w=-" & $cellWidth
+  if cellHeight > 0:
+    esc &= ",h=-" & $cellHeight
   esc &= ";\e\\"
   stdout.write(esc)
   flushFile(stdout)

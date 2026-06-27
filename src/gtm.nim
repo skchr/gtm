@@ -2587,12 +2587,11 @@ proc processEvents(state: var AppState) =
       # Request cover art from daemon — non-blocking, response via cover_art_sync event
       if state.hasKittyGraphics and state.currentPlayingPath.len > 0 and state.coverPendingPath != state.currentPlayingPath:
         state.coverPendingPath = state.currentPlayingPath
-        state.coverImageId = -1
         let cacheKey = hash(state.currentPlayingPath).toHex
-        if cacheKey notin state.coverCache:
-          state.coverFetching = true
-          if state.player.backendType == abtDaemon:
-            DaemonService(state.svc).sendOnly(%*{"cmd": "request_cover_art", "path": state.currentPlayingPath})
+        if cacheKey in state.coverCache:
+          state.coverImageId = -1
+        elif state.player.backendType == abtDaemon:
+          DaemonService(state.svc).sendOnly(%*{"cmd": "request_cover_art", "path": state.currentPlayingPath})
       # Request lyrics from daemon — non-blocking, response via lyrics_sync event
       if not isSameTrack and state.currentPlayingPath.len > 0:
         state.currentLyrics = LrcData(lines: @[])
@@ -2859,15 +2858,23 @@ proc processEvents(state: var AppState) =
             state.markDirty(ceSearchResults)
           except: discard
       elif ev.strVal == "cover_art_sync":
-        if state.coverFetching:
+        let reqPath = ev.metadata.getOrDefault("req_path", "")
+        if reqPath.len > 0:
+          let cacheKey = hash(reqPath).toHex
           if ev.metadata.hasKey("cover_data") and ev.metadata["cover_data"].len > 0:
-            let cacheKey = hash(state.currentPlayingPath).toHex
             let mime = ev.metadata.getOrDefault("cover_mime", "image/jpeg")
             try:
               state.coverCache[cacheKey] = (cast[seq[byte]](decode(ev.metadata["cover_data"])), mime)
+              state.touchCoverCache(cacheKey)
+              state.ensureCoverCacheFit()
+              if reqPath == state.coverPendingPath:
+                state.coverImageId = -1
             except: discard
             state.markDirty(ceTrack)
-          state.coverFetching = false
+          elif cacheKey notin state.coverCache:
+            state.coverCache[cacheKey] = (@[], "")
+        state.coverFetching = false
+        state.hoverState.coverFetching = false
       elif ev.strVal == "lyrics_sync":
         if ev.metadata.hasKey("ok") and ev.metadata["ok"] == "true":
           var lrcData = LrcData(title: ev.metadata.getOrDefault("title", ""),
@@ -3273,29 +3280,27 @@ proc runTui(args: seq[string]) =
               ctx.state.hoverState.duration = t.duration
               ctx.state.hoverState.rowX = 0
               ctx.state.hoverState.rowY = 3
-        if not ctx.state.hoverState.active and ctx.state.hoverState.trackIdx >= 0 and epochTime() - ctx.state.hoverState.hoverStart > ctx.state.hoverDelay:
+        let justActivated = not ctx.state.hoverState.active and ctx.state.hoverState.trackIdx >= 0 and epochTime() - ctx.state.hoverState.hoverStart > ctx.state.hoverDelay
+        if justActivated:
           ctx.state.hoverState.active = true
           ctx.state.needsRedraw = true
-          # Fetch cover art for hover preview
-          if ctx.state.hasKittyGraphics and ctx.state.hoverState.path.len > 0 and not ctx.state.hoverState.coverFetching and ctx.state.hoverState.coverRequestedPath != ctx.state.hoverState.path:
-            ctx.state.hoverState.coverRequestedPath = ctx.state.hoverState.path
-            let cacheKey = hash(ctx.state.hoverState.path).toHex
-            if ctx.state.coverCache.hasKey(cacheKey):
-              let (cd, cm) = ctx.state.coverCache[cacheKey]
+        # Fetch cover art for hover — async, checks cache every frame
+        if ctx.state.hoverState.active and ctx.state.hasKittyGraphics and ctx.state.hoverState.path.len > 0 and ctx.state.hoverState.coverData.len == 0:
+          let cacheKey = hash(ctx.state.hoverState.path).toHex
+          if ctx.state.coverCache.hasKey(cacheKey):
+            let (cd, cm) = ctx.state.coverCache[cacheKey]
+            if cd.len > 0:
               ctx.state.hoverState.coverData = cd
               ctx.state.hoverState.coverMime = cm
               ctx.state.hoverState.coverTransmitted = false
-            elif ctx.state.player.backendType == abtDaemon:
-              ctx.state.hoverState.coverFetching = true
-              let cli = DaemonService(ctx.state.svc)
-              let (coverData, coverMime) = cli.getCoverArt(ctx.state.hoverState.path)
-              ctx.state.hoverState.coverData = coverData
-              ctx.state.hoverState.coverMime = coverMime
-              ctx.state.hoverState.coverFetching = false
-              ctx.state.hoverState.coverTransmitted = false
-              if coverData.len > 0:
-                ctx.state.coverCache[cacheKey] = (coverData, coverMime)
+              ctx.state.touchCoverCache(cacheKey)
               ctx.state.needsRedraw = true
+            else:
+              ctx.state.hoverState.coverRequestedPath = ctx.state.hoverState.path
+          elif not ctx.state.hoverState.coverFetching and ctx.state.hoverState.coverRequestedPath != ctx.state.hoverState.path and ctx.state.player.backendType == abtDaemon:
+            ctx.state.hoverState.coverFetching = true
+            ctx.state.hoverState.coverRequestedPath = ctx.state.hoverState.path
+            DaemonService(ctx.state.svc).sendOnly(%*{"cmd": "request_cover_art", "path": ctx.state.hoverState.path})
       else:
         if ctx.state.hoverState.active:
           deleteImage(HoverImageId)

@@ -1414,7 +1414,7 @@ proc execCoverLyrics(d: Daemon, cmd: DaemonCmd): JsonNode =
     result["pending"] = %true
   of dckRequestCoverArt:
     let ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "cover_art_sync",
-      "path": %cmd.strArg}]}
+      "req_path": %cmd.strArg}]}
     if cmd.strArg.len > 0 and fileExists(cmd.strArg):
       let (coverData, coverMime) = extractCoverArt(cmd.strArg)
       if coverData.len > 0:

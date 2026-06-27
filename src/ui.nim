@@ -272,7 +272,8 @@ proc renderHoverPreview*(ctx: var nw.Context[State]) =
       deleteImage(HoverImageId)
       transmitImage(h.coverData, h.coverMime, HoverImageId)
       ctx.state.hoverState.coverTransmitted = true
-    placeImage(imgX, imgY, HoverImageId, imgW)
+    let imgHcells = max(1, imgW * gTermCellW div gTermCellH)
+    placeImage(imgX, imgY, HoverImageId, imgW, imgHcells)
     for y in imgY..min(imgY + imgH - 1, boxY + boxH - 2):
       for x in imgX..min(imgX + imgW - 1, boxX + boxW - 2):
         var cell = ctx.tb[x, y]
@@ -469,17 +470,23 @@ method render*(node: NowPlayingView, ctx: var nw.Context[State]) =
   if state.hasKittyGraphics:
     if state.currentPlayingPath.len > 0:
       let cacheKey = hash(state.currentPlayingPath).toHex
-      if state.coverCache.hasKey(cacheKey) and state.coverCache[cacheKey].data.len > 0:
+      if state.coverCache.hasKey(cacheKey):
         let (coverBytes, coverMime) = state.coverCache[cacheKey]
-        let coverW = min(18, (w div 3) - 1)
-        if coverW >= 8:
-          let coverX = w - coverW - 1
-          let coverY = 1
-          if ctx.state.coverImageId < 0:
-            deleteImage(CoverImageId)
-            transmitImage(coverBytes, coverMime, CoverImageId)
-            ctx.state.coverImageId = CoverImageId
-          placeImage(coverX, coverY, ctx.state.coverImageId, coverW)
+        if coverBytes.len > 0:
+          state.touchCoverCache(cacheKey)
+          let coverW = min(18, (w div 3) - 1)
+          let coverH = max(1, coverW * gTermCellW div gTermCellH)
+          if coverW >= 8:
+            let coverX = w - coverW - 1
+            let coverY = 1
+            if ctx.state.coverImageId < 0:
+              deleteImage(CoverImageId)
+              transmitImage(coverBytes, coverMime, CoverImageId)
+              ctx.state.coverImageId = CoverImageId
+            placeImage(coverX, coverY, ctx.state.coverImageId, coverW, coverH)
+        elif ctx.state.coverImageId >= 0:
+          deleteImage(ctx.state.coverImageId)
+          ctx.state.coverImageId = -1
     elif ctx.state.coverImageId >= 0:
       deleteImage(ctx.state.coverImageId)
       ctx.state.coverImageId = -1
@@ -2090,6 +2097,7 @@ proc initApp*(state: var AppState) =
   state.overlay.clear()
   state.hasKittyGraphics = false
   state.coverCache = initTable[string, tuple[data: seq[byte], mime: string]]()
+  state.coverCacheOrder = @[]
   state.coverImageId = -1
   state.coverPendingPath = ""
   state.coverFetching = false
