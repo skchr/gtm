@@ -292,7 +292,7 @@ erDiagram
     }
 
     favourites {
-        int track_id PK FK
+        int track_id PK, FK
         text added_at
     }
 
