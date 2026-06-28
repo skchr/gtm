@@ -35,21 +35,6 @@ proc detectVersion: string =
     result = staticExec("git rev-parse --short=7 HEAD 2>/dev/null").strip
   if result.len == 0: result = "0.0.0-dev"
 
-proc selectTagInteractive: string =
-  let tags = staticExec("git tag --sort=-version:refname 2>/dev/null").strip
-  if tags.len == 0:
-    echo "  ! No tags found"
-    return ""
-  let lines = tags.splitLines
-  echo "\nAvailable tags:"
-  for i, t in lines:
-    echo "  " & $(i+1) & ". " & t
-  while true:
-    let input = staticExec("read -p 'Enter number (1-" & $lines.len & "): ' input && echo $input").strip
-    let idx = input.parseInt - 1
-    if idx >= 0 and idx < lines.len:
-      return lines[idx]
-    echo "  Invalid selection"
 
 proc buildManpage(version: string) =
   if not dirExists("bin"):
@@ -112,11 +97,6 @@ when isMainModule:
     if p == "--pulse": buildPulse = true
     if p == "--static-linux": buildStaticLinux = true
     if p.startsWith("--tag:"): forcedTag = p[6..^1]
-    elif p == "--tag":
-      if i < paramCount() - 1:
-        forcedTag = paramStr(i+2)  # next arg is tag value
-      else:
-        forcedTag = selectTagInteractive()
   if not buildTui and not buildDmd:
     buildTui = true
     buildDmd = true
@@ -142,7 +122,6 @@ when isMainModule:
   else:
     discard checkCmd("gcc", "gcc --version 2>/dev/null | head -1")
     discard checkCmd("dbus-1", "pkg-config --modversion dbus-1 2>/dev/null")
-    discard checkCmd("viu", "viu --version 2>/dev/null")
   echo ""
 
   echo "-- Shell Completions --"
