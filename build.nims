@@ -33,7 +33,6 @@ proc detectVersion: string =
     result = clean & dirty
   else:
     result = staticExec("git rev-parse --short=7 HEAD 2>/dev/null").strip
-  if result.len == 0: result = "0.0.0-dev"
 
 
 proc buildManpage(version: string) =
@@ -78,7 +77,7 @@ proc buildBinary(src, label: string, version: string, musl: bool = false, androi
 
   echo ""
 
-  echo "-- Git Hooks --"
+  echo "-- Git Hooks 🪝  --"
   sh("git config core.hooksPath .githooks")
 
 when isMainModule:
@@ -96,13 +95,12 @@ when isMainModule:
     if p == "--android": buildAndroid = true
     if p == "--pulse": buildPulse = true
     if p == "--static-linux": buildStaticLinux = true
-    if p.startsWith("--tag:"): forcedTag = p[6..^1]
   if not buildTui and not buildDmd:
     buildTui = true
     buildDmd = true
 
   let version = detectVersion()
-  echo "  Version: " & version
+  echo "  Version: " & version & " 💽"
   if buildMusl: echo "  Target: musl (static)"
   if buildAndroid: echo "  Target: android (static)"
   if buildPulse: echo "  PulseAudio: enabled"
@@ -111,10 +109,8 @@ when isMainModule:
 
   echo "-- Prerequisites 📝  --"
   discard checkCmd("nim", "nim --version 2>/dev/null | head -1")
-  if buildAndroid:
-    discard  # Android (Termux/NDK) uses different toolchain
-  elif buildStaticLinux:
-    discard
+  if buildAndroid or buildStaticLinux:
+    discard  
   else:
     discard checkCmd("gcc", "gcc --version 2>/dev/null | head -1")
     discard checkCmd("dbus-1", "pkg-config --modversion dbus-1 2>/dev/null")
@@ -130,14 +126,14 @@ when isMainModule:
     buildManpage(version)
   echo ""
 
-  echo "-- Build --"
+  echo "-- Build 🧱 --"
   if buildDmd:
     buildBinary(GTMD_SRC, "gtmd", version, musl = buildMusl, android = buildAndroid, staticLinux = buildStaticLinux, pulse = buildPulse)
   if buildTui:
     buildBinary(GTM_SRC, "gtm", version, musl = buildMusl, android = buildAndroid, staticLinux = buildStaticLinux, pulse = buildPulse)
   echo ""
 
-  echo "-- Summary --"
+  echo "-- Summary 📓 --"
   if fileExists("bin/gtm"):
     echo "  bin/gtm:  " & staticExec("ls -lh bin/gtm 2>/dev/null | cut -d' ' -f5").strip
   if fileExists("bin/gtmd"):
