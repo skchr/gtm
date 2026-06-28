@@ -101,10 +101,6 @@ when isMainModule:
     buildTui = true
     buildDmd = true
 
-  echo ""
-  echo "build gtm"
-  echo ""
-
   let version = detectVersion()
   echo "  Version: " & version
   if buildMusl: echo "  Target: musl (static)"
@@ -113,7 +109,7 @@ when isMainModule:
   if buildStaticLinux: echo "  Target: linux (static FFmpeg)"
   echo ""
 
-  echo "-- Prerequisites --"
+  echo "-- Prerequisites 📝  --"
   discard checkCmd("nim", "nim --version 2>/dev/null | head -1")
   if buildAndroid:
     discard  # Android (Termux/NDK) uses different toolchain
@@ -124,12 +120,12 @@ when isMainModule:
     discard checkCmd("dbus-1", "pkg-config --modversion dbus-1 2>/dev/null")
   echo ""
 
-  echo "-- Shell Completions --"
+  echo "-- Shell Completions 🐚  --"
   if not buildAndroid:
     sh("nim r tools/gencompletions.nim completions")
   echo ""
 
-  echo "-- Manpage --"
+  echo "-- Manpage 📜 --"
   if not buildAndroid:
     buildManpage(version)
   echo ""
