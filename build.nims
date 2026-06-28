@@ -135,8 +135,8 @@ when isMainModule:
 
   echo "-- Summary 📓 --"
   if fileExists("bin/gtm"):
-    echo "  bin/gtm:  " & staticExec("ls -lh bin/gtm 2>/dev/null | cut -d' ' -f5").strip
+    echo "  bin/gtm: 📻 " & staticExec("ls -lh bin/gtm 2>/dev/null | cut -d' ' -f5").strip
   if fileExists("bin/gtmd"):
-    echo "  bin/gtmd: " & staticExec("ls -lh bin/gtmd 2>/dev/null | cut -d' ' -f5").strip
+    echo "  bin/gtmd: 👻 " & staticExec("ls -lh bin/gtmd 2>/dev/null | cut -d' ' -f5").strip
   if fileExists(MAN_DST):
     echo "  " & MAN_DST & ": " & staticExec("ls -lh " & MAN_DST & " 2>/dev/null | cut -d' ' -f5").strip
