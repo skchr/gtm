@@ -3112,6 +3112,10 @@ proc runTui(args: seq[string]) =
             except: discard
           ctx.state.startupPhase = spSpotifySync
         of spSpotifySync:
+          if ctx.state.libraryNeedsScan and ctx.state.libraryTracks.len == 0:
+            # Defer spReady until library scan completes
+            ctx.state.needsRedraw = true
+            break
           if ctx.data.service.isConnected:
             try:
               let spResp = ctx.data.service.spListDownloads()

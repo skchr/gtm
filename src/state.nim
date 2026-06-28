@@ -517,7 +517,8 @@ type
     hoverDismissAt*: float
 
 const
-  CoverCacheMaxSize* = 100
+  CoverCacheMaxSize* = 20
+  CoverCacheMaxMemory* = 10_485_760  # 10MB raw image data limit
 
 const
   GTM_VERSION* {.strdefine.} = staticExec("git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//'").strip
@@ -673,8 +674,12 @@ template isDirty*(state: AppState, event: ChangeEvent): bool =
   event in state.dirtyFlags
 
 proc ensureCoverCacheFit*(state: var AppState) =
-  while state.coverCache.len > CoverCacheMaxSize and state.coverCacheOrder.len > 0:
+  var totalBytes = 0
+  for k in state.coverCacheOrder:
+    totalBytes += state.coverCache.getOrDefault(k).data.len
+  while (state.coverCache.len > CoverCacheMaxSize or totalBytes > CoverCacheMaxMemory) and state.coverCacheOrder.len > 0:
     let oldest = state.coverCacheOrder[0]
+    totalBytes -= state.coverCache.getOrDefault(oldest).data.len
     state.coverCacheOrder.delete(0)
     state.coverCache.del(oldest)
 

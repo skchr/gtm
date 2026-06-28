@@ -159,6 +159,8 @@ type
     crossfadeConsumed: bool
     autoAdvancing*: bool
     pendingAdvance*: bool
+    pendingLoadFile: bool
+    wasPaused: bool
     lastConsumedFromQueue: seq[string]
     upNextSent: bool
     spatialWidth*: float
@@ -1109,7 +1111,7 @@ proc execQueue(d: Daemon, cmd: DaemonCmd): JsonNode =
         result["queue_length"] = %d.playbackQueue.len
         d.regenShuffleIfNeeded()
         d.sendQueueEvent()
-        if d.playerState == 0 and d.playbackQueue.len > 0:
+        if d.playerState == 0 and d.playbackQueue.len > 0 and not d.pendingLoadFile and not d.pendingLoadYtActive:
           handleAutoAdvance(d)
       except: stderr.writeLine("[gtm] queueAdd error: " & getCurrentExceptionMsg())
   of dckQueueRemove:
@@ -1534,8 +1536,17 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     if d.pendingLoadYtActive:
       d.pendingPlayAfterYtLoad = true
       result = %*{"ok": true, "deferred": true}
-    elif d.currentTrackPath.len > 0 and d.playerState == 0 and d.playerDuration == 0.0:
+    elif d.wasPaused and d.playerState == 2:
+      # Resuming from pause — just play, don't reload
+      d.wasPaused = false
+      acquire(d.lock)
+      d.pendingActions.add(PulseAction(kind: pakPlay))
+      release(d.lock)
+      result = %*{"ok": true}
+    elif d.playerState == 0 and d.currentTrackPath.len > 0:
       # No file loaded yet — load the restored track so Space resumes playback
+      d.wasPaused = false
+      d.pendingLoadFile = true
       acquire(d.lock)
       d.pendingActions.add(PulseAction(kind: pakLoadFile, strVal: d.currentTrackPath,
         strVal2: d.currentTrackTitle, strVal3: d.currentTrackChannel))
@@ -1544,18 +1555,21 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
       release(d.lock)
       result = %*{"ok": true}
     else:
+      d.wasPaused = false
       acquire(d.lock)
       d.pendingActions.add(PulseAction(kind: pakPlay))
       release(d.lock)
       result = %*{"ok": true}
   of dckPause:
     if d.player == nil: return %*{"ok": false, "error": "no audio backend"}
+    d.wasPaused = true
     acquire(d.lock)
     d.pendingActions.add(PulseAction(kind: pakPause))
     release(d.lock)
     result = %*{"ok": true}
   of dckTogglePause:
     if d.player == nil: return %*{"ok": false, "error": "no audio backend"}
+    d.wasPaused = d.playerState != 2
     acquire(d.lock)
     d.pendingActions.add(PulseAction(kind: pakTogglePause))
     release(d.lock)
@@ -1623,6 +1637,7 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
       d.playbackQueue.setLen(0)
       d.shuffleIndex = 0
       d.shuffleOrder.setLen(0)
+      d.pendingLoadFile = true
       acquire(d.lock)
       d.pendingActions.add(PulseAction(kind: pakLoadFile, strVal: loadPath, strVal2: cmd.strArg2, strVal3: cmd.strArg3))
       release(d.lock)
@@ -1884,7 +1899,7 @@ proc trySend(client: Socket, data: string): bool =
     else:
       let err = osLastError()
       if err.int32 == 11 or err.int32 == 10035: # EAGAIN / EWOULDBLOCK
-        return true   # buffer full — retry next frame, don't disconnect
+        return true   # partial send is OK, remaining data is lost in non-blocking mode
       elif err.int32 == 4: # EINTR
         continue
       elif err.int32 == 104: # ECONNRESET
@@ -1997,6 +2012,7 @@ proc runPulseWorker(d: ptr Daemon) {.thread.} =
           d[].currentTrackPath = path
           d[].currentTrackTitle = title
           d[].currentTrackChannel = channel
+          d[].pendingLoadFile = false
           release(d.lock)
       of pakSetVolume:
         player.setVolume(a.intVal)
@@ -2131,11 +2147,14 @@ proc runPulseWorker(d: ptr Daemon) {.thread.} =
     let flags = player.getStatusFlags()
     d.playerCrossfading = flags.crossfading
     d.playerMasterEnded = flags.masterEnded
-    # During crossfade after master ends, derive slave position
-    if d.playerCrossfading and d.playerMasterEnded and d.playerDuration > 0:
-      let slavePos = d.playerTimePos - d.playerDuration
-      d.playerTimePos = max(0.0, slavePos)
-      d.playerDuration = 0.0  # unknown until daemon sets it
+    # During crossfade after master ends, derive slave position from current audio time
+    if d.playerCrossfading and d.playerMasterEnded:
+      if d.playerDuration > 0:
+        let slavePos = d.playerTimePos - d.playerDuration
+        d.playerTimePos = max(0.0, slavePos)
+      # Keep player.duration — after promotion it reflects the new track's duration
+      if player.duration > 0:
+        d.playerDuration = player.duration
     d.playerAudioWorking = player.working
     d.playerTitle = player.metadata.title
     d.playerArtist = player.metadata.artist
@@ -2182,12 +2201,23 @@ proc handleAutoAdvance(d: Daemon) =
   ## Called when a track ends. Pops next from queue and queues a pakLoadFile action.
   ## During crossfade, the mixer auto-promotes slave to master — skip pakLoadFile
   ## to avoid restarting the already-promoted track.
-  if d.crossfadeStarted and d.playerCrossfading and d.playerState == 1:
+  if d.pendingLoadFile:
+    d.autoAdvancing = false
+    return
+  # Crossfade auto-promotion: after crossfade, slave becomes master
+  if d.crossfadeStarted:
+    d.autoAdvancing = false
     d.crossfadeStarted = false
     d.crossfadePrepared = false
-    d.crossfadeNextPath = ""
     d.crossfadeConsumed = false
-    d.autoAdvancing = false
+    # Update currentTrackPath to the crossfaded (now promoted) track
+    if d.crossfadeNextPath.len > 0:
+      d.currentTrackPath = d.crossfadeNextPath
+      let meta = resolveTrackMetadata(d, d.crossfadeNextPath)
+      if meta.title.len > 0:
+        d.currentTrackTitle = meta.title
+        d.currentTrackChannel = meta.channel
+    d.crossfadeNextPath = ""
     d.sendQueueEvent()
     d.pushFullState()
     return
@@ -2246,6 +2276,7 @@ proc handleAutoAdvance(d: Daemon) =
       release(d.lock)
     acquire(d.lock)
     d.pendingAdvance = true
+    d.pendingLoadFile = true
     d.pendingActions.add(PulseAction(kind: pakLoadFile, strVal: loadPath, strVal2: nextTitle, strVal3: nextChannel))
     d.currentTrackPath = loadPath
     d.currentTrackTitle = nextTitle
@@ -2859,9 +2890,15 @@ proc runDaemon*() =
             daemon.pendingActions.add(PulseAction(kind: pakStartCrossfade, floatVal: float(daemon.crossfadeDuration)))
             release(daemon.lock)
             daemon.crossfadeStarted = true
+            # Update currentTrackPath to the crossfaded track so state sync is correct
+            daemon.currentTrackPath = nextQueuedPath
+            let meta = resolveTrackMetadata(daemon, nextQueuedPath)
+            if meta.title.len > 0:
+              daemon.currentTrackTitle = meta.title
+              daemon.currentTrackChannel = meta.channel
 
     # --- Retry advance: player stopped but queue has items ---
-    if not daemon.pendingAdvance and daemon.currentTrackPath.len > 0 and daemon.playerState == 0 and daemon.playbackQueue.len > 0:
+    if not daemon.pendingAdvance and not daemon.pendingLoadFile and not daemon.pendingLoadYtActive and daemon.currentTrackPath.len > 0 and daemon.playerState == 0 and daemon.playbackQueue.len > 0:
       handleAutoAdvance(daemon)
 
     # --- Sleep timer ---
