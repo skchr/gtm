@@ -1389,8 +1389,8 @@ method render*(node: GenericOverlay, ctx: var nw.Context[State]) =
       let lineY = curY + i
       if lineY >= boxY + boxH - 1: break
       let r = ov.ytResults[ri]
-      let isSelected = (i == ov.cursor)
-      let isMarked = i in ov.selected
+      let isSelected = (ri == ov.cursor)
+      let isMarked = ri in ov.selected
       let isPlaylistResult = r.kind == srkPlaylist
       # Show playlist entry after 5 songs
       if isPlaylistResult and videoCount >= 5 and not isSelected:
@@ -1605,7 +1605,7 @@ method render*(node: GenericOverlay, ctx: var nw.Context[State]) =
       let lineY = curY + i
       if lineY >= boxY + boxH - 1: break
       let tIdx = queue[qi]
-      let isSelected = (i == ov.cursor)
+      let isSelected = (qi == ov.cursor)
       let t = if tIdx >= 0 and tIdx < ctx.state.libraryTracks.len: ctx.state.libraryTracks[tIdx] else: Track()
       let isNowPlaying = i == 0 and ctx.state.status in {psPlaying, psPaused}
       let ovRowBg = if isSelected: theme.surface2 else: theme.surface0

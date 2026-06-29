@@ -265,6 +265,20 @@ proc getCoverArt*(svc: DaemonService, path: string): tuple[data: seq[byte], mime
     except: discard
   (@[], "")
 
+proc preloadCoverArt*(svc: DaemonService) =
+  svc.session.send(%*{"cmd": "preload_cover_art"})
+
+proc searchCoverArtWeb*(svc: DaemonService, artist, album, title: string): tuple[data: seq[byte], mime: string] =
+  if svc.session == nil: return (@[], "")
+  let resp = svc.session.request(%*{"cmd": "search_cover_art", "artist": artist, "album": album, "title": title})
+  if resp.hasKey("cover_data") and resp["cover_data"].getStr("").len > 0:
+    try:
+      let mime = resp{"cover_mime"}.getStr("image/jpeg")
+      let decoded = decode(resp["cover_data"].getStr(""))
+      return (cast[seq[byte]](decoded), mime)
+    except: discard
+  (@[], "")
+
 proc requestLyrics*(svc: DaemonService, path, title, artist: string, duration: float) =
   svc.session.send(%*{"cmd": "request_lyrics",
     "path": path, "title": title,

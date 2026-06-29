@@ -26,7 +26,7 @@
 ## │  └────────────────────────────────────────────┘      │
 ## └──────────────────────────────────────────────────────┘
 
-import os, strutils, sequtils, algorithm, sets, tables, times
+import os, strutils, sequtils, algorithm, sets, tables, times, base64
 import state, theme
 
 when defined(useSqlite):
@@ -210,6 +210,15 @@ when defined(useSqlite):
       CREATE TABLE IF NOT EXISTS lyrics_cache (
         track_path TEXT PRIMARY KEY,
         lyrics TEXT NOT NULL,
+        cached_at TEXT DEFAULT (datetime('now'))
+      )
+    """)
+    discard execRaw(lib.db, """
+      CREATE TABLE IF NOT EXISTS cover_art_cache (
+        cache_key TEXT PRIMARY KEY,
+        cover_data BLOB NOT NULL,
+        cover_mime TEXT DEFAULT 'image/jpeg',
+        source TEXT DEFAULT '',
         cached_at TEXT DEFAULT (datetime('now'))
       )
     """)
@@ -637,6 +646,44 @@ when defined(useSqlite):
         result = colText(stmt, 0.cint)
       finalize(stmt)
 
+  proc cacheCoverArt*(lib: LibraryDb, cacheKey: string, data: seq[byte], mime, source: string) =
+    let stmt = prepare(lib.db, "INSERT OR REPLACE INTO cover_art_cache (cache_key, cover_data, cover_mime, source) VALUES (?, ?, ?, ?)")
+    if stmt == nil: return
+    bindText(stmt, 1.cint, cacheKey)
+    bindText(stmt, 2.cint, encode(data))
+    bindText(stmt, 3.cint, mime)
+    bindText(stmt, 4.cint, source)
+    discard sqlite3_step(stmt)
+    finalize(stmt)
+
+  proc loadCachedCover*(lib: LibraryDb, cacheKey: string): tuple[data: seq[byte], mime, source: string] =
+    let stmt = prepare(lib.db, "SELECT cover_data, cover_mime, source FROM cover_art_cache WHERE cache_key = ?")
+    if stmt == nil: return
+    bindText(stmt, 1.cint, cacheKey)
+    if sqlite3_step(stmt) == SQLITE_ROW:
+      let encoded = colText(stmt, 0.cint)
+      if encoded.len > 0:
+        try:
+          result.data = cast[seq[byte]](decode(encoded))
+        except: discard
+      result.mime = colText(stmt, 1.cint)
+      result.source = colText(stmt, 2.cint)
+    finalize(stmt)
+
+  proc loadAllCoverCacheKeys*(lib: LibraryDb): seq[string] =
+    let stmt = prepare(lib.db, "SELECT cache_key FROM cover_art_cache")
+    if stmt == nil: return
+    while sqlite3_step(stmt) == SQLITE_ROW:
+      result.add(colText(stmt, 0.cint))
+    finalize(stmt)
+
+  proc deleteCoverCacheEntry*(lib: LibraryDb, cacheKey: string) =
+    let stmt = prepare(lib.db, "DELETE FROM cover_art_cache WHERE cache_key = ?")
+    if stmt == nil: return
+    bindText(stmt, 1.cint, cacheKey)
+    discard sqlite3_step(stmt)
+    finalize(stmt)
+
   proc closeDb*(lib: LibraryDb) =
     if lib != nil and lib.db != nil:
       discard sqlite3_close(lib.db)
@@ -686,6 +733,16 @@ else:
   proc deleteTrack*(lib: LibraryDb, trackId: int64) = discard
   proc getTrackPath*(lib: LibraryDb, trackId: int64): string = ""
   proc getTrashPath*(lib: LibraryDb, trashId: int): string = ""
+  proc cacheCoverArt*(lib: LibraryDb, cacheKey: string, data: seq[byte], mime, source: string) = discard
+  proc loadCachedCover*(lib: LibraryDb, cacheKey: string): tuple[data: seq[byte], mime, source: string] = (@[], "", "")
+  proc loadAllCoverCacheKeys*(lib: LibraryDb): seq[string] = @[]
+  proc deleteCoverCacheEntry*(lib: LibraryDb, cacheKey: string) = discard
+
+proc makeCoverCacheKey*(artist, album: string): string =
+  if album.len > 0 and album != "Unknown Album":
+    result = artist.toLowerAscii & "::" & album.toLowerAscii
+  else:
+    result = artist.toLowerAscii
 
 proc displayName*(track: Track): string =
   if track.title.len > 0: track.title

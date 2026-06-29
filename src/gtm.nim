@@ -283,6 +283,7 @@ proc loadLibrary(state: var AppState) =
       let resp = cli.getLibrary()
       if resp.hasKey("tracks") and resp["tracks"].len > 0:
         state.loadLibraryFromDaemon(resp)
+        cli.preloadCoverArt
         state.libraryLoading = false
         return
       # Daemon library empty: trigger server-side scan, then wait for scan_done event
@@ -294,6 +295,8 @@ proc loadLibrary(state: var AppState) =
   state.scanLocalDir(musicDir)
   state.rebuildItems()
   state.libraryLoading = false
+
+const maxLibraryRetries = 60
 
 proc retryLoadLibrary(state: var AppState) =
   if not state.libraryLoading or not state.libraryNeedsScan:
@@ -307,13 +310,18 @@ proc retryLoadLibrary(state: var AppState) =
     return
   state.libraryLastRetryAt = now
   state.libraryRetryCount.inc
-  # Wait for scan_done event instead of polling — don't clear needsScan on timeout
+  if state.libraryRetryCount >= maxLibraryRetries:
+    state.libraryLoading = false
+    state.libraryNeedsScan = false
+    state.libraryRetryCount = 0
+    return
   if state.player.backendType == abtDaemon:
     let cli = DaemonService(state.svc)
     if cli.isConnected:
       let resp = cli.getLibrary()
       if resp.hasKey("tracks") and resp["tracks"].len > 0:
         state.loadLibraryFromDaemon(resp)
+        cli.preloadCoverArt
         state.libraryLoading = false
         state.libraryNeedsScan = false
         state.libraryRetryCount = 0
@@ -1816,7 +1824,8 @@ proc handleCommandPaletteOverlay(state: var AppState, key: iw.Key, chars: seq[Ru
       if fuzzyMatch(state.overlay.query, cmd.name) or
          fuzzyMatch(state.overlay.query, cmd.description):
         state.overlay.results.add(i)
-    state.overlay.cursor = 0
+    if state.overlay.cursor >= state.overlay.results.len:
+      state.overlay.cursor = 0
   elif true:
     state.overlay.results = @[]
     for i in 0..<state.commands.len:
@@ -2222,6 +2231,10 @@ proc handleMainKey(state: var AppState, key: iw.Key, chars: seq[Rune]) =
           discard daemonSimpleCmd(DaemonService(state.svc), "next")
         else:
           discard DaemonService(state.svc).queuePlayIndex(qIdx)
+          # Sync local queue to daemon's truncated state immediately
+          state.playbackQueue = state.playbackQueue[qIdx..^1]
+          if qIdx < state.queuePaths.len:
+            state.queuePaths = state.queuePaths[qIdx..^1]
         state.markDirty(cePlayState)
     elif state.tab != tabSettings and state.selectedIndices.len > 0:
       state.playSelected()
@@ -2950,10 +2963,17 @@ proc processEvents(state: var AppState) =
           let resp = cli.getLibrary()
           if resp.hasKey("tracks") and resp["tracks"].len > 0:
             state.loadLibraryFromDaemon(resp)
+          cli.preloadCoverArt
         state.libraryLoading = false
         state.libraryRetryCount = 0
         state.rebuildItems()
         state.markDirty(ceSearchResults)
+      elif ev.strVal == "cover_preload_done":
+        try:
+          let total = ev.metadata.getOrDefault("total", "0")
+          let fetched = ev.metadata.getOrDefault("fetched", "0")
+          state.setFeedback("Cover art preload complete: " & fetched & " fetched, " & total & " albums")
+        except: discard
     else: discard
   if state.player.timePos != state.timePos and state.status == psPlaying:
     state.timePos = state.player.timePos
@@ -3113,9 +3133,10 @@ proc runTui(args: seq[string]) =
           ctx.state.startupPhase = spSpotifySync
         of spSpotifySync:
           if ctx.state.libraryNeedsScan and ctx.state.libraryTracks.len == 0:
-            # Defer spReady until library scan completes
-            ctx.state.needsRedraw = true
-            break
+            if ctx.state.libraryRetryCount < maxLibraryRetries:
+              ctx.state.needsRedraw = true
+              break
+            # Timeout exceeded — proceed with empty library
           if ctx.data.service.isConnected:
             try:
               let spResp = ctx.data.service.spListDownloads()
@@ -3140,8 +3161,8 @@ proc runTui(args: seq[string]) =
           ctx.state.startupPhase = spReady
           ctx.state.needsRedraw = true
         else: discard
-      retryLoadLibrary(ctx.state)
       processEvents(ctx.state)
+      retryLoadLibrary(ctx.state)
       # Periodic library poll (every ~2 seconds) — detect changes from daemon mutations
       if ctx.state.startupPhase == spReady and ctx.state.player.backendType == abtDaemon and ctx.state.libraryTracks.len > 0:
         let now = epochTime()

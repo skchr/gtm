@@ -30,10 +30,10 @@
 ## │  Every poll: write queued events → each client   │
 ## └──────────────────────────────────────────────────┘
 
-import os, json, strutils, net, posix, random, osproc, times, base64, locks, uri, tables, httpclient, streams
+import os, json, strutils, net, posix, random, osproc, times, base64, locks, uri, tables, sets, httpclient, streams
 from nativesockets import setBlocking, selectRead, SocketHandle
 from std/typedthreads import Thread, createThread, joinThread
-import audio, state, library, ytdlp, lyrics, spotify, wire
+import audio, state, library, ytdlp, lyrics, spotify, wire, coverart
 when not defined(macosx):
   proc prctl(option: cint, arg2: cstring): cint {.importc, header: "<sys/prctl.h>".}
 else:
@@ -61,7 +61,7 @@ type
     pakPrev, pakLoadFile, pakSetVolume, pakPrepareNext,
     pakStartCrossfade, pakSetEqBand, pakSetEqPreset, pakSetSpatialWidth,
     pakSetCrossfadeCurve, pakShutdown, pakResolveYtStream,
-    pakFetchLyrics, pakSearchLyrics, pakIdentifySong
+    pakFetchLyrics, pakSearchLyrics, pakIdentifySong, pakPreloadCovers
 
   PulseAction* = object
     kind*: PulseActionKind
@@ -97,7 +97,8 @@ type
     dckSetSpatialWidth,
     dckPing,
     dckDeleteTrack, dckRestoreTrack, dckPermanentDelete, dckListTrash, dckPurgeTrash,
-    dckRequestCoverArt, dckRequestLyrics, dckIdentifySong,
+    dckRequestCoverArt, dckSearchCoverArt, dckPreloadCovers,
+    dckRequestLyrics, dckIdentifySong,
     dckQueuePlayIndex, dckGetLibraryVersion
 
   DaemonCmd* = object
@@ -237,6 +238,8 @@ type
     pwSearchLyricsDone: bool      # PulseWorker → main: search ready flag
     pwIdentifyResult: string      # PulseWorker → main: song identification result
     pwIdentifyDone: bool
+    pwPreloadResult: string       # PulseWorker → main: cover preload result
+    pwPreloadDone: bool
     ytDownloadTasks: seq[DownloadTask]
     ytActiveDownloads: int
     ytLastCompletedPath: string
@@ -451,6 +454,11 @@ proc parseDaemonCommand(line: string): DaemonCmd =
       result.kind = dckPurgeTrash
     of "request_cover_art":
       result.kind = dckRequestCoverArt; result.strArg = j{"path"}.getStr("")
+    of "search_cover_art":
+      result.kind = dckSearchCoverArt; result.strArg = j{"artist"}.getStr("")
+      result.strArg2 = j{"album"}.getStr(""); result.strArg3 = j{"title"}.getStr("")
+    of "preload_cover_art":
+      result.kind = dckPreloadCovers
     of "request_lyrics":
       result.kind = dckRequestLyrics; result.strArg = j{"path"}.getStr("")
       result.strArg2 = j{"title"}.getStr(""); result.strArg3 = j{"artist"}.getStr("")
@@ -1457,7 +1465,7 @@ proc execSpotify(d: Daemon, cmd: DaemonCmd): JsonNode =
       result["connected"] = %false
   else: discard
 
-proc execCoverLyrics(d: Daemon, cmd: DaemonCmd): JsonNode =
+proc execCoverArt(d: Daemon, cmd: DaemonCmd): JsonNode =
   result = %*{"ok": true}
   case cmd.kind
   of dckGetCoverArt:
@@ -1468,6 +1476,45 @@ proc execCoverLyrics(d: Daemon, cmd: DaemonCmd): JsonNode =
         result["cover_mime"] = %coverMime
     else:
       result["cover_data"] = %""
+  of dckSearchCoverArt:
+    let artist = cmd.strArg
+    let album = cmd.strArg2
+    let title = cmd.strArg3
+    if d.lib != nil:
+      let cacheKey = makeCoverCacheKey(artist, album)
+      if cacheKey.len > 0:
+        let cached = d.lib.loadCachedCover(cacheKey)
+        if cached.data.len > 0:
+          result["cover_data"] = %encode(cached.data)
+          result["cover_mime"] = %cached.mime
+          result["source"] = %cached.source
+          return
+    let (coverData, coverMime) = resolveCoverWeb(artist, album, title)
+    if coverData.len > 0:
+      result["cover_data"] = %encode(coverData)
+      result["cover_mime"] = %coverMime
+      result["source"] = %"deezer"
+      if d.lib != nil:
+        let cacheKey = makeCoverCacheKey(artist, album)
+        d.lib.cacheCoverArt(cacheKey, coverData, coverMime, "deezer")
+    else:
+      result["cover_found"] = %false
+  of dckPreloadCovers:
+    if d.lib != nil:
+      acquire(d.lock)
+      d.pendingActions.add(PulseAction(kind: pakPreloadCovers))
+      release(d.lock)
+      result["pending"] = %true
+    else:
+      result["ok"] = %false
+      result["error"] = %"no library"
+  else: discard
+
+proc execCoverLyrics(d: Daemon, cmd: DaemonCmd): JsonNode =
+  result = %*{"ok": true}
+  case cmd.kind
+  of dckGetCoverArt, dckSearchCoverArt, dckPreloadCovers:
+    result = execCoverArt(d, cmd)
   of dckGetLyrics:
     # Queue to PulseWorker — response will arrive via lyrics_sync event
     # Return immediately with empty results
@@ -1486,6 +1533,18 @@ proc execCoverLyrics(d: Daemon, cmd: DaemonCmd): JsonNode =
       if coverData.len > 0:
         ev["events"][0]["cover_data"] = %encode(coverData)
         ev["events"][0]["cover_mime"] = %coverMime
+        d.broadcastJson(ev)
+        return
+      if d.lib != nil:
+        let trackInfo = d.lib.getTrackByPath(cmd.strArg)
+        let cacheKey = makeCoverCacheKey(trackInfo.artist, trackInfo.album)
+        if cacheKey.len > 0:
+          let cached = d.lib.loadCachedCover(cacheKey)
+          if cached.data.len > 0:
+            ev["events"][0]["cover_data"] = %encode(cached.data)
+            ev["events"][0]["cover_mime"] = %cached.mime
+            d.broadcastJson(ev)
+            return
     d.broadcastJson(ev)
   of dckRequestLyrics:
     # Queue to PulseWorker — async, broadcasts lyrics_sync when done
@@ -1878,7 +1937,7 @@ proc executeCommand(d: Daemon, cmd: DaemonCmd): JsonNode =
     result = execYoutube(d, cmd)
   of dckSpSetConfig, dckSpListDownloads, dckSpOAuthUrl, dckSpOAuthCallback, dckSpFeed, dckSpDisconnect, dckSpSearch, dckSpLikedSongs:
     result = execSpotify(d, cmd)
-  of dckGetCoverArt, dckGetLyrics, dckRequestCoverArt, dckRequestLyrics, dckSearchLyrics, dckIdentifySong:
+  of dckGetCoverArt, dckGetLyrics, dckSearchCoverArt, dckPreloadCovers, dckRequestCoverArt, dckRequestLyrics, dckSearchLyrics, dckIdentifySong:
     result = execCoverLyrics(d, cmd)
   of dckScan:
     result = execScan(d, cmd)
@@ -2130,6 +2189,30 @@ proc runPulseWorker(d: ptr Daemon) {.thread.} =
         d[].pwIdentifyResult = $identJson
         d[].pwIdentifyDone = true
         release(d.lock)
+      of pakPreloadCovers:
+        if d[].lib != nil:
+          let tracks = d[].lib.loadTracks()
+          var seen = initHashSet[string]()
+          var total = 0; var cached = 0; var fetched = 0
+          for t in tracks:
+            let key = makeCoverCacheKey(t.artist, t.album)
+            if key.len == 0 or key in seen: continue
+            seen.incl(key)
+            total.inc
+            let existing = d[].lib.loadCachedCover(key)
+            if existing.data.len > 0:
+              cached.inc
+              continue
+            let (coverData, coverMime) = resolveCoverWeb(t.artist, t.album, t.title)
+            if coverData.len > 0:
+              d[].lib.cacheCoverArt(key, coverData, coverMime, "deezer")
+              fetched.inc
+          let doneEv = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "cover_preload_done",
+            "total": %total, "cached": %cached, "fetched": %fetched}]}
+          acquire(d.lock)
+          d[].pwPreloadResult = $doneEv
+          d[].pwPreloadDone = true
+          release(d.lock)
       of pakShutdown:
         return
       of pakNone, pakPrev:
@@ -2819,6 +2902,16 @@ proc runDaemon*() =
         discard
       daemon.pwIdentifyResult = ""
 
+    # PulseWorker-completed cover preload — broadcast event to clients
+    if daemon.pwPreloadDone:
+      daemon.pwPreloadDone = false
+      try:
+        let preloadJson = parseJson(daemon.pwPreloadResult)
+        daemon.broadcastJson(preloadJson)
+      except:
+        discard
+      daemon.pwPreloadResult = ""
+
     # Background scan: process up to 10 files per iteration
     if daemon.scanningDir.len > 0 and daemon.scanningFiles.len > 0:
       let batchEnd = min(daemon.scanningIdx + 10, daemon.scanningFiles.len)
@@ -2860,9 +2953,13 @@ proc runDaemon*() =
         if timeRemaining <= 8.0 and timeRemaining > 0.0:
           daemon.upNextSent = true
           var nextTitle = ""; var nextChannel = ""
-          if isYtWatchUrl(nextQueuedPath) and daemon.lib != nil:
-            let meta = daemon.lib.getDownloadMetaByUrl(nextQueuedPath)
-            nextTitle = meta.title; nextChannel = meta.channel
+          if daemon.lib != nil:
+            if isYtWatchUrl(nextQueuedPath):
+              let meta = daemon.lib.getDownloadMetaByUrl(nextQueuedPath)
+              nextTitle = meta.title; nextChannel = meta.channel
+            else:
+              let (t, c) = resolveTrackMetadata(daemon, nextQueuedPath)
+              nextTitle = t; nextChannel = c
           let ev = %*{"events": [%*{"kind": %evCustomEvent.int, "event": "up_next",
             "next_path": %nextQueuedPath, "next_title": %nextTitle, "next_channel": %nextChannel}]}
           daemon.broadcastJson(ev)
